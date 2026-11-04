@@ -429,7 +429,8 @@ pub struct SelectionState {
     pub phase: SelectionPhase,
     pub anchor: PhysicalPoint,
     pub start_rect: PhysicalRect,
-    pub rect: PhysicalRect,
+    pub rect: PhysicalRect,          // 用户拖拽/调整得到的选区，不含悬停高亮
+    pub hover_rect: PhysicalRect,    // 当前悬停命中的窗口候选，仅用于高亮/单击采用
     pub active: Option<Handle>,
 }
 
@@ -440,6 +441,7 @@ impl SelectionState {
     pub fn on_mouse_up(&mut self);
     pub fn on_key(&mut self, key: Key, shift: bool, candidates: &[PhysicalRect]);
     pub fn on_wheel(&mut self, delta: i32);
+    pub fn hovered_rect(&self) -> Option<PhysicalRect>;
     pub fn commit(&mut self) -> Option<PhysicalRect>;
     pub fn cancel(&mut self);
 }
@@ -459,8 +461,9 @@ pub fn clamp_to_virtual_screen(rect: PhysicalRect, displays: &[DisplayInfo]) -> 
 - `Dragging`：从 anchor 到当前点 `from_points`；小于 10×10 仍显示但提交时取消。
 - `Adjusting`：拖控制点时固定对角/对边；不允许宽高为负；最小 10×10。
 - `Move`：整体平移；保持尺寸。
-- 吸附：距候选窗口边 8 物理 px 内对齐；`Ctrl` 关闭；方向键微调后不吸附。
-- 滚轮：在指针下的窗口链中切换 `HoverWindow`；单击采用窗口边界。
+- 吸附：距候选窗口边 8 物理 px 内对齐；`Ctrl` 关闭；方向键微调后不吸附。`Move` 只做整框平移吸附、不得改变宽高；边/角手柄只吸附被拖动的边，固定边保持不动。
+- 滚轮：在指针下的窗口链中切换 `hover_rect` 并重算高亮；单击（未拖动）采用 `hover_rect` 的窗口边界。
+- `HoverWindow` 的鼠标移动只更新 `hover_rect`，不得覆盖已有 `rect`；取消时清空 `rect` 与 `hover_rect`。
 - `Esc`/右键：任意阶段取消；`Enter`：提交（若有效）。
 
 ## 9. 悬浮球与 OLE 拖放
