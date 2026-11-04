@@ -3,10 +3,14 @@
 //! 数据形状（[`visrecall_domain::capture`]）在 domain 层定义，本 crate 只放 Win32 实现。
 
 pub mod display;
+pub mod grab_gdi;
+pub mod trait_defs;
 
 pub use display::{
     display_for_point, enumerate_displays, normalize_position, set_per_monitor_v2, virtual_bounds,
 };
+pub use grab_gdi::GdiFrameGrabber;
+pub use trait_defs::{FrameGrabber, RawFrame};
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
