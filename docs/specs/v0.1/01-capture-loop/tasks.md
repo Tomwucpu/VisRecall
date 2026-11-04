@@ -804,7 +804,7 @@ git commit -m "feat(shell): add tauri tray single-instance and window lifecycle"
 **Files:**
 - Create: `crates/shell/src/{lib.rs,hotkey.rs}`
 - Modify: `crates/app-core/src/{app.rs,events.rs}`
-- Modify: `src-tauri/src/ipc.rs`（托盘提示热键冲突）
+- Modify: `src-tauri/src/{main.rs,ipc.rs}`（托盘创建后再启动热键；ipc 托盘提示冲突）
 - Test: `crates/shell/tests/hotkey_parse.rs`
 
 **Interfaces:**
