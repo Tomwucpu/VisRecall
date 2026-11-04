@@ -14,6 +14,10 @@ use tauri::Manager;
 static PROCESS_START: OnceLock<Instant> = OnceLock::new();
 
 fn main() {
+    // 必须是第一条语句：在任何窗口/DC 创建前声明 Per-Monitor V2，否则 150% 屏上的
+    // 坐标会被系统虚拟化（design §6）。
+    visrecall_capture::set_per_monitor_v2();
+
     // 尽量贴近进程启动：在任何初始化之前取时间戳。
     let _ = PROCESS_START.set(Instant::now());
     init_logging();

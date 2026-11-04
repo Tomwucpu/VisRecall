@@ -4455,6 +4455,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "visrecall-app-core",
+ "visrecall-capture",
  "visrecall-domain",
 ]
 
@@ -4475,6 +4476,11 @@ dependencies = [
 [[package]]
 name = "visrecall-capture"
 version = "0.1.0"
+dependencies = [
+ "tracing",
+ "visrecall-domain",
+ "windows",
+]
 
 [[package]]
 name = "visrecall-domain"
