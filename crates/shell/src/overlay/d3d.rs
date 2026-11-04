@@ -5,10 +5,16 @@
 //! → `IDXGIDevice` → `IDXGIAdapter` → `IDXGIFactory2`
 //! → `CreateSwapChainForHwnd(B8G8R8A8_UNORM, FLIP_SEQUENTIAL, 2 buffers)`。
 //!
-//! 所有 COM 接口都不 `Send`：调用方必须在创建 [`D3dContext`] 的同一线程里使用它。
+//! 线程约束：D2D 的单线程工厂（[`D2D1_FACTORY_TYPE_SINGLE_THREADED`]）、
+//! `ID2D1DeviceContext` 与 DXGI 交换链都有线程亲和性，必须固定在创建它们的覆盖层线程。
+//! 注意 windows-rs 生成的 COM 接口封装（`ID3D11Device`/`IDXGISwapChain1`/`ID2D1DeviceContext`）
+//! 在 Rust 类型层面**实现了** `Send`，所以“接口不 Send”并不能自动阻止跨线程移动；
+//! 本模块用 `PhantomData<*const ()>` 显式把 [`D3dContext`]/[`SwapChain`] 标成 `!Send`
+//! （`render::Renderer` 同样处理），让编译器替我们守住这条不变量。
 //! 设备/交换链创建失败一律转成 [`AppError::Internal`]，由调用方决定是否降级。
 
 use std::fmt;
+use std::marker::PhantomData;
 
 use tracing::warn;
 use visrecall_domain::AppError;
@@ -47,6 +53,8 @@ pub const BACK_BUFFER_FORMAT: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMA
 ///
 /// 构造失败即认为覆盖层渲染不可用；调用方按 design §7.3 决定降级，
 /// 本类型不做任何静默回退，除硬件失败后尝试 WARP 之外。
+///
+/// `!Send`：见模块文档。设备/立即上下文/交换链只能在覆盖层线程使用。
 pub struct D3dContext {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
@@ -55,6 +63,8 @@ pub struct D3dContext {
     dwrite_factory: IDWriteFactory,
     driver: D3D_DRIVER_TYPE,
     adapter_name: String,
+    /// 显式禁止 `Send`（windows-rs 的 COM 接口封装本身实现了 `Send`）。
+    _not_send: PhantomData<*const ()>,
 }
 
 impl D3dContext {
@@ -101,6 +111,7 @@ impl D3dContext {
             dwrite_factory,
             driver,
             adapter_name,
+            _not_send: PhantomData,
         })
     }
 
@@ -165,6 +176,7 @@ impl D3dContext {
             chain,
             width,
             height,
+            _not_send: PhantomData,
         })
     }
 
@@ -185,11 +197,13 @@ impl D3dContext {
     }
 }
 
-/// 一个窗口的交换链；只允许在创建它的线程上使用。
+/// 一个窗口的交换链；只允许在创建它的线程上使用（`!Send`）。
 pub struct SwapChain {
     chain: IDXGISwapChain1,
     width: u32,
     height: u32,
+    /// 显式禁止 `Send`（windows-rs 的 COM 接口封装本身实现了 `Send`）。
+    _not_send: PhantomData<*const ()>,
 }
 
 impl SwapChain {

@@ -5,7 +5,12 @@
 //! [`Renderer::present`] 负责解除 target 并 `Present(1, 0)`。
 //!
 //! D2D 上下文固定 `SetDpi(96, 96)`，因此 1 DIP = 1 物理像素（design §6）。
+//!
+//! 线程约束：[`Renderer`] 持有交换链与 `ID2D1DeviceContext`，后者出自单线程 D2D
+//! 工厂，具有线程亲和性，因此 [`Renderer`] 显式标记为 `!Send`（见 [`mod@super::d3d`]
+//! 的模块文档）。windows-rs 的 COM 接口封装本身实现了 `Send`，不能靠接口类型兜底。
 
+use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 
 use visrecall_domain::AppError;
@@ -52,6 +57,8 @@ const ACCENT_COLOR: D2D1_COLOR_F = D2D1_COLOR_F {
 };
 
 /// 一个窗口的 D2D 渲染器：持有交换链、D2D 上下文与复用资源。
+///
+/// `!Send`：D2D 单线程工厂创建的设备上下文只能在覆盖层线程使用。
 pub struct Renderer {
     swap: SwapChain,
     context: ID2D1DeviceContext,
@@ -60,6 +67,8 @@ pub struct Renderer {
     text_brush: ID2D1Brush,
     accent_brush: ID2D1Brush,
     frame_index: u64,
+    /// 显式禁止 `Send`（交换链已 `!Send`，这里再写一次以固定不变量）。
+    _not_send: PhantomData<*const ()>,
 }
 
 impl Renderer {
@@ -115,6 +124,7 @@ impl Renderer {
             text_brush,
             accent_brush,
             frame_index: 0,
+            _not_send: PhantomData,
         })
     }
 
