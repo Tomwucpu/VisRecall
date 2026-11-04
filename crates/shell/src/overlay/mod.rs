@@ -12,6 +12,11 @@
 //!
 //! 阶段 01 的 Task 11 只实现冻结帧显示与线程/句柄，不包含选区状态机、输入处理与
 //! 提交回读（Task 12/13）；窗口过程只处理绘制/擦除消息。
+//!
+//! 重绘：冻结帧由 D3D/D2D 直接呈现到交换链，因此 `WM_PAINT` 不能走 GDI 绘制。窗口
+//! 过程在 `WM_PAINT`/`WM_DISPLAYCHANGE`/`WM_DPICHANGED` 时置位线程级原子
+//! [`REDRAW_REQUESTED`]，覆盖层线程 pump 完消息后对全部活动窗口重新
+//! `draw_frozen + present`；空闲时不使用定时器。
 
 pub mod d3d;
 pub mod frame;
@@ -23,10 +28,11 @@ pub use render::Renderer;
 
 use std::ffi::c_void;
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender};
+use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, SendTimeoutError, Sender};
 use tracing::{debug, info, warn};
 use visrecall_capture::enumerate_displays;
 use visrecall_domain::capture::{CapturedImage, DisplayInfo, ForegroundInfo, RawFrame};
@@ -46,15 +52,24 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetWindowThreadProcessId, IsWindow, LoadCursorW, PeekMessageW,
     RegisterClassW, SetForegroundWindow, SetWindowPos, ShowWindow, TranslateMessage,
     UnregisterClassW, CS_HREDRAW, CS_VREDRAW, HICON, IDC_ARROW, MSG, PM_REMOVE, SWP_NOACTIVATE,
-    SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WM_CLOSE, WM_ERASEBKGND, WM_PAINT, WM_QUIT,
-    WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WM_CLOSE, WM_DISPLAYCHANGE, WM_DPICHANGED,
+    WM_ERASEBKGND, WM_PAINT, WM_QUIT, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
-/// 覆盖层窗口类名（design §7.1）。
-const OVERLAY_CLASS_NAME: &str = "VisRecallOverlay";
+/// 覆盖层窗口类名（design §7.1）；示例/测试通过 `FindWindowW` 定位覆盖窗口。
+pub const OVERLAY_CLASS_NAME: &str = "VisRecallOverlay";
 const OVERLAY_WINDOW_TITLE: &str = "VisRecall Overlay";
 /// 激活态等待命令的超时：既要及时 pump 窗口消息，又不在空闲时忙等。
 const ACTIVE_POLL_INTERVAL: Duration = Duration::from_millis(8);
+/// 发送事件的最长阻塞时间：pump 循环不能被一个没有读者的事件通道卡死。
+const EVENT_SEND_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// 窗口过程 → 覆盖层线程的「冻结帧需要重绘」标志（线程级，无锁）。
+///
+/// 由 `WM_PAINT`/`WM_DISPLAYCHANGE`/`WM_DPICHANGED` 置位；覆盖层线程在 pump 完消息后
+/// 用 `swap(false)` 消费一次并对全部活动窗口重新呈现。窗口过程里不做 D3D 呈现，
+/// 避免渲染调用发生在消息分发过程中间。
+static REDRAW_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// app-core → 覆盖层线程的指令。
 #[derive(Debug)]
@@ -104,6 +119,9 @@ impl OverlayHandle {
     }
 
     /// 请求取消：隐藏所有覆盖窗口并把焦点还给捕获前的前台窗口。
+    ///
+    /// 无论当前是否显示中，覆盖层线程都会回一次 [`OverlayEvent::Cancelled`]
+    /// （重复 `Cancelled` 幂等），因此 `cancel()` 之后等待事件的调用方不会永久挂起。
     pub fn cancel(&self) -> Result<(), AppError> {
         self.send(OverlayCommand::Cancel)
     }
@@ -175,8 +193,10 @@ struct OverlayThread {
     hinstance: HINSTANCE,
     /// 本线程是否注册了窗口类（决定 Drop 时是否注销）。
     class_registered: bool,
-    device: D3dContext,
+    /// 声明在 `device` 之前：Rust 按声明顺序 drop 字段，窗口持有的
+    /// Renderer/SwapChain（及冻结纹理）必须先于设备释放。
     windows: Vec<OverlayWindow>,
+    device: D3dContext,
     events: Sender<OverlayEvent>,
     /// 本次捕获前的前台窗口，取消时用于恢复焦点。
     foreground: Option<ForegroundInfo>,
@@ -194,14 +214,17 @@ impl OverlayThread {
         let module = unsafe { GetModuleHandleW(None) }
             .map_err(|err| AppError::Internal(format!("GetModuleHandleW failed: {err}")))?;
         let hinstance = HINSTANCE(module.0);
-        let class_registered = register_overlay_class(hinstance)?;
+
+        // 先建设备、再注册窗口类：`D3dContext::new()` 失败时不会留下已注册的类
+        // （反之则需要显式 `UnregisterClassW` 才能不泄漏）。
         let device = D3dContext::new()?;
+        let class_registered = register_overlay_class(hinstance)?;
 
         let mut overlay = OverlayThread {
             hinstance,
             class_registered,
-            device,
             windows: Vec::new(),
+            device,
             events,
             foreground: None,
             active: false,
@@ -209,6 +232,7 @@ impl OverlayThread {
         };
 
         // 预创建：把 D3D 初始化、窗口与交换链创建挪到 show 之前完成。
+        // 任一步失败都会让这个局部变量提前 drop，`Drop` 负责注销窗口类并销毁已建窗口。
         for display in &enumerate_displays()? {
             let display_id = display.id.as_str();
             let bounds = display.bounds;
@@ -245,8 +269,12 @@ impl OverlayThread {
     fn run(&mut self, commands: &Receiver<OverlayCommand>) {
         loop {
             let command = if self.active {
-                // 激活时既有窗口消息（WM_PAINT）又有命令要处理：先 pump，再短超时收命令。
-                self.pump_messages();
+                // 激活时既有窗口消息（WM_PAINT 重绘、WM_QUIT）又有命令要处理：先 pump，
+                // 再短超时收命令。
+                if self.pump_messages() {
+                    info!("overlay thread quitting: WM_QUIT received");
+                    break;
+                }
                 match commands.recv_timeout(ACTIVE_POLL_INTERVAL) {
                     Ok(command) => command,
                     Err(RecvTimeoutError::Timeout) => continue,
@@ -269,13 +297,13 @@ impl OverlayThread {
                     if let Err(err) = self.show(frames, displays, foreground) {
                         warn!(error = %err, "frozen overlay show failed; cancelling");
                         self.hide_all();
-                        let _ = self.events.send(OverlayEvent::Cancelled);
+                        self.send_event(OverlayEvent::Cancelled);
                     }
                 }
                 OverlayCommand::Cancel => self.cancel(),
             }
         }
-        debug!("overlay command channel closed; overlay thread stopping");
+        debug!("overlay command loop exited; overlay thread stopping");
     }
 
     /// 上传冻结帧、显示窗口并完成首帧 `Present`。
@@ -287,10 +315,12 @@ impl OverlayThread {
     ) -> Result<(), AppError> {
         let received = Instant::now();
 
-        // 已有活动覆盖层时先收掉旧的，避免两套窗口叠加。
+        // 已有活动覆盖层时先收掉旧的：旧会话必须先收到 `Cancelled`，再显示新帧，
+        // 否则等待旧会话事件的调用方会一直等不到结果。
         if self.active {
             debug!("replacing active overlay before showing new frozen frames");
             self.hide_all();
+            self.send_event(OverlayEvent::Cancelled);
         }
         self.foreground = Some(foreground);
         for window in &mut self.windows {
@@ -336,7 +366,9 @@ impl OverlayThread {
                 "frozen frame uploaded"
             );
             self.windows[index].frozen = Some(frozen);
-            // 纹理已在 GPU 上；逐帧释放 CPU 位图，避免多屏大图同时驻留。
+            // `frames: Vec<RawFrame>` 已经让所有帧整体驻留（峰值内存由命令本身决定）；
+            // 这里逐帧 `drop` 只是尽早上传完成后立刻归还该帧的 CPU 位图，不让它在
+            // 循环剩余期间继续占内存。
             drop(frame);
         }
 
@@ -391,31 +423,83 @@ impl OverlayThread {
     }
 
     /// 取消：隐藏窗口、释放冻结纹理并把焦点还给捕获前的前台窗口。
+    ///
+    /// 无论是否处于激活态都发一次 [`OverlayEvent::Cancelled`]：`OverlayHandle::cancel()`
+    /// 之后等待事件的调用方不会因为「本来就没显示」而永久挂起。重复的 `Cancelled`
+    /// 必须幂等（Task 14 的编排按此语义实现）。
     fn cancel(&mut self) {
-        if !self.active {
-            debug!("cancel received with no active overlay; ignored");
-            return;
+        if self.active {
+            self.hide_all();
+            info!("frozen overlay cancelled");
+        } else {
+            debug!("cancel received with no active overlay; acknowledging with Cancelled");
         }
-        self.hide_all();
-        info!("frozen overlay cancelled");
-        if self.events.send(OverlayEvent::Cancelled).is_err() {
-            warn!("overlay event channel closed; cancel not delivered");
-        }
+        self.send_event(OverlayEvent::Cancelled);
     }
 
-    /// 隐藏全部覆盖窗口并释放冻结纹理；活动时恢复焦点。
+    /// 隐藏全部覆盖窗口并释放冻结纹理；活动时先恢复焦点再隐藏。
+    ///
+    /// 顺序很重要：覆盖层仍是前台进程时 `SetForegroundWindow(目标应用)` 更容易被前台锁
+    /// 接受；若先 `SW_HIDE`，前台窗口会变成空/其他进程窗口，只能退化为
+    /// `AttachThreadInput` 兜底（更容易失败，日志里也会多一条 warn）。
     fn hide_all(&mut self) {
-        for window in &mut self.windows {
-            window.frozen = None;
-            // SAFETY: hwnd 由本线程创建，尚未销毁；SW_HIDE 不销毁窗口。
-            let _ = unsafe { ShowWindow(window.hwnd, SW_HIDE) };
-        }
         if self.active {
             if let Some(foreground) = self.foreground.as_ref() {
                 restore_foreground(foreground);
             }
         }
+        for window in &mut self.windows {
+            window.frozen = None;
+            // SAFETY: hwnd 由本线程创建，尚未销毁；SW_HIDE 不销毁窗口。
+            let _ = unsafe { ShowWindow(window.hwnd, SW_HIDE) };
+        }
+        // 丢弃陈旧的 WM_PAINT 请求，避免隐藏期间标志残留导致下次显示多一帧重绘。
+        REDRAW_REQUESTED.store(false, Ordering::Release);
         self.active = false;
+    }
+
+    /// 发送覆盖层事件；通道阻塞超过 [`EVENT_SEND_TIMEOUT`] 就丢弃并 warn。
+    ///
+    /// 绝不阻塞 pump：事件通道的读者（app-core）可能正忙或已经退出，覆盖层线程不能
+    /// 因此卡在 `send` 上，连窗口消息都处理不了。Task 14 会使用无界通道，正常情况下
+    /// 不会触发超时分支。
+    fn send_event(&self, event: OverlayEvent) {
+        match self.events.send_timeout(event, EVENT_SEND_TIMEOUT) {
+            Ok(()) => {}
+            Err(SendTimeoutError::Timeout(event)) => {
+                warn!(?event, "overlay event channel blocked; event dropped");
+            }
+            Err(SendTimeoutError::Disconnected(event)) => {
+                warn!(?event, "overlay event channel closed; event dropped");
+            }
+        }
+    }
+
+    /// 对所有活动窗口重新绘制并呈现当前冻结帧（`WM_PAINT`/显示变化触发）。
+    ///
+    /// 只在有冻结纹理的窗口上工作；单个窗口失败只 warn，不影响其他显示器。
+    fn redraw_active_windows(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut redrawn = 0usize;
+        for window in &mut self.windows {
+            let Some(frozen) = window.frozen.as_ref() else {
+                continue;
+            };
+            if let Err(err) = window.renderer.draw_frozen(frozen) {
+                warn!(display = %window.display_id, error = %err, "redrawing frozen frame failed");
+                continue;
+            }
+            if let Err(err) = window.renderer.present() {
+                warn!(display = %window.display_id, error = %err, "presenting redrawn frozen frame failed");
+                continue;
+            }
+            redrawn += 1;
+        }
+        if redrawn > 0 {
+            info!(windows = redrawn, "frozen frames redrawn after WM_PAINT");
+        }
     }
 
     /// 找到（或按帧尺寸重建）`display_id` 对应的窗口；返回其在 `windows` 中的下标。
@@ -497,8 +581,12 @@ impl OverlayThread {
             .map(|window| window.hwnd)
     }
 
-    /// 处理本线程队列里的全部窗口消息（阶段 01 只有绘制类消息）。
-    fn pump_messages(&mut self) {
+    /// 处理本线程队列里的全部窗口消息；返回是否收到 `WM_QUIT`（调用方据此退出外层循环）。
+    ///
+    /// 重绘不在窗口过程里做：`WM_PAINT` 等消息只置位 [`REDRAW_REQUESTED`]，pump 结束后
+    /// 这里统一对全部活动窗口 `draw_frozen + present`。
+    fn pump_messages(&mut self) -> bool {
+        let mut quit = false;
         let mut msg = MSG::default();
         loop {
             // SAFETY: `msg` 指向栈上有效变量；`PM_REMOVE` 取走消息。
@@ -508,6 +596,7 @@ impl OverlayThread {
             }
             if msg.message == WM_QUIT {
                 debug!("overlay thread received WM_QUIT");
+                quit = true;
                 break;
             }
             // SAFETY: 消息来自本线程队列，转发给本模块的窗口过程。
@@ -516,12 +605,25 @@ impl OverlayThread {
                 let _ = DispatchMessageW(&msg);
             }
         }
+        if quit {
+            return true;
+        }
+        if REDRAW_REQUESTED.swap(false, Ordering::AcqRel) {
+            self.redraw_active_windows();
+        }
+        false
     }
 }
 
 impl Drop for OverlayThread {
     fn drop(&mut self) {
+        let was_active = self.active;
         self.hide_all();
+        // 线程退出（WM_QUIT、通道断开）时若仍处于激活态，补发一次 Cancelled：
+        // 等待事件的调用方不会被永久挂起。
+        if was_active {
+            self.send_event(OverlayEvent::Cancelled);
+        }
         let hwnds: Vec<HWND> = self.windows.iter().map(|window| window.hwnd).collect();
         // 先释放冻结纹理与交换链（Renderer），再销毁窗口。
         self.windows.clear();
@@ -726,7 +828,9 @@ fn restore_foreground(foreground: &ForegroundInfo) {
 /// `SetForegroundWindow(hwnd)`（design §7.1 的兜底路径）。
 ///
 /// 先挂到当前前台窗口的线程（标准做法）；当前台窗口就是本线程的覆盖层时，改挂到
-/// `hwnd` 自己的线程。无论成功与否都尝试解除附着。
+/// `hwnd` 自己的线程。附着/解除严格配对：每次成功的 `AttachThreadInput(current, t, true)`
+/// 都在同一分支内紧跟 `AttachThreadInput(current, t, false)`（`SetForegroundWindow`
+/// 失败也照样解除），分支内没有 `?`/提前 `return`，因此不会遗留附着状态。
 fn attached_set_foreground(hwnd: HWND) -> bool {
     // SAFETY: 线程 id 由 Win32 查询得到；附着与解除成对调用，窗口句柄只读。
     unsafe {
@@ -752,6 +856,8 @@ fn attached_set_foreground(hwnd: HWND) -> bool {
                 continue;
             }
             let ok = SetForegroundWindow(hwnd).as_bool();
+            // SAFETY: 与上面的 `AttachThreadInput(current, thread, true)` 成对；
+            // 无论 `SetForegroundWindow` 成功与否都必须解除附着。
             let _ = AttachThreadInput(current, thread, false);
             if ok {
                 return true;
@@ -761,7 +867,7 @@ fn attached_set_foreground(hwnd: HWND) -> bool {
     }
 }
 
-/// 覆盖层窗口过程：只处理绘制/擦除消息；取消与输入由覆盖层线程的命令驱动。
+/// 覆盖层窗口过程：绘制类消息只置位重绘标志，取消与输入由覆盖层线程的命令驱动。
 unsafe extern "system" fn overlay_wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -770,14 +876,23 @@ unsafe extern "system" fn overlay_wnd_proc(
 ) -> LRESULT {
     match msg {
         WM_PAINT => {
-            // 冻结帧由 D3D/D2D 呈现，这里只验证更新区域，避免 WM_PAINT 反复投递。
+            // 冻结帧由 D3D/D2D 呈现，GDI 只负责验证更新区域（否则 WM_PAINT 会反复投递），
+            // 真正的重绘交给覆盖层线程（见 `REDRAW_REQUESTED`）。
             let mut paint = PAINTSTRUCT::default();
             // SAFETY: hwnd 有效；`paint` 是栈上有效结构。
             unsafe {
                 let _ = BeginPaint(hwnd, &mut paint);
                 let _ = EndPaint(hwnd, &paint);
             }
+            REDRAW_REQUESTED.store(true, Ordering::Release);
             LRESULT(0)
+        }
+        // 分辨率/DPI 变化后交换链内容需要重绘（几何重建由下一次 `show`/`ensure_window`
+        // 负责）；先置位标志，再交给默认处理。
+        WM_DISPLAYCHANGE | WM_DPICHANGED => {
+            REDRAW_REQUESTED.store(true, Ordering::Release);
+            // SAFETY: 默认处理；参数原样转发。
+            unsafe { DefWindowProcW(hwnd, msg, _wparam, lparam) }
         }
         // 背景由 D3D 负责，禁止 GDI 擦除造成闪烁。
         WM_ERASEBKGND => LRESULT(1),

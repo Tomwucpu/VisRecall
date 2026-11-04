@@ -263,6 +263,9 @@ impl Renderer {
                 .map_err(|err| failed("ID2D1RenderTarget::EndDraw", err))?;
         }
 
+        // 与 `draw_test_frame` 的统计语义一致：成功绘制一帧就递增（Task 13 的输入层
+        // 也会依赖这个计数做「本次显示是否已呈现过」的判断）。
+        self.frame_index += 1;
         Ok(())
     }
 
