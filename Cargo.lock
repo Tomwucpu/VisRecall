@@ -4546,6 +4546,7 @@ name = "visrecall-shell"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
+ "proptest",
  "tracing",
  "tracing-subscriber",
  "visrecall-capture",

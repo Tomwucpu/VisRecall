@@ -27,5 +27,6 @@ windows = { version = "0.62.2", features = [
 ] }
 
 [dev-dependencies]
+proptest = { workspace = true }
 # 仅示例（overlay_spike / overlay_frozen）用来看 tracing 日志。
 tracing-subscriber = { workspace = true }

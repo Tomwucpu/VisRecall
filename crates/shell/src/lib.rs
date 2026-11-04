@@ -5,6 +5,7 @@
 
 pub mod hotkey;
 pub mod overlay;
+pub mod selection;
 
 pub use hotkey::{spawn_hotkey_thread, HotkeyHandle, HotkeySpec};
 pub use overlay::{

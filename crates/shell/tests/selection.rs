@@ -1,0 +1,335 @@
+//! 选区状态机与纯几何函数的集成测试（design §8、§6）。
+
+use proptest::prelude::*;
+use visrecall_domain::capture::DisplayInfo;
+use visrecall_domain::geometry::{PhysicalPoint, PhysicalRect};
+use visrecall_shell::selection::{
+    clamp_to_virtual_screen, drag_rect, hit_test_handle, snap_rect, Handle, Key, Modifiers,
+    SelectionPhase, SelectionState,
+};
+
+fn p(x: i32, y: i32) -> PhysicalPoint {
+    PhysicalPoint { x, y }
+}
+
+fn r(x: i32, y: i32, width: u32, height: u32) -> PhysicalRect {
+    PhysicalRect::new(x, y, width, height)
+}
+
+fn monitor(bounds: PhysicalRect) -> DisplayInfo {
+    DisplayInfo {
+        bounds,
+        work_area: bounds,
+        dpi: 96,
+        ..DisplayInfo::default()
+    }
+}
+
+// ---- drag_rect ----
+
+#[test]
+fn move_keeps_size() {
+    let start = r(10, 10, 100, 100);
+    let out = drag_rect(Handle::Move, start, p(20, -5), 10);
+    assert_eq!(out, r(30, 5, 100, 100));
+}
+
+#[test]
+fn resize_never_goes_below_min() {
+    let start = r(10, 10, 100, 100);
+    let out = drag_rect(Handle::East, start, p(-500, 0), 10);
+    assert!(out.width >= 10);
+    assert_eq!(out, r(10, 10, 10, 100));
+}
+
+#[test]
+fn northwest_drag_moves_origin_and_shrinks() {
+    let start = r(10, 10, 100, 100);
+    assert_eq!(
+        drag_rect(Handle::NorthWest, start, p(20, 30), 10),
+        r(30, 40, 80, 70)
+    );
+}
+
+#[test]
+fn resize_cannot_cross_opposite_edge() {
+    let start = r(10, 10, 100, 100);
+    // 左/上边越过对边时被钳在 `对边 - min` 处，而不是交换宽高。
+    assert_eq!(
+        drag_rect(Handle::West, start, p(500, 0), 10),
+        r(100, 10, 10, 100)
+    );
+    assert_eq!(
+        drag_rect(Handle::North, start, p(0, 500), 10),
+        r(10, 100, 100, 10)
+    );
+}
+
+proptest! {
+    #[test]
+    fn resized_rect_never_negative(w in 0u32..2000, h in 0u32..2000, dx in -2000i32..2000, dy in -2000i32..2000) {
+        let start = PhysicalRect::new(100, 100, w.max(10), h.max(10));
+        let out = drag_rect(Handle::SouthEast, start, PhysicalPoint { x: dx, y: dy }, 10);
+        prop_assert!(out.width >= 10 && out.height >= 10);
+    }
+}
+
+// ---- hit_test_handle ----
+
+#[test]
+fn hit_test_prefers_handles_then_move() {
+    let rect = r(10, 10, 100, 100);
+    assert_eq!(hit_test_handle(rect, p(60, 60), 96), Some(Handle::Move));
+    assert_eq!(
+        hit_test_handle(rect, p(10, 10), 96),
+        Some(Handle::NorthWest)
+    );
+    assert_eq!(hit_test_handle(rect, p(110, 60), 96), Some(Handle::East));
+    assert_eq!(hit_test_handle(rect, p(60, 110), 96), Some(Handle::South));
+    assert_eq!(hit_test_handle(rect, p(300, 300), 96), None);
+}
+
+#[test]
+fn hit_test_of_empty_rect_is_none() {
+    assert_eq!(hit_test_handle(PhysicalRect::default(), p(0, 0), 96), None);
+    assert_eq!(hit_test_handle(PhysicalRect::default(), p(0, 0), 192), None);
+}
+
+#[test]
+fn hit_test_radius_scales_with_dpi() {
+    let rect = r(0, 0, 100, 100);
+    // West 手柄中心在 (0, 50)，测试点在它左侧 8px。
+    let just_outside = p(-8, 50);
+    assert_eq!(hit_test_handle(rect, just_outside, 96), None);
+    assert_eq!(hit_test_handle(rect, just_outside, 192), Some(Handle::West));
+}
+
+// ---- snap_rect ----
+
+#[test]
+fn snap_rect_aligns_edges_within_threshold() {
+    let rect = r(12, 12, 100, 100);
+    let candidates = [r(10, 10, 200, 200)];
+    // 左/上边吸附到 10；右/下边离候选边太远，保持 112（宽高随之变成 102）。
+    assert_eq!(snap_rect(rect, &candidates, 8), r(10, 10, 102, 102));
+}
+
+#[test]
+fn snap_rect_ignores_far_edges() {
+    let rect = r(100, 100, 50, 50);
+    let candidates = [r(0, 0, 10, 10)];
+    assert_eq!(snap_rect(rect, &candidates, 8), rect);
+}
+
+#[test]
+fn snap_rect_drops_direction_that_would_shrink_below_min() {
+    // 左右两边都吸到同一条候选边（x=8）：宽会变成 0，因此整个横向吸附被放弃。
+    let rect = r(0, 0, 12, 40);
+    let candidates = [r(8, 200, 0, 0)];
+    assert_eq!(snap_rect(rect, &candidates, 8), rect);
+}
+
+// ---- clamp_to_virtual_screen ----
+
+#[test]
+fn clamp_intersects_virtual_screen() {
+    let displays = [
+        monitor(r(0, 0, 1920, 1080)),
+        monitor(r(1920, 0, 1920, 1080)),
+    ];
+    assert_eq!(
+        clamp_to_virtual_screen(r(-100, -100, 500, 500), &displays),
+        r(0, 0, 400, 400)
+    );
+    // 跨屏选区不被单屏裁剪。
+    let spanning = r(1800, 100, 400, 300);
+    assert_eq!(clamp_to_virtual_screen(spanning, &displays), spanning);
+    // 完全在屏幕外：位置保留、尺寸归零。
+    assert_eq!(
+        clamp_to_virtual_screen(r(5000, 5000, 100, 100), &displays),
+        r(5000, 5000, 0, 0)
+    );
+}
+
+#[test]
+fn clamp_returns_rect_when_no_displays() {
+    let rect = r(-50, -50, 100, 100);
+    assert_eq!(clamp_to_virtual_screen(rect, &[]), rect);
+}
+
+// ---- SelectionState：拖拽与生命周期 ----
+
+#[test]
+fn drag_creates_rect_from_anchor() {
+    let mut s = SelectionState::new();
+    s.on_mouse_down(p(10, 10), None);
+    assert_eq!(s.phase, SelectionPhase::Dragging);
+    assert_eq!(s.rect, r(10, 10, 0, 0));
+    s.on_mouse_move(p(110, 60), Modifiers::default(), &[]);
+    assert_eq!(s.rect, r(10, 10, 100, 50));
+}
+
+#[test]
+fn mouse_up_keeps_selection_until_enter() {
+    let mut s = SelectionState::new();
+    s.on_mouse_down(p(10, 10), None);
+    s.on_mouse_move(p(110, 60), Modifiers::default(), &[]);
+    s.on_mouse_up();
+    assert_eq!(s.phase, SelectionPhase::HoverWindow);
+    assert_eq!(s.active, None);
+    assert_eq!(s.rect, r(10, 10, 100, 50));
+
+    s.on_key(Key::Enter, false, &[]);
+    assert_eq!(s.phase, SelectionPhase::Committed);
+    assert_eq!(s.rect, r(10, 10, 100, 50));
+}
+
+#[test]
+fn escape_cancels_selection() {
+    let mut s = SelectionState::new();
+    s.on_mouse_down(p(10, 10), None);
+    s.on_mouse_move(p(110, 60), Default::default(), &[]);
+    s.cancel();
+    assert_eq!(s.commit(), None);
+}
+
+#[test]
+fn escape_key_cancels_and_blocks_commit() {
+    let mut s = SelectionState::new();
+    s.on_mouse_down(p(10, 10), None);
+    s.on_mouse_move(p(110, 60), Modifiers::default(), &[]);
+    s.on_mouse_up();
+    s.on_key(Key::Escape, false, &[]);
+    assert_eq!(s.phase, SelectionPhase::Cancelled);
+    assert_eq!(s.active, None);
+    assert_eq!(s.commit(), None);
+}
+
+#[test]
+fn commit_rejects_selection_below_min_size() {
+    let mut s = SelectionState::new();
+    s.on_mouse_down(p(10, 10), None);
+    s.on_mouse_move(p(15, 15), Modifiers::default(), &[]);
+    s.on_mouse_up();
+    assert_eq!(s.commit(), None);
+    assert_eq!(s.phase, SelectionPhase::Cancelled);
+}
+
+// ---- SelectionState：调整已有选区 ----
+
+#[test]
+fn move_handle_translates_selection() {
+    let mut s = SelectionState::new();
+    s.rect = r(10, 10, 100, 50);
+    s.on_mouse_down(p(60, 30), Some(Handle::Move));
+    assert_eq!(s.phase, SelectionPhase::Adjusting);
+    assert_eq!(s.active, Some(Handle::Move));
+    assert_eq!(s.start_rect, r(10, 10, 100, 50));
+    s.on_mouse_move(p(70, 25), Modifiers::default(), &[]);
+    assert_eq!(s.rect, r(20, 5, 100, 50));
+    s.on_mouse_up();
+    assert_eq!(s.phase, SelectionPhase::HoverWindow);
+    assert_eq!(s.active, None);
+}
+
+#[test]
+fn east_handle_resizes_from_start_rect() {
+    let mut s = SelectionState::new();
+    s.rect = r(10, 10, 100, 100);
+    s.on_mouse_down(p(110, 60), Some(Handle::East));
+    s.on_mouse_move(p(150, 60), Modifiers::default(), &[]);
+    assert_eq!(s.rect, r(10, 10, 140, 100));
+}
+
+#[test]
+fn ctrl_disables_snapping() {
+    let candidates = [r(8, 8, 104, 104)];
+
+    let mut snapped = SelectionState::new();
+    snapped.on_mouse_down(p(12, 12), None);
+    snapped.on_mouse_move(p(112, 112), Modifiers::default(), &candidates);
+    assert_eq!(snapped.rect, r(8, 8, 104, 104));
+
+    let mut free = SelectionState::new();
+    free.on_mouse_down(p(12, 12), None);
+    free.on_mouse_move(
+        p(112, 112),
+        Modifiers {
+            shift: false,
+            ctrl: true,
+        },
+        &candidates,
+    );
+    assert_eq!(free.rect, r(12, 12, 100, 100));
+}
+
+// ---- SelectionState：悬停、滚轮与微调 ----
+
+#[test]
+fn hover_highlights_candidate_window() {
+    let mut s = SelectionState::new();
+    s.on_mouse_move(
+        p(50, 50),
+        Modifiers::default(),
+        &[r(0, 0, 100, 100), r(200, 0, 100, 100)],
+    );
+    assert_eq!(s.phase, SelectionPhase::HoverWindow);
+    assert_eq!(s.rect, r(0, 0, 100, 100));
+}
+
+#[test]
+fn hover_never_overwrites_existing_selection() {
+    let mut s = SelectionState::new();
+    s.on_mouse_down(p(10, 10), None);
+    s.on_mouse_move(p(110, 60), Modifiers::default(), &[]);
+    s.on_mouse_up();
+
+    s.on_mouse_move(p(50, 50), Modifiers::default(), &[r(0, 0, 400, 400)]);
+    assert_eq!(s.rect, r(10, 10, 100, 50));
+}
+
+#[test]
+fn wheel_cycles_candidates_only_without_selection() {
+    let candidates = [r(0, 0, 100, 100), r(200, 0, 100, 100), r(400, 0, 100, 100)];
+    let mut s = SelectionState::new();
+    // 指针在候选之外的空白处：进入 HoverWindow 但不产生选区。
+    s.on_mouse_move(p(50, 400), Modifiers::default(), &candidates);
+    assert_eq!(s.phase, SelectionPhase::HoverWindow);
+    assert!(s.rect.is_empty());
+
+    // 索引从 0 向前一位，回绕到最后一个候选。
+    s.on_wheel(-1);
+    assert_eq!(s.rect, candidates[2]);
+
+    // 已有高亮后滚轮只改索引，不再改写 rect。
+    s.on_wheel(1);
+    assert_eq!(s.rect, candidates[2]);
+}
+
+#[test]
+fn wheel_without_candidates_is_noop() {
+    let mut s = SelectionState::new();
+    s.on_mouse_move(p(10, 10), Modifiers::default(), &[]);
+    s.on_wheel(3);
+    assert_eq!(s.rect, PhysicalRect::default());
+    assert_eq!(s.phase, SelectionPhase::Idle);
+}
+
+#[test]
+fn arrow_keys_nudge_without_snapping() {
+    let mut s = SelectionState::new();
+    s.on_mouse_down(p(10, 10), None);
+    s.on_mouse_move(p(110, 60), Modifiers::default(), &[]);
+    s.on_mouse_up();
+
+    let candidates = [r(0, 0, 400, 400)];
+    s.on_key(Key::Left, false, &candidates);
+    assert_eq!(s.rect, r(9, 10, 100, 50));
+    s.on_key(Key::Down, true, &candidates);
+    assert_eq!(s.rect, r(9, 20, 100, 50));
+    // 微调后不回吸到候选边（x 仍是 9 而不是 0）。
+    assert_ne!(s.rect, r(0, 20, 100, 50));
+
+    s.on_key(Key::Escape, false, &[]);
+    assert_eq!(s.phase, SelectionPhase::Cancelled);
+}
