@@ -20,16 +20,19 @@ use windows::Win32::Graphics::Direct2D::Common::{
 };
 use windows::Win32::Graphics::Direct2D::{
     ID2D1Bitmap1, ID2D1Brush, ID2D1DeviceContext, ID2D1Image, ID2D1RenderTarget,
-    ID2D1SolidColorBrush, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET,
-    D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP,
+    ID2D1SolidColorBrush, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE,
+    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
+    D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
     D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
 };
 use windows::Win32::Graphics::DirectWrite::{
     IDWriteTextFormat, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
     DWRITE_FONT_WEIGHT_BOLD, DWRITE_MEASURING_MODE_NATURAL,
 };
+use windows::Win32::Graphics::Dxgi::IDXGISurface;
 
 use super::d3d::{D3dContext, SwapChain, BACK_BUFFER_FORMAT};
+use super::frame::FrozenTexture;
 
 /// 文字使用的字体：中文 Windows 自带，DirectWrite 对缺字仍会回退。
 const FONT_FAMILY: &str = "Microsoft YaHei UI";
@@ -53,6 +56,13 @@ const ACCENT_COLOR: D2D1_COLOR_F = D2D1_COLOR_F {
     r: 0.247,
     g: 0.647,
     b: 0.988,
+    a: 1.0,
+};
+/// 冻结帧铺满前先清成不透明黑，避免未初始化的后备缓冲内容透出。
+const BLACK: D2D1_COLOR_F = D2D1_COLOR_F {
+    r: 0.0,
+    g: 0.0,
+    b: 0.0,
     a: 1.0,
 };
 
@@ -130,29 +140,8 @@ impl Renderer {
 
     /// 绘制一帧测试画面：深色背景、白色中文标签、一个每帧移动的矩形与边框。
     pub fn draw_test_frame(&mut self, label: &str) -> Result<(), AppError> {
-        let surface = self.swap.back_buffer()?;
-        let props = D2D1_BITMAP_PROPERTIES1 {
-            pixelFormat: D2D1_PIXEL_FORMAT {
-                format: BACK_BUFFER_FORMAT,
-                alphaMode: D2D1_ALPHA_MODE_IGNORE,
-            },
-            dpiX: 96.0,
-            dpiY: 96.0,
-            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-            colorContext: ManuallyDrop::new(None),
-        };
-        // SAFETY: surface 在本函数内存活，属性是栈上有效指针。
-        let bitmap: ID2D1Bitmap1 = unsafe {
-            self.context
-                .CreateBitmapFromDxgiSurface(&surface, Some(&props))
-        }
-        .map_err(|err| failed("CreateBitmapFromDxgiSurface", err))?;
-        // `cast` 只做 QueryInterface（`ID2D1Bitmap1` 继承 `ID2D1Image`）。
-        let image: ID2D1Image = bitmap
-            .cast()
-            .map_err(|err| failed("ID2D1Bitmap1 -> ID2D1Image", err))?;
-        // SAFETY: image 是后备缓冲的包装，target 引用的生命周期与 bitmap 相同（本函数）。
-        unsafe { self.context.SetTarget(&image) };
+        // 后备缓冲 bitmap 必须活到 `EndDraw`；`SetTarget` 只借用 image 的包装。
+        let _back_buffer = self.bind_back_buffer()?;
 
         let width = self.swap.width() as f32;
         let height = self.swap.height() as f32;
@@ -207,6 +196,110 @@ impl Renderer {
         self.frame_index += 1;
         // bitmap 在函数结束时释放；下一帧重新从轮换后的后备缓冲创建。
         Ok(())
+    }
+
+    /// 把冻结纹理按 1:1 物理像素铺满整个后缓冲（design §7.2）。
+    ///
+    /// 冻结纹理直接包装成 D2D bitmap（`D2D1_BITMAP_OPTIONS_NONE`，BGRA +
+    /// `ALPHA_MODE_IGNORE`，96 DPI）；目标矩形等于纹理尺寸，最近邻插值，因此既不缩放
+    /// 也不重采样。调用前必须保证纹理尺寸与交换链一致（`show` 负责重建窗口）。
+    pub fn draw_frozen(&mut self, frozen: &FrozenTexture) -> Result<(), AppError> {
+        let (target_width, target_height) = self.size();
+        if (frozen.width, frozen.height) != (target_width, target_height) {
+            return Err(AppError::Internal(format!(
+                "frozen texture {}x{} does not match swap chain {}x{}",
+                frozen.width, frozen.height, target_width, target_height
+            )));
+        }
+
+        // `cast` 只做 QueryInterface：DXGI surface 是 D3D11 纹理的视图。
+        let surface: IDXGISurface = frozen
+            .texture
+            .cast()
+            .map_err(|err| failed("ID3D11Texture2D -> IDXGISurface", err))?;
+        let props = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: BACK_BUFFER_FORMAT,
+                alphaMode: D2D1_ALPHA_MODE_IGNORE,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+            colorContext: ManuallyDrop::new(None),
+        };
+        // SAFETY: surface 由 `frozen` 持有、在本函数内存活；属性是栈上有效指针。
+        let frozen_bitmap: ID2D1Bitmap1 = unsafe {
+            self.context
+                .CreateBitmapFromDxgiSurface(&surface, Some(&props))
+        }
+        .map_err(|err| failed("CreateBitmapFromDxgiSurface(frozen)", err))?;
+
+        // 后备缓冲 bitmap 必须活到 `EndDraw`。
+        let _back_buffer = self.bind_back_buffer()?;
+        let dest = D2D_RECT_F {
+            left: 0.0,
+            top: 0.0,
+            right: frozen.width as f32,
+            bottom: frozen.height as f32,
+        };
+
+        // SAFETY: 全部绘制调用都发生在 BeginDraw/EndDraw 之间；`dest` 是栈上结构，
+        // `frozen_bitmap` 在本函数内存活。
+        unsafe {
+            self.target.BeginDraw();
+            self.target.Clear(Some(&BLACK));
+            // `ID2D1DeviceContext::DrawBitmap` 的 windows-rs 绑定返回 `()`；
+            // 失败通过随后的 `EndDraw` 上报（D2D 在下次绘制时返回 HRESULT）。
+            self.context.DrawBitmap(
+                &frozen_bitmap,
+                Some(&dest),
+                1.0,
+                D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+                None,
+                None,
+            );
+            self.target
+                .EndDraw(None, None)
+                .map_err(|err| failed("ID2D1RenderTarget::EndDraw", err))?;
+        }
+
+        Ok(())
+    }
+
+    /// 交换链（窗口客户区）尺寸，物理像素。
+    pub fn size(&self) -> (u32, u32) {
+        (self.swap.width(), self.swap.height())
+    }
+
+    /// 把当前后备缓冲包装成 D2D target bitmap 并 `SetTarget`。
+    ///
+    /// FLIP 模型下每次 `Present` 后缓冲区轮换，因此每帧都要重新绑定；返回的 bitmap
+    /// 必须活到本帧 `EndDraw` 之后（`SetTarget` 只持有其包装）。
+    fn bind_back_buffer(&self) -> Result<ID2D1Bitmap1, AppError> {
+        let surface = self.swap.back_buffer()?;
+        let props = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: BACK_BUFFER_FORMAT,
+                alphaMode: D2D1_ALPHA_MODE_IGNORE,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+            colorContext: ManuallyDrop::new(None),
+        };
+        // SAFETY: surface 在本函数返回前被 bitmap 引用计数持有；属性是栈上有效指针。
+        let bitmap: ID2D1Bitmap1 = unsafe {
+            self.context
+                .CreateBitmapFromDxgiSurface(&surface, Some(&props))
+        }
+        .map_err(|err| failed("CreateBitmapFromDxgiSurface", err))?;
+        // `cast` 只做 QueryInterface（`ID2D1Bitmap1` 继承 `ID2D1Image`）。
+        let image: ID2D1Image = bitmap
+            .cast()
+            .map_err(|err| failed("ID2D1Bitmap1 -> ID2D1Image", err))?;
+        // SAFETY: image 是后备缓冲的包装，调用方保证 bitmap 活到 `EndDraw` 之后。
+        unsafe { self.context.SetTarget(&image) };
+        Ok(bitmap)
     }
 
     /// 解除 D2D target 并 `Present(1, 0)`（vsync）。

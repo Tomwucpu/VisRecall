@@ -7,7 +7,10 @@ pub mod hotkey;
 pub mod overlay;
 
 pub use hotkey::{spawn_hotkey_thread, HotkeyHandle, HotkeySpec};
-pub use overlay::{D3dContext, Renderer, SwapChain};
+pub use overlay::{
+    spawn_overlay_thread, D3dContext, FrozenTexture, OverlayCommand, OverlayEvent, OverlayHandle,
+    Renderer, SwapChain,
+};
 
 /// 触发捕获的来源；事件只携带类型，不携带图像数据。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
