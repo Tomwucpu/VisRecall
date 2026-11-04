@@ -6,12 +6,16 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread;
 
+use crossbeam_channel::Receiver;
 use visrecall_domain::AppError;
 use visrecall_library::paths::AppPaths;
 use visrecall_library::{AppConfig, Library};
+use visrecall_shell::hotkey::{spawn_hotkey_thread, HotkeyHandle, HotkeySpec};
+use visrecall_shell::ShellEvent;
 
-use crate::events::{AppEvent, AppRecoveredEvent, EventSink};
+use crate::events::{AppEvent, AppRecoveredEvent, EventSink, HotkeyConflictEvent};
 
 /// Tauri 托管的应用状态。
 pub struct AppCore {
@@ -20,6 +24,8 @@ pub struct AppCore {
     library: Result<Library, AppError>,
     config: Mutex<AppConfig>,
     sink: Arc<dyn EventSink>,
+    /// 全局热键线程句柄；`start_hotkey` 之后才有值，drop 时自动注销。
+    hotkey: Mutex<Option<HotkeyHandle>>,
 }
 
 impl AppCore {
@@ -66,6 +72,7 @@ impl AppCore {
             library,
             config: Mutex::new(config),
             sink,
+            hotkey: Mutex::new(None),
         }
     }
 
@@ -99,6 +106,73 @@ impl AppCore {
     /// 事件发送端，供后续任务（捕获流程）复用。
     pub fn sink(&self) -> &Arc<dyn EventSink> {
         &self.sink
+    }
+
+    /// 启动全局捕获热键（解析配置 → 注册 → 起事件消费线程）。
+    ///
+    /// 必须在托盘创建之后调用：注册失败要把「快捷键冲突」立刻显示在托盘提示上。
+    /// 失败不阻止应用启动，只上报 [`AppEvent::HotkeyConflict`]；重复调用是空操作。
+    pub fn start_hotkey(&self) -> Result<(), AppError> {
+        if self.lock_hotkey().is_some() {
+            tracing::debug!("capture hotkey already started");
+            return Ok(());
+        }
+
+        let configured = self.config().hotkeys.capture;
+        let spec = match HotkeySpec::parse(&configured) {
+            Ok(spec) => spec,
+            Err(err) => {
+                tracing::error!(hotkey = %configured, error = %err, "invalid capture hotkey");
+                self.emit_hotkey_conflict(&err);
+                return Err(err);
+            }
+        };
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let handle = match spawn_hotkey_thread(spec, tx) {
+            Ok(handle) => handle,
+            Err(err) => {
+                tracing::error!(hotkey = %spec, error = %err, "failed to register capture hotkey");
+                self.emit_hotkey_conflict(&err);
+                return Err(err);
+            }
+        };
+
+        self.spawn_shell_event_consumer(spec, rx);
+        *self.lock_hotkey() = Some(handle);
+        tracing::info!(hotkey = %spec, "capture hotkey started");
+        Ok(())
+    }
+
+    /// 阶段 01 的临时消费者：Task 14 换成真正的捕获编排，在此之前只打印、不丢事件。
+    fn spawn_shell_event_consumer(&self, spec: HotkeySpec, rx: Receiver<ShellEvent>) {
+        let spawned = thread::Builder::new()
+            .name("visrecall-shell-events".into())
+            .spawn(move || {
+                for event in rx.iter() {
+                    match event {
+                        ShellEvent::CaptureRequest(trigger) => {
+                            tracing::info!(
+                                hotkey = %spec,
+                                ?trigger,
+                                "capture requested; orchestration arrives in task 14"
+                            );
+                        }
+                    }
+                }
+                tracing::debug!("shell event channel closed");
+            });
+
+        if let Err(err) = spawned {
+            tracing::error!(error = %err, "failed to spawn shell event consumer");
+        }
+    }
+
+    fn emit_hotkey_conflict(&self, err: &AppError) {
+        self.sink
+            .emit(AppEvent::HotkeyConflict(HotkeyConflictEvent {
+                message: err.to_string(),
+            }));
     }
 
     /// 应用设置补丁：先写盘再更新内存，避免写失败后内存与磁盘不一致。
@@ -139,6 +213,12 @@ impl AppCore {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
     }
+
+    fn lock_hotkey(&self) -> MutexGuard<'_, Option<HotkeyHandle>> {
+        self.hotkey
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
 }
 
 #[cfg(test)]
@@ -158,8 +238,10 @@ mod tests {
 
     /// 写入指向 `library` 的配置，避免测试依赖真实用户目录。
     fn seed_config(paths: &AppPaths) -> AppConfig {
-        let mut config = AppConfig::default();
-        config.library_path = paths.default_library_root.clone();
+        let config = AppConfig {
+            library_path: paths.default_library_root.clone(),
+            ..AppConfig::default()
+        };
         config
             .save_atomic(&paths.config_file)
             .expect("write test config");
@@ -235,8 +317,10 @@ mod tests {
         let blocked = dir.path().join("blocked");
         std::fs::write(&blocked, b"not a directory").unwrap();
 
-        let mut config = AppConfig::default();
-        config.library_path = blocked;
+        let config = AppConfig {
+            library_path: blocked,
+            ..AppConfig::default()
+        };
         config.save_atomic(&paths.config_file).unwrap();
 
         let core = AppCore::open(paths, Arc::new(RecordingSink::default()));
@@ -289,5 +373,46 @@ mod tests {
             .update_settings(Some(true), Some(56), Some(hotkey))
             .unwrap();
         assert_eq!(updated.ball.size, 56);
+    }
+
+    #[test]
+    fn start_hotkey_reports_invalid_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let mut config = seed_config(&paths);
+        config.hotkeys.capture = "S".into();
+        config.save_atomic(&paths.config_file).unwrap();
+
+        let sink = Arc::new(RecordingSink::default());
+        let core = AppCore::open(paths, sink.clone());
+
+        let err = core.start_hotkey().unwrap_err();
+        assert!(matches!(err, AppError::InvalidInput(_)));
+
+        let events = sink.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].name(), "hotkey_conflict");
+        assert!(events[0].payload()["message"]
+            .as_str()
+            .unwrap()
+            .contains("invalid hotkey"));
+    }
+
+    #[test]
+    fn start_hotkey_registers_configured_combination_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let mut config = seed_config(&paths);
+        // 避开默认的 Ctrl+Shift+S，测试可能与真实运行的应用共存。
+        config.hotkeys.capture = "Ctrl+Alt+Shift+F22".into();
+        config.save_atomic(&paths.config_file).unwrap();
+
+        let sink = Arc::new(RecordingSink::default());
+        let core = AppCore::open(paths, sink.clone());
+
+        core.start_hotkey().expect("register test hotkey");
+        // 幂等：重复启动不再注册，也不产出冲突事件。
+        core.start_hotkey().expect("second call is a no-op");
+        assert!(sink.events().is_empty());
     }
 }

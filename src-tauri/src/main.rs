@@ -46,6 +46,11 @@ fn main() {
             tray::create(app, library_ok)?;
             window_lifecycle::install(app);
 
+            // 热键必须在托盘之后启动：注册失败要能立刻把提示挂到托盘上。
+            if let Err(err) = app.state::<visrecall_app_core::AppCore>().start_hotkey() {
+                tracing::warn!(error = %err, "capture hotkey unavailable; tray stays resident");
+            }
+
             if let Some(start) = PROCESS_START.get() {
                 // 冷启动耗时口径：进程启动 → 托盘创建完成（主窗口仍未创建）。
                 tracing::info!("cold start to tray: {}ms", start.elapsed().as_millis());

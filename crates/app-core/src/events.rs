@@ -37,12 +37,20 @@ pub struct AppRecoveredEvent {
     pub count: u64,
 }
 
+/// `hotkey_conflict` 载荷：注册失败原因（组合键被占用/配置非法）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HotkeyConflictEvent {
+    pub message: String,
+}
+
 /// 阶段 01 的事件集合；后续任务只增字段/变体，不改已有名字。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppEvent {
     ItemCreated(ItemEvent),
     ItemUpdated(ItemUpdatedEvent),
     CaptureFailed(CaptureFailedEvent),
+    HotkeyConflict(HotkeyConflictEvent),
     AppRecovered(AppRecoveredEvent),
 }
 
@@ -53,6 +61,7 @@ impl AppEvent {
             AppEvent::ItemCreated(_) => "item_created",
             AppEvent::ItemUpdated(_) => "item_updated",
             AppEvent::CaptureFailed(_) => "capture_failed",
+            AppEvent::HotkeyConflict(_) => "hotkey_conflict",
             AppEvent::AppRecovered(_) => "app_recovered",
         }
     }
@@ -63,6 +72,7 @@ impl AppEvent {
             AppEvent::ItemCreated(payload) => json(payload),
             AppEvent::ItemUpdated(payload) => json(payload),
             AppEvent::CaptureFailed(payload) => json(payload),
+            AppEvent::HotkeyConflict(payload) => json(payload),
             AppEvent::AppRecovered(payload) => json(payload),
         }
     }
@@ -122,6 +132,12 @@ mod tests {
         let event = AppEvent::ItemCreated(ItemEvent { id: "abc".into() });
         assert_eq!(event.name(), "item_created");
         assert_eq!(event.payload()["id"], "abc");
+
+        let event = AppEvent::HotkeyConflict(HotkeyConflictEvent {
+            message: "hotkey occupied: Ctrl+Shift+S".into(),
+        });
+        assert_eq!(event.name(), "hotkey_conflict");
+        assert_eq!(event.payload()["message"], "hotkey occupied: Ctrl+Shift+S");
     }
 
     #[test]

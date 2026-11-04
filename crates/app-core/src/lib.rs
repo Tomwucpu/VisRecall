@@ -7,8 +7,8 @@ pub mod events;
 
 pub use app::AppCore;
 pub use events::{
-    AppEvent, AppRecoveredEvent, CaptureFailedEvent, EventSink, ItemEvent, ItemUpdatedEvent,
-    NullEventSink, RecordingSink,
+    AppEvent, AppRecoveredEvent, CaptureFailedEvent, EventSink, HotkeyConflictEvent, ItemEvent,
+    ItemUpdatedEvent, NullEventSink, RecordingSink,
 };
 pub use visrecall_domain::AppError;
 pub use visrecall_library::paths::AppPaths;

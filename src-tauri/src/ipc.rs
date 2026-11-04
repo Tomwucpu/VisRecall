@@ -153,6 +153,22 @@ impl TauriEventSink {
 
 impl EventSink for TauriEventSink {
     fn emit(&self, event: AppEvent) {
+        // 阶段 01 没有设置页：热键冲突除了发事件，还要在托盘提示上可见。
+        if let AppEvent::HotkeyConflict(payload) = &event {
+            match self.app.tray_by_id(crate::tray::TRAY_ID) {
+                Some(tray) => {
+                    let tooltip = format!("目记 VisRecall — 快捷键不可用：{}", payload.message);
+                    match tray.set_tooltip(Some(tooltip)) {
+                        Ok(()) => {
+                            tracing::info!(message = %payload.message, "hotkey conflict shown on tray")
+                        }
+                        Err(err) => tracing::warn!(error = %err, "failed to update tray tooltip"),
+                    }
+                }
+                None => tracing::warn!("tray icon missing; cannot show hotkey conflict"),
+            }
+        }
+
         let name = event.name();
         if let Err(err) = self.app.emit(name, event.payload()) {
             tracing::warn!(event = name, error = %err, "failed to emit event");

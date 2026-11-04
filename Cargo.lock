@@ -4469,6 +4469,7 @@ dependencies = [
  "tracing",
  "visrecall-domain",
  "visrecall-library",
+ "visrecall-shell",
 ]
 
 [[package]]
@@ -4501,6 +4502,12 @@ dependencies = [
 [[package]]
 name = "visrecall-shell"
 version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "tracing",
+ "visrecall-domain",
+ "windows",
+]
 
 [[package]]
 name = "vswhom"

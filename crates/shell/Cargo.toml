@@ -2,3 +2,9 @@
 name = "visrecall-shell"
 version.workspace = true
 edition.workspace = true
+
+[dependencies]
+crossbeam-channel = "0.5.17"
+tracing = { workspace = true }
+visrecall-domain = { version = "0.1.0", path = "../domain" }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading"] }

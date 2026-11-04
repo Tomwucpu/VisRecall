@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 visrecall-domain = { path = "../domain" }
 visrecall-library = { path = "../library" }
+visrecall-shell = { path = "../shell" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
