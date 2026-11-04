@@ -269,6 +269,10 @@ impl SelectionState {
     /// 键盘输入。`Esc` 取消、`Enter` 提交；方向键以 1px（`Shift` 为 10px）平移整个选区，
     /// 微调后不做吸附。
     ///
+    /// 方向键微调会结束正在进行的拖拽/调整（`Dragging`/`Adjusting` → `HoverWindow`，
+    /// `active = None`、`start_rect = rect`），否则下一帧 `on_mouse_move` 会按旧
+    /// `anchor`/`start_rect` 把微调结果覆盖掉。
+    ///
     /// `_candidates` 目前未使用（保留给出屏边界裁剪，需要时再接入），
     /// 方向键不会把选区拉回候选边或屏幕内。
     pub fn on_key(&mut self, key: Key, shift: bool, _candidates: &[PhysicalRect]) {
@@ -296,11 +300,14 @@ impl SelectionState {
                 };
                 self.rect.x = self.rect.x.saturating_add(dx);
                 self.rect.y = self.rect.y.saturating_add(dy);
-                // 微调后把基准同步到新位置并结束当前调整：否则下一帧
+                // 微调后把基准同步到新位置并结束当前拖拽/调整：否则下一帧
                 // `on_mouse_move` 会用旧 `start_rect`/旧 `anchor` 把微调覆盖掉。
                 self.start_rect = self.rect;
                 self.active = None;
-                if self.phase == SelectionPhase::Adjusting {
+                if matches!(
+                    self.phase,
+                    SelectionPhase::Dragging | SelectionPhase::Adjusting
+                ) {
                     self.phase = SelectionPhase::HoverWindow;
                 }
             }
@@ -309,15 +316,17 @@ impl SelectionState {
 
     /// 滚轮在候选窗口链中循环切换，同步 `hover_index` 与 `hover_rect`。
     ///
+    /// 只在 `Idle | HoverWindow` 处理：`Dragging | Adjusting` 期间滚轮被完全忽略，
+    /// 否则把 `phase` 打回 `HoverWindow` 会让后续 `on_mouse_move` 不再按拖拽/调整更新。
     /// 不要求 `rect` 为空、也不改变用户 `rect`；无候选或 `delta == 0` 时 no-op。
-    /// `Committed | Cancelled` 阶段忽略滚轮。
+    /// `Committed | Cancelled` 阶段同样忽略滚轮。
     pub fn on_wheel(&mut self, delta: i32) {
         if delta == 0 || self.candidates.is_empty() {
             return;
         }
-        if matches!(
+        if !matches!(
             self.phase,
-            SelectionPhase::Committed | SelectionPhase::Cancelled
+            SelectionPhase::Idle | SelectionPhase::HoverWindow
         ) {
             return;
         }
@@ -338,7 +347,11 @@ impl SelectionState {
     }
 
     /// 提交选区：宽高都 ≥ [`MIN_SELECTION_SIZE`] 时进入 `Committed` 并返回成功矩形，
-    /// 否则进入 `Cancelled` 并返回 `None`。已取消（`Esc`/右键）的选区不可再提交。
+    /// 否则按 [`SelectionState::cancel`] 的语义清空选区与悬停高亮后返回 `None`。
+    /// 已取消（`Esc`/右键）的选区不可再提交。
+    ///
+    /// 失败分支必须清空 `hover_rect`/候选链：否则随后的“空白点击 + 抬起”会把陈旧的
+    /// 悬停窗口当成单击目标采用为 `rect`。
     pub fn commit(&mut self) -> Option<PhysicalRect> {
         let valid = self.phase != SelectionPhase::Cancelled
             && self.rect.width >= MIN_SELECTION_SIZE
@@ -348,8 +361,7 @@ impl SelectionState {
             self.active = None;
             Some(self.rect)
         } else {
-            self.phase = SelectionPhase::Cancelled;
-            self.active = None;
+            self.cancel();
             None
         }
     }
@@ -558,14 +570,15 @@ pub(crate) fn snap_resize_rect(
 
 /// 框选框选（`Dragging`）的吸附：只吸附随指针移动的边，`anchor` 所在的边不动。
 ///
-/// 宽/高为 0 的方向说明指针还没移动，不做吸附（避免“点一下”就产生吸附矩形）。
+/// 逐轴判断：某轴宽/高 > 0（指针已在该轴移动）才吸附该轴随指针移动的边；两轴都为 0
+/// （单击，没有位移）时原样返回。纯水平拖动（`height == 0`）仍会吸附 x 轴，纯垂直拖动同理。
 pub(crate) fn snap_drag_rect(
     anchor: PhysicalPoint,
     rect: PhysicalRect,
     candidates: &[PhysicalRect],
     threshold: i32,
 ) -> PhysicalRect {
-    if threshold <= 0 || candidates.is_empty() || rect.is_empty() {
+    if threshold <= 0 || candidates.is_empty() {
         return rect;
     }
     let threshold = threshold as i64;

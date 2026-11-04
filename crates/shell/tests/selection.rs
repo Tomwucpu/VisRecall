@@ -492,3 +492,88 @@ fn arrow_keys_nudge_without_snapping() {
     s.on_key(Key::Escape, false, &[]);
     assert_eq!(s.phase, SelectionPhase::Cancelled);
 }
+
+// ---- SelectionState：复审回归（状态泄漏边界） ----
+
+#[test]
+fn wheel_is_ignored_while_dragging() {
+    // 候选窗口远离拖拽区域，避免吸附干扰断言。
+    let candidates = [r(900, 900, 10, 10), r(950, 950, 10, 10)];
+    let mut s = SelectionState::new();
+    s.on_mouse_move(p(700, 700), Modifiers::default(), &candidates);
+    assert_eq!(s.phase, SelectionPhase::HoverWindow);
+    assert_eq!(s.hovered_rect(), None);
+
+    s.on_mouse_down(p(10, 10), None);
+    s.on_mouse_move(p(60, 40), Modifiers::default(), &candidates);
+    assert_eq!(s.phase, SelectionPhase::Dragging);
+    assert_eq!(s.rect, r(10, 10, 50, 30));
+
+    // Dragging 期间的滚轮必须完全忽略：不换 hover、不改 phase/active/rect。
+    s.on_wheel(1);
+    assert_eq!(s.phase, SelectionPhase::Dragging);
+    assert_eq!(s.active, None);
+    assert_eq!(s.hovered_rect(), None);
+    assert_eq!(s.rect, r(10, 10, 50, 30));
+
+    // 后续鼠标移动仍按拖拽更新选区。
+    s.on_mouse_move(p(110, 60), Modifiers::default(), &candidates);
+    assert_eq!(s.phase, SelectionPhase::Dragging);
+    assert_eq!(s.rect, r(10, 10, 100, 50));
+
+    s.on_mouse_up();
+    assert_eq!(s.phase, SelectionPhase::HoverWindow);
+    assert_eq!(s.rect, r(10, 10, 100, 50));
+}
+
+#[test]
+fn failed_commit_does_not_adopt_stale_hover() {
+    let candidates = [r(0, 0, 100, 100)];
+    let mut s = SelectionState::new();
+    s.on_mouse_move(p(50, 50), Modifiers::default(), &candidates);
+    assert_eq!(s.hovered_rect(), Some(candidates[0]));
+
+    // 空选区按 Enter：提交失败并清空悬停与选区。
+    s.on_key(Key::Enter, false, &candidates);
+    assert_eq!(s.phase, SelectionPhase::Cancelled);
+    assert_eq!(s.hovered_rect(), None);
+    assert_eq!(s.rect, PhysicalRect::default());
+
+    // 随后“空白点击 + 抬起”不得把陈旧候选采用为选区（仍是空矩形）。
+    s.on_mouse_down(p(500, 500), None);
+    s.on_mouse_up();
+    assert!(s.rect.is_empty());
+    assert_eq!(s.hovered_rect(), None);
+    assert_eq!(s.commit(), None);
+}
+
+#[test]
+fn horizontal_drag_still_snaps_x() {
+    let candidates = [r(0, 0, 112, 400)];
+    let mut s = SelectionState::new();
+    s.on_mouse_down(p(10, 10), None);
+    // 纯水平拖动（height == 0）：x 轴仍必须吸附，anchor 不动。
+    s.on_mouse_move(p(110, 10), Modifiers::default(), &candidates);
+    assert_eq!(s.rect, r(10, 10, 102, 0));
+    assert_eq!(s.anchor, p(10, 10));
+}
+
+#[test]
+fn arrow_key_during_drag_ends_drag() {
+    let mut s = SelectionState::new();
+    s.on_mouse_down(p(10, 10), None);
+    s.on_mouse_move(p(110, 60), Modifiers::default(), &[]);
+    assert_eq!(s.phase, SelectionPhase::Dragging);
+
+    // 方向键微调即使在 Dragging 中也结束拖拽，基准同步到新位置。
+    s.on_key(Key::Right, false, &[]);
+    assert_eq!(s.phase, SelectionPhase::HoverWindow);
+    assert_eq!(s.active, None);
+    assert_eq!(s.rect, r(11, 10, 100, 50));
+    assert_eq!(s.start_rect, r(11, 10, 100, 50));
+
+    // 随后的鼠标移动不得按旧 anchor 覆盖微调结果。
+    s.on_mouse_move(p(300, 300), Modifiers::default(), &[]);
+    assert_eq!(s.rect, r(11, 10, 100, 50));
+    assert_eq!(s.phase, SelectionPhase::HoverWindow);
+}
