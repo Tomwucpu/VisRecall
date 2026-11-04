@@ -710,6 +710,7 @@ item_created { id }
 item_updated { id, fields[] }
 capture_completed { item_id, thumb_url }
 capture_failed { code, message }
+hotkey_conflict { message }
 storage_warning { free_bytes }
 app_recovered { count }
 ```
@@ -737,6 +738,7 @@ pub enum AppEvent {
     ItemCreated(ItemEvent),
     ItemUpdated(ItemUpdatedEvent),
     CaptureFailed(CaptureFailedEvent),
+    HotkeyConflict { message: String },
     AppRecovered { count: u64 },
 }
 
