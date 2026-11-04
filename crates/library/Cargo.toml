@@ -1,0 +1,4 @@
+[package]
+name = "visrecall-library"
+version.workspace = true
+edition.workspace = true

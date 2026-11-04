@@ -1,0 +1,4 @@
+[package]
+name = "visrecall-app-core"
+version.workspace = true
+edition.workspace = true

@@ -1,0 +1,16 @@
+# superpowers workflow artifacts
+.superpowers/
+
+# rust
+target/
+
+# node
+node_modules/
+dist/
+
+# tauri generated
+src-tauri/gen/
+
+# logs
+*.log
+logs/

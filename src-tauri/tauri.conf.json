@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "VisRecall",
+  "version": "0.1.0",
+  "identifier": "com.visrecall.desktop",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "目记 VisRecall",
+        "width": 1100,
+        "height": 760,
+        "minWidth": 860,
+        "minHeight": 560,
+        "visible": false
+      }
+    ],
+    "security": { "csp": null }
+  },
+  "bundle": { "active": false }
+}
