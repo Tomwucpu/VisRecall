@@ -206,6 +206,26 @@ fn escape_key_cancels_and_blocks_commit() {
 }
 
 #[test]
+fn cancel_clears_selection_and_hover() {
+    let mut s = SelectionState::new();
+    s.on_mouse_move(p(50, 50), Modifiers::default(), &[r(0, 0, 100, 100)]);
+    assert_eq!(s.hovered_rect(), Some(r(0, 0, 100, 100)));
+
+    s.on_mouse_down(p(60, 60), None);
+    s.on_mouse_move(p(160, 120), Modifiers::default(), &[r(0, 0, 100, 100)]);
+    s.on_mouse_up();
+    assert_eq!(s.rect, r(60, 60, 100, 60));
+
+    s.cancel();
+    assert_eq!(s.phase, SelectionPhase::Cancelled);
+    assert_eq!(s.rect, PhysicalRect::default());
+    assert_eq!(s.hover_rect, PhysicalRect::default());
+    assert_eq!(s.hovered_rect(), None);
+    assert_eq!(s.active, None);
+    assert_eq!(s.commit(), None);
+}
+
+#[test]
 fn commit_rejects_selection_below_min_size() {
     let mut s = SelectionState::new();
     s.on_mouse_down(p(10, 10), None);
@@ -243,24 +263,85 @@ fn east_handle_resizes_from_start_rect() {
 
 #[test]
 fn ctrl_disables_snapping() {
-    let candidates = [r(8, 8, 104, 104)];
+    // 候选窗口边在 x/y = 0 与 112；拖到 (110, 108) 时右/下边分别离 112 只有 2/4 px。
+    let candidates = [r(0, 0, 112, 112)];
 
     let mut snapped = SelectionState::new();
-    snapped.on_mouse_down(p(12, 12), None);
-    snapped.on_mouse_move(p(112, 112), Modifiers::default(), &candidates);
-    assert_eq!(snapped.rect, r(8, 8, 104, 104));
+    snapped.on_mouse_down(p(10, 10), None);
+    snapped.on_mouse_move(p(110, 108), Modifiers::default(), &candidates);
+    assert_eq!(snapped.rect, r(10, 10, 102, 102));
 
     let mut free = SelectionState::new();
-    free.on_mouse_down(p(12, 12), None);
+    free.on_mouse_down(p(10, 10), None);
     free.on_mouse_move(
-        p(112, 112),
+        p(110, 108),
         Modifiers {
             shift: false,
             ctrl: true,
         },
         &candidates,
     );
-    assert_eq!(free.rect, r(12, 12, 100, 100));
+    assert_eq!(free.rect, r(10, 10, 100, 98));
+}
+
+// ---- SelectionState：吸附变体 ----
+
+#[test]
+fn drag_snap_keeps_anchor_fixed() {
+    let mut s = SelectionState::new();
+    s.on_mouse_down(p(10, 10), None);
+    s.on_mouse_move(p(110, 108), Modifiers::default(), &[r(0, 0, 112, 112)]);
+    // 只有随指针移动的右/下边吸附，起点 (10, 10) 不动。
+    assert_eq!(s.rect, r(10, 10, 102, 102));
+    assert_eq!(s.anchor, p(10, 10));
+}
+
+#[test]
+fn move_snap_keeps_size() {
+    let mut s = SelectionState::new();
+    s.rect = r(14, 14, 100, 50);
+    s.on_mouse_down(p(60, 40), Some(Handle::Move));
+    s.on_mouse_move(p(60, 40), Modifiers::default(), &[r(10, 10, 300, 300)]);
+    // 整框平移到候选边，宽高保持 100×50。
+    assert_eq!(s.rect, r(10, 10, 100, 50));
+    assert_eq!(s.rect.width, 100);
+    assert_eq!(s.rect.height, 50);
+}
+
+#[test]
+fn east_handle_snap_keeps_opposite_edge() {
+    let mut s = SelectionState::new();
+    s.rect = r(10, 10, 100, 100);
+    s.on_mouse_down(p(110, 60), Some(Handle::East));
+    // 拖到 117；候选右边在 120（距离 3），只需吸被拖动的右边。
+    s.on_mouse_move(p(117, 60), Modifiers::default(), &[r(0, 0, 120, 400)]);
+    assert_eq!(s.rect, r(10, 10, 110, 100));
+    assert_eq!(s.rect.x, 10);
+    assert_eq!(s.rect.y, 10);
+    assert_eq!(s.rect.height, 100);
+}
+
+#[test]
+fn west_handle_snap_keeps_opposite_edge() {
+    let mut s = SelectionState::new();
+    s.rect = r(12, 10, 100, 100);
+    s.on_mouse_down(p(12, 60), Some(Handle::West));
+    // 拖到 18；候选左边在 20（距离 2），右边 112 不得移动。
+    s.on_mouse_move(p(18, 60), Modifiers::default(), &[r(20, 0, 100, 400)]);
+    assert_eq!(s.rect, r(20, 10, 92, 100));
+    assert_eq!(s.rect.right(), 112);
+    assert_eq!(s.rect.y, 10);
+    assert_eq!(s.rect.height, 100);
+}
+
+#[test]
+fn snap_abandons_edge_that_breaks_min_size() {
+    let mut s = SelectionState::new();
+    s.rect = r(10, 10, 100, 100);
+    s.on_mouse_down(p(110, 60), Some(Handle::East));
+    // 左拖到最小宽度 10；候选边 15 会把宽度吸成 5，因此放弃这条边的吸附。
+    s.on_mouse_move(p(-390, 60), Modifiers::default(), &[r(0, 0, 15, 400)]);
+    assert_eq!(s.rect, r(10, 10, 10, 100));
 }
 
 // ---- SelectionState：悬停、滚轮与微调 ----
@@ -274,7 +355,32 @@ fn hover_highlights_candidate_window() {
         &[r(0, 0, 100, 100), r(200, 0, 100, 100)],
     );
     assert_eq!(s.phase, SelectionPhase::HoverWindow);
-    assert_eq!(s.rect, r(0, 0, 100, 100));
+    assert_eq!(s.hover_rect, r(0, 0, 100, 100));
+    assert_eq!(s.hovered_rect(), Some(r(0, 0, 100, 100)));
+    // 悬停只写 hover_rect，用户选区仍为空。
+    assert!(s.rect.is_empty());
+}
+
+#[test]
+fn hover_follows_pointer_across_windows() {
+    let candidates = [r(0, 0, 100, 100), r(200, 0, 100, 100)];
+    let mut s = SelectionState::new();
+
+    s.on_mouse_move(p(50, 50), Modifiers::default(), &candidates);
+    assert_eq!(s.hovered_rect(), Some(candidates[0]));
+    assert!(s.rect.is_empty());
+
+    // 移到第二个窗口：高亮必须跟着更新，而用户选区仍为空。
+    s.on_mouse_move(p(250, 50), Modifiers::default(), &candidates);
+    assert_eq!(s.hovered_rect(), Some(candidates[1]));
+    assert_eq!(s.hover_rect, candidates[1]);
+    assert_eq!(s.rect, PhysicalRect::default());
+    assert_eq!(s.phase, SelectionPhase::HoverWindow);
+
+    // 移到候选之外的空白：悬停高亮清空。
+    s.on_mouse_move(p(900, 900), Modifiers::default(), &candidates);
+    assert_eq!(s.hovered_rect(), None);
+    assert_eq!(s.hover_rect, PhysicalRect::default());
 }
 
 #[test]
@@ -286,24 +392,71 @@ fn hover_never_overwrites_existing_selection() {
 
     s.on_mouse_move(p(50, 50), Modifiers::default(), &[r(0, 0, 400, 400)]);
     assert_eq!(s.rect, r(10, 10, 100, 50));
+    // 悬停高亮照样跟随指针，只是不碰 `rect`。
+    assert_eq!(s.hovered_rect(), Some(r(0, 0, 400, 400)));
 }
 
 #[test]
-fn wheel_cycles_candidates_only_without_selection() {
+fn click_adopts_hovered_window() {
+    let candidates = [r(0, 0, 100, 100), r(200, 0, 100, 100)];
+    let mut s = SelectionState::new();
+    s.on_mouse_move(p(250, 50), Modifiers::default(), &candidates);
+    assert!(s.rect.is_empty());
+
+    // 按下抬起之间没有位移：采用悬停窗口边界。
+    s.on_mouse_down(p(250, 50), None);
+    s.on_mouse_up();
+    assert_eq!(s.rect, candidates[1]);
+    assert_eq!(s.phase, SelectionPhase::HoverWindow);
+    assert_eq!(s.commit(), Some(candidates[1]));
+}
+
+#[test]
+fn click_without_hover_leaves_selection_empty() {
+    let mut s = SelectionState::new();
+    s.on_mouse_down(p(50, 50), None);
+    s.on_mouse_up();
+    assert!(s.rect.is_empty());
+    assert_eq!(s.commit(), None);
+}
+
+#[test]
+fn wheel_cycles_hover_rect() {
     let candidates = [r(0, 0, 100, 100), r(200, 0, 100, 100), r(400, 0, 100, 100)];
     let mut s = SelectionState::new();
-    // 指针在候选之外的空白处：进入 HoverWindow 但不产生选区。
+    // 指针在候选之外的空白处：进入 HoverWindow 但不产生悬停高亮。
     s.on_mouse_move(p(50, 400), Modifiers::default(), &candidates);
     assert_eq!(s.phase, SelectionPhase::HoverWindow);
     assert!(s.rect.is_empty());
+    assert_eq!(s.hovered_rect(), None);
 
     // 索引从 0 向前一位，回绕到最后一个候选。
     s.on_wheel(-1);
-    assert_eq!(s.rect, candidates[2]);
+    assert_eq!(s.hovered_rect(), Some(candidates[2]));
 
-    // 已有高亮后滚轮只改索引，不再改写 rect。
+    // 继续向前：回到第一个候选。
     s.on_wheel(1);
-    assert_eq!(s.rect, candidates[2]);
+    assert_eq!(s.hovered_rect(), Some(candidates[0]));
+
+    // 滚轮不改变用户选区。
+    assert!(s.rect.is_empty());
+}
+
+#[test]
+fn wheel_keeps_user_selection() {
+    let mut s = SelectionState::new();
+    s.on_mouse_down(p(10, 10), None);
+    s.on_mouse_move(p(110, 60), Modifiers::default(), &[]);
+    s.on_mouse_up();
+
+    let candidates = [r(0, 0, 100, 100), r(200, 0, 100, 100)];
+    // 记录候选链但不产生悬停高亮，且不影响已有选区。
+    s.on_mouse_move(p(50, 400), Modifiers::default(), &candidates);
+    assert_eq!(s.rect, r(10, 10, 100, 50));
+
+    s.on_wheel(1);
+    assert_eq!(s.hovered_rect(), Some(candidates[1]));
+    assert_eq!(s.rect, r(10, 10, 100, 50));
 }
 
 #[test]
@@ -325,10 +478,16 @@ fn arrow_keys_nudge_without_snapping() {
     let candidates = [r(0, 0, 400, 400)];
     s.on_key(Key::Left, false, &candidates);
     assert_eq!(s.rect, r(9, 10, 100, 50));
+    // 微调后基准同步到新位置，且不再有活动手柄。
+    assert_eq!(s.start_rect, r(9, 10, 100, 50));
+    assert_eq!(s.active, None);
     s.on_key(Key::Down, true, &candidates);
     assert_eq!(s.rect, r(9, 20, 100, 50));
-    // 微调后不回吸到候选边（x 仍是 9 而不是 0）。
+    assert_eq!(s.start_rect, r(9, 20, 100, 50));
+    // 微调后不回吸到候选边（x 仍是 9 而不是 0），后续鼠标移动也不会按旧基准覆盖。
     assert_ne!(s.rect, r(0, 20, 100, 50));
+    s.on_mouse_move(p(50, 400), Modifiers::default(), &candidates);
+    assert_eq!(s.rect, r(9, 20, 100, 50));
 
     s.on_key(Key::Escape, false, &[]);
     assert_eq!(s.phase, SelectionPhase::Cancelled);

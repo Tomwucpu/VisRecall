@@ -6,17 +6,27 @@
 //! 状态流转（design §8）：
 //!
 //! ```text
-//! Idle --move over window--> HoverWindow --mouse down (empty)--> Dragging
-//! HoverWindow --mouse down (handle)--> Adjusting
-//! Dragging/Adjusting --mouse up--> HoverWindow（保留 rect，等待 Enter）
-//! 任意阶段 --Esc/右键--> Cancelled ; HoverWindow --Enter--> Committed
+//! Idle --指针移到候选窗口--> HoverWindow
+//! HoverWindow --按下(空白)--> Dragging --抬起--> HoverWindow
+//! HoverWindow --按下(手柄)--> Adjusting --抬起--> HoverWindow
+//! HoverWindow --Enter（有效）--> Committed
+//! 任意阶段 --Esc/右键--> Cancelled
 //! ```
 //!
-//! 关键取舍：
-//! - 抬起鼠标后不直接提交，保留选区等待 `Enter`；`HoverWindow` 的悬停高亮
-//!   只在 `rect` 为空（尚未框选）时生效，避免冲掉刚拖出来的选区。
-//! - 拖拽/调整时在 8 物理 px 内吸附候选窗口边；`Ctrl` 关闭吸附；方向键微调后不吸附。
-//! - 滚轮只在候选链中切换高亮索引，同样不覆盖已有选区。
+//! 悬停高亮与用户选区是两套独立状态（design §8 的 `rect` / `hover_rect`）：
+//!
+//! - `rect` 只由用户拖拽/调整、方向键微调，以及“单击采用悬停窗口边界”写入；
+//! - `hover_rect` 只由 [`SelectionState::on_mouse_move`] 与 [`SelectionState::on_wheel`]
+//!   写入。`HoverWindow` 下的鼠标移动**绝不**覆盖 `rect`，所以指针从窗口 A 移到窗口 B
+//!   时高亮、标签与“待提交的悬停矩形”都会跟着更新。
+//!
+//! 其他取舍：
+//!
+//! - 抬起鼠标后不直接提交，保留选区等待 `Enter`；只有“按下/抬起之间没有任何位移”
+//!   的单击才把 `rect` 换成 `hover_rect`。
+//! - 吸附按拖动方式分成三种变体：`Move` 只做整框平移（宽高不变），边/角手柄只吸附
+//!   被拖动的那条边（固定边不动），框选只吸附随指针移动的边（`anchor` 那一侧不动）。
+//!   `Ctrl` 关闭吸附；方向键微调后不吸附。
 
 use visrecall_capture::virtual_bounds;
 use visrecall_domain::capture::DisplayInfo;
@@ -107,16 +117,18 @@ pub enum Key {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelectionState {
     pub phase: SelectionPhase,
-    /// 本次拖拽/调整的起点（`Dragging` 时为框选起点）。
+    /// 本次拖拽/调整的起点（`Dragging` 时为框选起点，吸附时保持不动）。
     pub anchor: PhysicalPoint,
-    /// `Adjusting` 开始时 `rect` 的快照；`Dragging` 与 `Move` 都以此为基准。
+    /// `Adjusting` 开始时 `rect` 的快照；方向键微调后同步为新位置。
     pub start_rect: PhysicalRect,
-    /// 当前选区（半开区间）。
+    /// 用户拖拽/调整得到的选区（半开区间），不含悬停高亮。
     pub rect: PhysicalRect,
+    /// 当前悬停命中的窗口候选，仅用于高亮与“单击采用”。
+    pub hover_rect: PhysicalRect,
     /// 正在拖拽的手柄；`None` 表示没有在调整。
     pub active: Option<Handle>,
-    /// `on_mouse_move` 记录的候选窗口链，供滚轮切换。
-    hover_candidates: Vec<PhysicalRect>,
+    /// `on_mouse_move` 记录的候选窗口链，供滚轮循环切换。
+    candidates: Vec<PhysicalRect>,
     /// 滚轮当前指向的候选索引。
     hover_index: usize,
 }
@@ -128,15 +140,16 @@ impl Default for SelectionState {
 }
 
 impl SelectionState {
-    /// 初始态：`Idle`、空选区、无手柄。
+    /// 初始态：`Idle`、空选区、空悬停高亮、无手柄。
     pub fn new() -> Self {
         Self {
             phase: SelectionPhase::Idle,
             anchor: PhysicalPoint::default(),
             start_rect: PhysicalRect::default(),
             rect: PhysicalRect::default(),
+            hover_rect: PhysicalRect::default(),
             active: None,
-            hover_candidates: Vec::new(),
+            candidates: Vec::new(),
             hover_index: 0,
         }
     }
@@ -147,6 +160,7 @@ impl SelectionState {
     /// - `None`：从空白处开始新框选，`rect` 收缩为 `p` 处的空矩形。
     ///
     /// 三种情况的 `anchor`/`start_rect` 都重新记录，后续 `on_mouse_move` 以此计算增量。
+    /// `hover_rect` 不动：单击（按下抬起间无位移）时 `on_mouse_up` 才会采用它。
     pub fn on_mouse_down(&mut self, p: PhysicalPoint, handle: Option<Handle>) {
         self.anchor = p;
         self.start_rect = self.rect;
@@ -163,22 +177,27 @@ impl SelectionState {
         }
     }
 
-    /// 鼠标移动。拖拽/调整时更新 `rect` 并（未按 `Ctrl` 时）吸附候选窗口边；
-    /// 空闲或悬停且尚无选区时，用包含 `p` 的候选窗口作为高亮。
+    /// 鼠标移动。
+    ///
+    /// - `Dragging`：`rect` 由 `anchor` 到 `p` 决定，未按 `Ctrl` 时只吸附随指针移动的边；
+    /// - `Adjusting`：按手柄调整 `start_rect`，未按 `Ctrl` 时按手柄类型吸附
+    ///   （`Move` 整框平移吸附，边/角手柄只吸附被拖动的边）；
+    /// - `Idle | HoverWindow`：**只**更新 `hover_rect`（包含 `p` 的候选），绝不覆盖 `rect`；
+    ///   没有候选或点在候选之外时把 `hover_rect` 置空。
     pub fn on_mouse_move(&mut self, p: PhysicalPoint, m: Modifiers, candidates: &[PhysicalRect]) {
-        self.hover_candidates.clear();
-        self.hover_candidates.extend_from_slice(candidates);
-        if self.hover_candidates.is_empty() {
-            self.hover_index = 0;
+        self.candidates.clear();
+        self.candidates.extend_from_slice(candidates);
+        self.hover_index = if self.candidates.is_empty() {
+            0
         } else {
-            self.hover_index = self.hover_index.min(self.hover_candidates.len() - 1);
-        }
+            self.hover_index.min(self.candidates.len() - 1)
+        };
 
         match self.phase {
             SelectionPhase::Dragging => {
                 let mut rect = PhysicalRect::from_points(self.anchor, p);
                 if !m.ctrl {
-                    rect = snap_rect(rect, candidates, SNAP_THRESHOLD);
+                    rect = snap_drag_rect(self.anchor, rect, candidates, SNAP_THRESHOLD);
                 }
                 self.rect = rect;
             }
@@ -192,7 +211,7 @@ impl SelectionState {
                         let mut rect =
                             drag_rect(handle, self.start_rect, delta, MIN_SELECTION_SIZE);
                         if !m.ctrl {
-                            rect = snap_rect(rect, candidates, SNAP_THRESHOLD);
+                            rect = snap_resize_rect(handle, rect, candidates, SNAP_THRESHOLD);
                         }
                         self.rect = rect;
                     }
@@ -204,22 +223,20 @@ impl SelectionState {
                 }
             }
             SelectionPhase::Idle | SelectionPhase::HoverWindow => {
-                if !self.rect.is_empty() {
-                    // 已有选区：悬停高亮不得覆盖它（等待 Enter 提交）。
-                    return;
-                }
                 match candidates.iter().position(|c| c.contains(p)) {
                     Some(index) => {
                         self.hover_index = index;
-                        self.rect = candidates[index];
+                        self.hover_rect = candidates[index];
                         self.phase = SelectionPhase::HoverWindow;
                     }
                     None => {
-                        // 指针在候选之外的空白处：清空高亮；只要还有候选链就保持
-                        // `HoverWindow`，以便滚轮继续循环。
-                        self.rect = PhysicalRect::default();
-                        if !candidates.is_empty() {
+                        // 指针在候选之外的空白处：清空悬停高亮。仍保留候选链，
+                        // 以便滚轮可以继续循环（也保留已有 `rect` 等待 Enter）。
+                        self.hover_rect = PhysicalRect::default();
+                        if !self.rect.is_empty() || !candidates.is_empty() {
                             self.phase = SelectionPhase::HoverWindow;
+                        } else {
+                            self.phase = SelectionPhase::Idle;
                         }
                     }
                 }
@@ -228,21 +245,33 @@ impl SelectionState {
         }
     }
 
-    /// 结束拖拽/调整。不清空 `rect`，而是回到 `HoverWindow` 等待 `Enter` 提交。
+    /// 结束拖拽/调整，回到 `HoverWindow` 等待 `Enter`。
+    ///
+    /// `Dragging` 期间没有任何位移（单击）且存在悬停高亮时，把 `rect` 换成 `hover_rect`，
+    /// 即“单击采用窗口边界”；拖动过则原样保留用户选区。
     pub fn on_mouse_up(&mut self) {
-        if matches!(
-            self.phase,
-            SelectionPhase::Dragging | SelectionPhase::Adjusting
-        ) {
-            self.phase = SelectionPhase::HoverWindow;
-            self.active = None;
+        match self.phase {
+            SelectionPhase::Dragging => {
+                if self.rect.is_empty() && !self.hover_rect.is_empty() {
+                    self.rect = self.hover_rect;
+                }
+                self.phase = SelectionPhase::HoverWindow;
+                self.active = None;
+            }
+            SelectionPhase::Adjusting => {
+                self.phase = SelectionPhase::HoverWindow;
+                self.active = None;
+            }
+            _ => {}
         }
     }
 
-    /// 键盘输入。`Esc` 取消、`Enter` 提交；方向键以 1px（`Shift` 为 10px）平移整个选区。
-    /// 微调后不做吸附。`candidates` 预留给后续边界裁剪，当前不强制使用。
-    pub fn on_key(&mut self, key: Key, shift: bool, candidates: &[PhysicalRect]) {
-        let _ = candidates;
+    /// 键盘输入。`Esc` 取消、`Enter` 提交；方向键以 1px（`Shift` 为 10px）平移整个选区，
+    /// 微调后不做吸附。
+    ///
+    /// `_candidates` 目前未使用（保留给出屏边界裁剪，需要时再接入），
+    /// 方向键不会把选区拉回候选边或屏幕内。
+    pub fn on_key(&mut self, key: Key, shift: bool, _candidates: &[PhysicalRect]) {
         match key {
             Key::Escape => self.cancel(),
             Key::Enter => {
@@ -267,27 +296,44 @@ impl SelectionState {
                 };
                 self.rect.x = self.rect.x.saturating_add(dx);
                 self.rect.y = self.rect.y.saturating_add(dy);
+                // 微调后把基准同步到新位置并结束当前调整：否则下一帧
+                // `on_mouse_move` 会用旧 `start_rect`/旧 `anchor` 把微调覆盖掉。
+                self.start_rect = self.rect;
+                self.active = None;
+                if self.phase == SelectionPhase::Adjusting {
+                    self.phase = SelectionPhase::HoverWindow;
+                }
             }
         }
     }
 
-    /// 滚轮在候选窗口链中循环切换高亮。无候选时 no-op；
-    /// 只有 `HoverWindow` 且尚无选区时才把 `rect` 换成当前候选，避免覆盖已有选区。
+    /// 滚轮在候选窗口链中循环切换，同步 `hover_index` 与 `hover_rect`。
+    ///
+    /// 不要求 `rect` 为空、也不改变用户 `rect`；无候选或 `delta == 0` 时 no-op。
+    /// `Committed | Cancelled` 阶段忽略滚轮。
     pub fn on_wheel(&mut self, delta: i32) {
-        if delta == 0 || self.hover_candidates.is_empty() {
+        if delta == 0 || self.candidates.is_empty() {
             return;
         }
-        let len = self.hover_candidates.len() as i64;
-        let step = if delta > 0 { 1 } else { -1 };
-        self.hover_index = ((self.hover_index as i64 + step).rem_euclid(len)) as usize;
-
         if matches!(
             self.phase,
-            SelectionPhase::Idle | SelectionPhase::HoverWindow
-        ) && self.rect.is_empty()
-        {
-            self.rect = self.hover_candidates[self.hover_index];
-            self.phase = SelectionPhase::HoverWindow;
+            SelectionPhase::Committed | SelectionPhase::Cancelled
+        ) {
+            return;
+        }
+        let len = self.candidates.len() as i64;
+        let step = if delta > 0 { 1 } else { -1 };
+        self.hover_index = ((self.hover_index as i64 + step).rem_euclid(len)) as usize;
+        self.hover_rect = self.candidates[self.hover_index];
+        self.phase = SelectionPhase::HoverWindow;
+    }
+
+    /// 当前悬停高亮的窗口矩形；没有悬停命中时为 `None`（供覆盖层画高亮与标签）。
+    pub fn hovered_rect(&self) -> Option<PhysicalRect> {
+        if self.hover_rect.is_empty() {
+            None
+        } else {
+            Some(self.hover_rect)
         }
     }
 
@@ -308,9 +354,15 @@ impl SelectionState {
         }
     }
 
-    /// 取消选区：进入 `Cancelled` 并清空活动手柄。
+    /// 取消选区：进入 `Cancelled`，清空选区、悬停高亮、候选链与活动手柄。
+    ///
+    /// 清空 `rect`/`hover_rect` 是为了复用实例时旧选区不会挡住后续 hover 高亮。
     pub fn cancel(&mut self) {
         self.phase = SelectionPhase::Cancelled;
+        self.rect = PhysicalRect::default();
+        self.hover_rect = PhysicalRect::default();
+        self.candidates.clear();
+        self.hover_index = 0;
         self.active = None;
     }
 }
@@ -398,24 +450,16 @@ pub fn drag_rect(
 ///
 /// 距离 ≤ `threshold` 才对齐；若某个方向吸附后宽/高小于 [`MIN_SELECTION_SIZE`]，
 /// 放弃该方向的两条边吸附，保持原值。空候选或 `threshold <= 0` 原样返回。
+///
+/// 注意：这是“四条边都参与”的通用版本，状态机不会直接用它——拖拽/调整/移动分别走
+/// [`snap_drag_rect`] / [`snap_resize_rect`] / [`snap_move_rect`]，避免固定边被移动。
 pub fn snap_rect(rect: PhysicalRect, candidates: &[PhysicalRect], threshold: i32) -> PhysicalRect {
     if threshold <= 0 || candidates.is_empty() {
         return rect;
     }
     let threshold = threshold as i64;
-    let x0 = rect.x as i64;
-    let y0 = rect.y as i64;
-    let x1 = x0 + rect.width as i64;
-    let y1 = y0 + rect.height as i64;
-
-    let mut xs = Vec::with_capacity(candidates.len() * 2);
-    let mut ys = Vec::with_capacity(candidates.len() * 2);
-    for c in candidates {
-        xs.push(c.x as i64);
-        xs.push(c.x as i64 + c.width as i64);
-        ys.push(c.y as i64);
-        ys.push(c.y as i64 + c.height as i64);
-    }
+    let (x0, y0, x1, y1) = edges(rect);
+    let (xs, ys) = candidate_edges(candidates);
 
     let sx0 = nearest_edge(x0, &xs, threshold).unwrap_or(x0);
     let sx1 = nearest_edge(x1, &xs, threshold).unwrap_or(x1);
@@ -434,6 +478,134 @@ pub fn snap_rect(rect: PhysicalRect, candidates: &[PhysicalRect], threshold: i32
         (y0, y1)
     };
     rect_from_edges(fx0, fy0, fx1, fy1)
+}
+
+/// `Move` 手柄的整框平移吸附：只平移，宽高不变。
+///
+/// 每个轴向上分别比较“左/右边对候选竖直边”“上/下边对候选水平边”的距离，
+/// 取阈值内最近的一个偏移量整体平移该轴，因此吸附永远不改变宽高。
+pub(crate) fn snap_move_rect(
+    rect: PhysicalRect,
+    candidates: &[PhysicalRect],
+    threshold: i32,
+) -> PhysicalRect {
+    if threshold <= 0 || candidates.is_empty() {
+        return rect;
+    }
+    let threshold = threshold as i64;
+    let (xs, ys) = candidate_edges(candidates);
+    let (x0, y0, x1, y1) = edges(rect);
+    let dx = translate_offset(x0, x1, &xs, threshold);
+    let dy = translate_offset(y0, y1, &ys, threshold);
+    rect_from_edges(x0 + dx, y0 + dy, x1 + dx, y1 + dy)
+}
+
+/// 边/角手柄的吸附：只吸附**被拖动**的那条/两条边，固定边保持不动。
+///
+/// [`Handle::Move`] 退化为 [`snap_move_rect`]。若吸附后该方向宽/高小于
+/// [`MIN_SELECTION_SIZE`]，放弃这条边的吸附（保持拖拽结果）。
+pub(crate) fn snap_resize_rect(
+    handle: Handle,
+    rect: PhysicalRect,
+    candidates: &[PhysicalRect],
+    threshold: i32,
+) -> PhysicalRect {
+    if handle == Handle::Move {
+        return snap_move_rect(rect, candidates, threshold);
+    }
+    if threshold <= 0 || candidates.is_empty() {
+        return rect;
+    }
+    let threshold = threshold as i64;
+    let min = MIN_SELECTION_SIZE as i64;
+    let (xs, ys) = candidate_edges(candidates);
+    let (x0, y0, x1, y1) = edges(rect);
+
+    let mut nx0 = x0;
+    let mut nx1 = x1;
+    let mut ny0 = y0;
+    let mut ny1 = y1;
+    if handle.adjusts_west() {
+        if let Some(edge) = nearest_edge(x0, &xs, threshold) {
+            if x1 - edge >= min {
+                nx0 = edge;
+            }
+        }
+    }
+    if handle.adjusts_east() {
+        if let Some(edge) = nearest_edge(x1, &xs, threshold) {
+            if edge - x0 >= min {
+                nx1 = edge;
+            }
+        }
+    }
+    if handle.adjusts_north() {
+        if let Some(edge) = nearest_edge(y0, &ys, threshold) {
+            if y1 - edge >= min {
+                ny0 = edge;
+            }
+        }
+    }
+    if handle.adjusts_south() {
+        if let Some(edge) = nearest_edge(y1, &ys, threshold) {
+            if edge - y0 >= min {
+                ny1 = edge;
+            }
+        }
+    }
+    rect_from_edges(nx0, ny0, nx1, ny1)
+}
+
+/// 框选框选（`Dragging`）的吸附：只吸附随指针移动的边，`anchor` 所在的边不动。
+///
+/// 宽/高为 0 的方向说明指针还没移动，不做吸附（避免“点一下”就产生吸附矩形）。
+pub(crate) fn snap_drag_rect(
+    anchor: PhysicalPoint,
+    rect: PhysicalRect,
+    candidates: &[PhysicalRect],
+    threshold: i32,
+) -> PhysicalRect {
+    if threshold <= 0 || candidates.is_empty() || rect.is_empty() {
+        return rect;
+    }
+    let threshold = threshold as i64;
+    let min = MIN_SELECTION_SIZE as i64;
+    let (xs, ys) = candidate_edges(candidates);
+    let (x0, y0, x1, y1) = edges(rect);
+
+    let mut nx0 = x0;
+    let mut nx1 = x1;
+    let mut ny0 = y0;
+    let mut ny1 = y1;
+    if rect.width > 0 {
+        if (anchor.x as i64) <= x0 {
+            // `anchor` 在左边（`x0`），随指针移动的是右边。
+            if let Some(edge) = nearest_edge(x1, &xs, threshold) {
+                if edge - x0 >= min {
+                    nx1 = edge;
+                }
+            }
+        } else if let Some(edge) = nearest_edge(x0, &xs, threshold) {
+            // `anchor` 在右边（`x1`），随指针移动的是左边。
+            if x1 - edge >= min {
+                nx0 = edge;
+            }
+        }
+    }
+    if rect.height > 0 {
+        if (anchor.y as i64) <= y0 {
+            if let Some(edge) = nearest_edge(y1, &ys, threshold) {
+                if edge - y0 >= min {
+                    ny1 = edge;
+                }
+            }
+        } else if let Some(edge) = nearest_edge(y0, &ys, threshold) {
+            if y1 - edge >= min {
+                ny0 = edge;
+            }
+        }
+    }
+    rect_from_edges(nx0, ny0, nx1, ny1)
 }
 
 /// 把选区裁剪到虚拟屏幕（所有显示器 `bounds` 的并集）范围内。
@@ -475,6 +647,43 @@ fn handle_points(rect: PhysicalRect) -> [(Handle, i64, i64); 8] {
         (Handle::South, mx, y1),
         (Handle::West, x0, my),
     ]
+}
+
+/// 半开区间下的四条边 `(left, top, right, bottom)`，用 `i64` 避免溢出。
+fn edges(rect: PhysicalRect) -> (i64, i64, i64, i64) {
+    let x0 = rect.x as i64;
+    let y0 = rect.y as i64;
+    (x0, y0, x0 + rect.width as i64, y0 + rect.height as i64)
+}
+
+/// 候选窗口的所有竖直边与水平边（各自左/右、上/下两条）。
+fn candidate_edges(candidates: &[PhysicalRect]) -> (Vec<i64>, Vec<i64>) {
+    let mut xs = Vec::with_capacity(candidates.len() * 2);
+    let mut ys = Vec::with_capacity(candidates.len() * 2);
+    for c in candidates {
+        let (x0, y0, x1, y1) = edges(*c);
+        xs.push(x0);
+        xs.push(x1);
+        ys.push(y0);
+        ys.push(y1);
+    }
+    (xs, ys)
+}
+
+/// 整框平移吸附的轴偏移：把 `lo`/`hi` 对齐到阈值内最近候选边的位移量。
+fn translate_offset(lo: i64, hi: i64, edges: &[i64], threshold: i64) -> i64 {
+    let mut best: Option<i64> = None;
+    for &edge in edges {
+        for offset in [edge - lo, edge - hi] {
+            if offset.abs() > threshold {
+                continue;
+            }
+            if best.is_none_or(|b| offset.abs() < b.abs()) {
+                best = Some(offset);
+            }
+        }
+    }
+    best.unwrap_or(0)
 }
 
 /// 在候选边中找与 `value` 距离 ≤ `threshold` 的最近一条。
