@@ -119,9 +119,7 @@ mod tests {
         assert_eq!(event.name(), "app_recovered");
         assert_eq!(event.payload()["count"], 3);
 
-        let event = AppEvent::ItemCreated(ItemEvent {
-            id: "abc".into(),
-        });
+        let event = AppEvent::ItemCreated(ItemEvent { id: "abc".into() });
         assert_eq!(event.name(), "item_created");
         assert_eq!(event.payload()["id"], "abc");
     }

@@ -10,7 +10,7 @@ use tauri::App;
 
 use crate::window_lifecycle;
 
-/// 托盘 id，便于后续任务按 id 操作图标（例如进入异常态）。
+/// 托盘 id，便于后续任务按 id 操作图标（例如退出异常态）。
 pub const TRAY_ID: &str = "visrecall-tray";
 
 const MENU_OPEN_MAIN: &str = "tray.open-main";
@@ -18,8 +18,14 @@ const MENU_TOGGLE_BALL: &str = "tray.toggle-ball";
 const MENU_SETTINGS: &str = "tray.settings";
 const MENU_QUIT: &str = "tray.quit";
 
-/// 创建托盘；图标或菜单构建失败返回错误（由 `setup` 决定是否致命）。
-pub fn create(app: &App) -> tauri::Result<()> {
+const TOOLTIP_OK: &str = "目记 VisRecall";
+const TOOLTIP_UNAVAILABLE: &str = "目记 VisRecall — 库不可用";
+
+/// 创建托盘；`library_ok = false` 时进入异常态（红色图标 + 提示库不可用）。
+///
+/// 菜单四项、左键唤醒主窗口在两种状态下一致：库不可用时用户仍要能打开主窗口
+/// 看到错误状态与库路径（阶段 02 再接「重试 / 重新定位 / 新建库」恢复页）。
+pub fn create(app: &App, library_ok: bool) -> tauri::Result<()> {
     let menu = MenuBuilder::new(app)
         .text(MENU_OPEN_MAIN, "打开主窗口")
         .text(MENU_TOGGLE_BALL, "显示或隐藏悬浮球")
@@ -28,9 +34,15 @@ pub fn create(app: &App) -> tauri::Result<()> {
         .text(MENU_QUIT, "退出")
         .build()?;
 
+    let (icon, tooltip) = if library_ok {
+        (placeholder_icon(), TOOLTIP_OK)
+    } else {
+        (library_unavailable_icon(), TOOLTIP_UNAVAILABLE)
+    };
+
     TrayIconBuilder::with_id(TRAY_ID)
-        .icon(placeholder_icon())
-        .tooltip("目记 VisRecall")
+        .icon(icon)
+        .tooltip(tooltip)
         .menu(&menu)
         // 左键交给点击事件（唤醒主窗口），右键弹菜单。
         .show_menu_on_left_click(false)
@@ -63,16 +75,45 @@ pub fn create(app: &App) -> tauri::Result<()> {
         })
         .build(app)?;
 
-    tracing::info!("tray icon created");
+    tracing::info!(library_ok, "tray icon created");
     Ok(())
 }
 
-/// 32×32 RGBA 占位图标：品牌蓝圆底 + 白色记录块。正式图标在阶段 04 替换。
+/// 图标配色：正常态品牌蓝，异常态告警红。
+#[derive(Clone, Copy)]
+enum Palette {
+    Normal,
+    Unavailable,
+}
+
+impl Palette {
+    /// (外圈边框色, 圆底色)；中间记录块始终为白色。
+    fn colors(self) -> ([u8; 4], [u8; 4]) {
+        match self {
+            Palette::Normal => ([37, 99, 235, 255], [59, 130, 246, 255]),
+            Palette::Unavailable => ([153, 27, 27, 255], [220, 38, 38, 255]),
+        }
+    }
+}
+
+/// 托盘正常态图标。
 fn placeholder_icon() -> Image<'static> {
+    tray_icon(Palette::Normal)
+}
+
+/// 托盘异常态图标：库打不开时使用，形状与正常态一致，只是换成告警红。
+fn library_unavailable_icon() -> Image<'static> {
+    tray_icon(Palette::Unavailable)
+}
+
+/// 32×32 RGBA 占位图标：圆底 + 白色记录块。正式图标在阶段 04 替换。
+fn tray_icon(palette: Palette) -> Image<'static> {
     const SIZE: u32 = 32;
     const CENTER: f32 = 16.0;
     const RADIUS: f32 = 15.0;
     const BORDER: f32 = 13.5;
+
+    let (border, fill) = palette.colors();
 
     let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
     for y in 0..SIZE {
@@ -84,9 +125,9 @@ fn placeholder_icon() -> Image<'static> {
             }
             let index = ((y * SIZE + x) * 4) as usize;
             let color = if dx * dx + dy * dy > BORDER * BORDER {
-                [37, 99, 235, 255]
+                border
             } else {
-                [59, 130, 246, 255]
+                fill
             };
             rgba[index..index + 4].copy_from_slice(&color);
 
@@ -102,9 +143,10 @@ fn placeholder_icon() -> Image<'static> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn placeholder_icon_is_opaque_32_square() {
-        let icon = placeholder_icon();
+    /// 圆底内侧、白色记录块之外的探针像素。
+    const PROBE: usize = ((16 * 32) + 5) * 4;
+
+    fn assert_shape(icon: &Image<'_>) {
         assert_eq!(icon.width(), 32);
         assert_eq!(icon.height(), 32);
         assert_eq!(icon.rgba().len(), 32 * 32 * 4);
@@ -112,5 +154,23 @@ mod tests {
         let center = ((16 * 32) + 16) as usize * 4;
         assert_eq!(&icon.rgba()[center..center + 4], &[255, 255, 255, 255]);
         assert_eq!(&icon.rgba()[0..4], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn placeholder_icon_is_opaque_32_square() {
+        let icon = placeholder_icon();
+        assert_shape(&icon);
+        assert_eq!(&icon.rgba()[PROBE..PROBE + 4], &[59, 130, 246, 255]);
+    }
+
+    /// 异常态与正常态形状一致，但圆底换成告警红（红 > 蓝）。
+    #[test]
+    fn unavailable_icon_uses_alert_red() {
+        let icon = library_unavailable_icon();
+        assert_shape(&icon);
+
+        let pixel = &icon.rgba()[PROBE..PROBE + 4];
+        assert_eq!(pixel, &[220, 38, 38, 255]);
+        assert_ne!(pixel, &placeholder_icon().rgba()[PROBE..PROBE + 4]);
     }
 }

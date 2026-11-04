@@ -5,11 +5,17 @@ mod ipc;
 mod tray;
 mod window_lifecycle;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use tauri::Manager;
 
+/// 进程启动时刻；用于记录「冷启动到托盘可用」耗时。
+static PROCESS_START: OnceLock<Instant> = OnceLock::new();
+
 fn main() {
+    // 尽量贴近进程启动：在任何初始化之前取时间戳。
+    let _ = PROCESS_START.set(Instant::now());
     init_logging();
 
     let specta_builder = ipc::specta_builder();
@@ -31,11 +37,19 @@ fn main() {
         .setup(|app| {
             let sink: Arc<dyn visrecall_app_core::EventSink> =
                 Arc::new(ipc::TauriEventSink::new(app.handle().clone()));
-            app.manage(visrecall_app_core::AppCore::open(resolve_paths(), sink));
+            let core = visrecall_app_core::AppCore::open(resolve_paths(), sink);
+            let library_ok = core.library_ok();
+            app.manage(core);
 
             // 托盘是冷启动唯一入口；不创建主窗口（架构 §3.3）。
-            tray::create(app)?;
+            // 库打不开时托盘进入异常态（红色图标 + 「库不可用」提示），但不阻止驻留。
+            tray::create(app, library_ok)?;
             window_lifecycle::install(app);
+
+            if let Some(start) = PROCESS_START.get() {
+                // 冷启动耗时口径：进程启动 → 托盘创建完成（主窗口仍未创建）。
+                tracing::info!("cold start to tray: {}ms", start.elapsed().as_millis());
+            }
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -82,12 +96,40 @@ fn init_logging() {
         .try_init();
 }
 
-/// 生成的绑定必须入库；没有跑起来 GUI 时用 `cargo test -p visrecall` 刷新。
+/// 生成的绑定必须入库，且必须与当前命令/类型定义一致。
+///
+/// 测试只导出到临时文件再与受版本控制的文件比对，不会改写工作区文件；
+/// 需要刷新时启动 debug 构建（`pnpm tauri dev` 或 `cargo run -p visrecall`），
+/// 启动时会把绑定写到真实路径。
 #[cfg(all(test, debug_assertions))]
 mod bindings_test {
+    /// 生成器与仓库文件可能落在不同平台的换行风格上，比较前统一换行。
+    fn normalize(text: &str) -> String {
+        text.replace("\r\n", "\n")
+    }
+
     #[test]
-    fn exports_typescript_bindings() {
+    fn committed_bindings_are_up_to_date() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let generated_path = dir.path().join("bindings.ts");
+
         let builder = super::ipc::specta_builder();
-        super::ipc::export_bindings(&builder).expect("export bindings");
+        super::ipc::export_bindings_to(&builder, &generated_path).expect("export bindings");
+
+        let generated = std::fs::read_to_string(&generated_path).expect("read generated bindings");
+        let committed_path = super::ipc::bindings_path();
+        let committed = std::fs::read_to_string(&committed_path).unwrap_or_else(|err| {
+            panic!(
+                "cannot read {}: {err}; run the app in debug to generate it",
+                committed_path.display()
+            )
+        });
+
+        assert_eq!(
+            normalize(&generated),
+            normalize(&committed),
+            "{} is stale; run the app in debug (pnpm tauri dev) to regenerate it",
+            committed_path.display()
+        );
     }
 }

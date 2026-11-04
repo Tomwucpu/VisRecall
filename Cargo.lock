@@ -4444,7 +4444,6 @@ name = "visrecall"
 version = "0.1.0"
 dependencies = [
  "serde",
- "serde_json",
  "specta",
  "specta-typescript",
  "tauri",
@@ -4452,6 +4451,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
  "tauri-specta",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
  "visrecall-app-core",

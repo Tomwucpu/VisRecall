@@ -3,7 +3,7 @@
 //! DTO 定义在这里而不是 domain，避免领域层依赖 specta/Tauri。
 
 use serde::{Deserialize, Serialize};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use visrecall_app_core::{AppCore, AppError, EventSink};
 
 use visrecall_app_core::AppEvent;
@@ -177,14 +177,47 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         .dangerously_cast_bigints_to_number()
 }
 
-/// 导出 TypeScript 绑定；路径按 `CARGO_MANIFEST_DIR` 解析，不依赖进程工作目录。
+/// 绑定文件的受版本控制位置；按 `CARGO_MANIFEST_DIR` 解析，不依赖进程工作目录。
 #[cfg(debug_assertions)]
-pub fn export_bindings(builder: &tauri_specta::Builder<tauri::Wry>) -> Result<(), String> {    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/lib/bindings.ts");
+pub fn bindings_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/lib/bindings.ts")
+}
+
+/// 把 TypeScript 绑定导出到指定路径；测试导到临时文件，避免改写受版本控制的文件。
+#[cfg(debug_assertions)]
+pub fn export_bindings_to(
+    builder: &tauri_specta::Builder<tauri::Wry>,
+    path: &std::path::Path,
+) -> Result<(), String> {
     builder
-        .export(specta_typescript::Typescript::default(), &path)
+        .export(specta_typescript::Typescript::default(), path)
         .map_err(|err| format!("export {}: {err}", path.display()))
 }
 
+/// debug 启动时刷新真实绑定文件（`src/lib/bindings.ts`）。
+#[cfg(debug_assertions)]
+pub fn export_bindings(builder: &tauri_specta::Builder<tauri::Wry>) -> Result<(), String> {
+    export_bindings_to(builder, &bindings_path())
+}
+
+/// 在阻塞线程池上访问 `AppCore`。
+///
+/// SQLite 查询与配置落盘（`save_atomic` + `sync_all`）都是同步 IO，既不能跑在
+/// Tauri 主线程（架构 §3），也会拖住 async worker，所以统一丢给 blocking 线程池。
+async fn run_blocking<T, F>(app: tauri::AppHandle, work: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce(&AppCore) -> Result<T, ApiError> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(move || {
+        let core = app.state::<AppCore>();
+        work(core.inner())
+    })
+    .await
+    .map_err(|err| ApiError::new("INTERNAL", format!("blocking task failed: {err}")))?
+}
+
+/// 只读内存状态：命令在主线程执行，但不碰磁盘。
 #[tauri::command]
 #[specta::specta]
 pub fn get_app_status(core: tauri::State<'_, AppCore>) -> AppStatus {
@@ -199,45 +232,57 @@ pub fn get_app_status(core: tauri::State<'_, AppCore>) -> AppStatus {
 /// 打开库目录；路径始终来自 `AppCore`，前端不能传路径。
 #[tauri::command]
 #[specta::specta]
-pub fn open_library_folder(
-    app: tauri::AppHandle,
-    core: tauri::State<'_, AppCore>,
-) -> Result<(), ApiError> {
-    use tauri_plugin_opener::OpenerExt;
+pub async fn open_library_folder(app: tauri::AppHandle) -> Result<(), ApiError> {
+    // 只读内存里的路径；真正拉起文件管理器放到阻塞线程。
+    let path = app.state::<AppCore>().library_root().display().to_string();
+    let handle = app.clone();
 
-    let root = core.library_root();
-    let path = root.display().to_string();
-    app.opener()
-        .open_path(path.clone(), None::<&str>)
-        .map_err(|err| ApiError::new("INTERNAL", format!("open {path}: {err}")))
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri_plugin_opener::OpenerExt;
+
+        handle
+            .opener()
+            .open_path(path.clone(), None::<&str>)
+            .map_err(|err| ApiError::new("INTERNAL", format!("open {path}: {err}")))
+    })
+    .await
+    .map_err(|err| ApiError::new("INTERNAL", format!("blocking task failed: {err}")))?
 }
 
 #[tauri::command]
 #[specta::specta]
-pub fn list_items(
-    core: tauri::State<'_, AppCore>,
+pub async fn list_items(
+    app: tauri::AppHandle,
     cursor: Option<i64>,
     limit: u32,
 ) -> Result<Vec<ItemDto>, ApiError> {
     let limit = limit.clamp(1, 100);
-    let library = core.library().map_err(ApiError::from)?;
-    let items = library
-        .list_items(cursor, limit)
-        .map_err(|err| ApiError::from(&err))?;
-    Ok(items.into_iter().map(ItemDto::from).collect())
+
+    run_blocking(app, move |core| {
+        let library = core.library().map_err(ApiError::from)?;
+        let items = library
+            .list_items(cursor, limit)
+            .map_err(|err| ApiError::from(&err))?;
+        Ok(items.into_iter().map(ItemDto::from).collect())
+    })
+    .await
 }
 
 #[tauri::command]
 #[specta::specta]
-pub fn get_item(core: tauri::State<'_, AppCore>, id: String) -> Result<ItemDto, ApiError> {
-    let library = core.library().map_err(ApiError::from)?;
-    let item = library
-        .get_item(&id)
-        .map_err(|err| ApiError::from(&err))?
-        .ok_or_else(|| ApiError::new("NOT_FOUND", format!("item {id} not found")))?;
-    Ok(ItemDto::from(item))
+pub async fn get_item(app: tauri::AppHandle, id: String) -> Result<ItemDto, ApiError> {
+    run_blocking(app, move |core| {
+        let library = core.library().map_err(ApiError::from)?;
+        let item = library
+            .get_item(&id)
+            .map_err(|err| ApiError::from(&err))?
+            .ok_or_else(|| ApiError::new("NOT_FOUND", format!("item {id} not found")))?;
+        Ok(ItemDto::from(item))
+    })
+    .await
 }
 
+/// 只读内存配置：命令在主线程执行，但不碰磁盘。
 #[tauri::command]
 #[specta::specta]
 pub fn get_settings(core: tauri::State<'_, AppCore>) -> SettingsDto {
@@ -246,14 +291,17 @@ pub fn get_settings(core: tauri::State<'_, AppCore>) -> SettingsDto {
 
 #[tauri::command]
 #[specta::specta]
-pub fn update_settings(
-    core: tauri::State<'_, AppCore>,
+pub async fn update_settings(
+    app: tauri::AppHandle,
     patch: SettingsPatch,
 ) -> Result<SettingsDto, ApiError> {
-    let config = core
-        .update_settings(patch.ball_enabled, patch.ball_size, patch.capture_hotkey)
-        .map_err(|err| ApiError::from(&err))?;
-    Ok(SettingsDto::from_config(&config))
+    run_blocking(app, move |core| {
+        let config = core
+            .update_settings(patch.ball_enabled, patch.ball_size, patch.capture_hotkey)
+            .map_err(|err| ApiError::from(&err))?;
+        Ok(SettingsDto::from_config(&config))
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -267,7 +315,10 @@ mod tests {
             (AppError::InvalidInput("bad".into()), "INVALID_INPUT"),
             (AppError::NotFound, "NOT_FOUND"),
             (AppError::StorageFull, "STORAGE_FULL"),
-            (AppError::CaptureFailed("no display".into()), "CAPTURE_FAILED"),
+            (
+                AppError::CaptureFailed("no display".into()),
+                "CAPTURE_FAILED",
+            ),
             (AppError::CaptureCancelled, "CAPTURE_CANCELLED"),
             (AppError::DrmProtected, "DRM_PROTECTED"),
             (AppError::Io("disk".into()), "IO"),

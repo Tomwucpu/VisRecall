@@ -4,11 +4,13 @@ import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
 
 /** Commands */
 export const commands = {
+	/**  只读内存状态：命令在主线程执行，但不碰磁盘。 */
 	getAppStatus: () => __TAURI_INVOKE<AppStatus>("get_app_status"),
 	/**  打开库目录；路径始终来自 `AppCore`，前端不能传路径。 */
 	openLibraryFolder: () => __TAURI_INVOKE<null>("open_library_folder"),
 	listItems: (cursor: number | null, limit: number) => __TAURI_INVOKE<ItemDto_Serialize[]>("list_items", { cursor, limit }),
 	getItem: (id: string) => __TAURI_INVOKE<ItemDto_Serialize>("get_item", { id }),
+	/**  只读内存配置：命令在主线程执行，但不碰磁盘。 */
 	getSettings: () => __TAURI_INVOKE<SettingsDto>("get_settings"),
 	updateSettings: (patch: SettingsPatch_Deserialize) => __TAURI_INVOKE<SettingsDto>("update_settings", { patch }),
 };
