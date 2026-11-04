@@ -1,0 +1,206 @@
+//! 阶段 01 Task 3：路径解析、库元数据与配置读写。
+//!
+//! 所有测试都只在 `tempfile::TempDir` 内落盘，绝不触碰用户目录。
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use visrecall_library::config::{AppConfig, BallConfig, CaptureConfig};
+use visrecall_library::paths::{ensure_library_root, AppPaths, LibraryMeta};
+
+fn backup_names(dir: &Path, prefix: &str) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|entry| {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            name.starts_with(prefix).then_some(name)
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn creates_library_metadata_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = ensure_library_root(dir.path()).unwrap();
+    assert_eq!(meta.format_version, 1);
+    assert!(!meta.library_id.is_empty());
+    assert!(dir.path().join("library.json").exists());
+
+    let again = ensure_library_root(dir.path()).unwrap();
+    assert_eq!(meta.library_id, again.library_id);
+    assert!(backup_names(dir.path(), "library.json.bad-").is_empty());
+}
+
+#[test]
+fn creates_library_subdirectories() {
+    let dir = tempfile::tempdir().unwrap();
+    ensure_library_root(dir.path()).unwrap();
+    for rel in ["originals/images", "texts", "thumbs", "tmp", "backups"] {
+        assert!(dir.path().join(rel).is_dir(), "missing directory {rel}");
+    }
+}
+
+#[test]
+fn rejects_newer_format_version() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("library.json"),
+        r#"{"library_id":"x","format_version":99,"created_at":0}"#,
+    )
+    .unwrap();
+    let err = ensure_library_root(dir.path()).unwrap_err();
+    assert!(format!("{err}").contains("format"));
+}
+
+#[test]
+fn rebuilds_corrupt_library_metadata_with_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let meta_path = dir.path().join("library.json");
+    fs::write(&meta_path, r#"{"format_version":1,"created_at":0}"#).unwrap();
+
+    let meta = ensure_library_root(dir.path()).unwrap();
+    assert_eq!(meta.format_version, 1);
+    assert!(!meta.library_id.is_empty());
+
+    let backups = backup_names(dir.path(), "library.json.bad-");
+    assert_eq!(backups.len(), 1, "expected one backup, got {backups:?}");
+    let raw = fs::read_to_string(&meta_path).unwrap();
+    let stored: LibraryMeta = serde_json::from_str(&raw).unwrap();
+    assert_eq!(stored.library_id, meta.library_id);
+}
+
+#[test]
+fn empty_library_id_is_treated_as_corrupt() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("library.json"),
+        r#"{"library_id":"  ","format_version":1,"created_at":0}"#,
+    )
+    .unwrap();
+
+    let meta = ensure_library_root(dir.path()).unwrap();
+    assert!(!meta.library_id.trim().is_empty());
+    assert_eq!(backup_names(dir.path(), "library.json.bad-").len(), 1);
+}
+
+#[test]
+fn config_roundtrips_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let cfg = AppConfig::default();
+    cfg.save_atomic(&path).unwrap();
+    let loaded = AppConfig::load_or_default(&path);
+    assert_eq!(loaded.hotkeys.capture, "Ctrl+Shift+S");
+    assert_eq!(loaded, cfg);
+}
+
+#[test]
+fn config_roundtrips_custom_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let mut cfg = AppConfig {
+        ball: BallConfig {
+            size: 64,
+            ..BallConfig::default()
+        },
+        capture: CaptureConfig {
+            realtime_fallback: false,
+        },
+        ..AppConfig::default()
+    };
+    cfg.ball.positions.insert("display-1".into(), (0.25, 0.75));
+    cfg.save_atomic(&path).unwrap();
+
+    let loaded = AppConfig::load_or_default(&path);
+    assert_eq!(loaded, cfg);
+    assert_eq!(loaded.ball.positions["display-1"], (0.25, 0.75));
+}
+
+#[test]
+fn default_config_matches_design() {
+    let cfg = AppConfig::default();
+    assert!(cfg.library_path.ends_with(Path::new("VisRecall")));
+    assert_eq!(cfg.hotkeys.capture, "Ctrl+Shift+S");
+    assert!(cfg.ball.enabled);
+    assert_eq!(cfg.ball.size, 48);
+    assert!(cfg.ball.positions.is_empty());
+    assert!(cfg.capture.realtime_fallback);
+    assert!(!cfg.privacy.clipboard_capture);
+    assert!(!cfg.privacy.telemetry);
+}
+
+#[test]
+fn missing_config_file_returns_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    assert_eq!(AppConfig::load_or_default(&path), AppConfig::default());
+    assert!(!path.exists(), "loading must not create the file");
+}
+
+#[test]
+fn partial_config_fills_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    fs::write(
+        &path,
+        r#"{"hotkeys":{"capture":"Ctrl+Alt+V"},"ball":{"size":64}}"#,
+    )
+    .unwrap();
+
+    let cfg = AppConfig::load_or_default(&path);
+    assert_eq!(cfg.hotkeys.capture, "Ctrl+Alt+V");
+    assert_eq!(cfg.ball.size, 64);
+    assert!(cfg.ball.enabled);
+    assert!(cfg.capture.realtime_fallback);
+    assert_eq!(cfg.library_path, AppConfig::default().library_path);
+}
+
+#[test]
+fn corrupt_config_is_backed_up_and_defaults_returned() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    fs::write(&path, "{ this is not json").unwrap();
+
+    let cfg = AppConfig::load_or_default(&path);
+    assert_eq!(cfg, AppConfig::default());
+    assert!(!path.exists());
+    assert_eq!(backup_names(dir.path(), "config.json.bad-").len(), 1);
+}
+
+#[test]
+fn save_atomic_creates_parent_and_leaves_no_temp_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nested").join("config.json");
+    AppConfig::default().save_atomic(&path).unwrap();
+    assert!(path.exists());
+    assert!(!path.with_file_name("config.json.tmp").exists());
+    let tmp_files: Vec<PathBuf> = fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .filter_map(|entry| {
+            let entry = entry.unwrap();
+            entry
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+                .then_some(entry.path())
+        })
+        .collect();
+    assert!(tmp_files.is_empty(), "leftover temp files: {tmp_files:?}");
+}
+
+#[test]
+fn app_paths_resolve_under_environment_roots() {
+    if std::env::var_os("APPDATA").is_none() || std::env::var_os("USERPROFILE").is_none() {
+        return;
+    }
+    let paths = AppPaths::resolve().unwrap();
+    assert!(paths
+        .config_file
+        .ends_with(Path::new("VisRecall/config.json")));
+    assert!(paths
+        .default_library_root
+        .ends_with(Path::new("Documents/VisRecall")));
+    assert!(paths.config_file.is_absolute());
+}
