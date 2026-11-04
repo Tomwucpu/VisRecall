@@ -963,7 +963,7 @@ git commit -m "feat(capture): add display enumeration and dpi geometry"
   - `trait FrameGrabber: Send + Sync { fn grab(&self, displays: &[DisplayInfo]) -> Result<Vec<RawFrame>, AppError>; }`
   - `GdiFrameGrabber`
   - `is_blank_frame(frame: &RawFrame) -> bool`
-  - `RawFrame::to_png(&self) -> Result<Vec<u8>, AppError>`（调试/测试用）
+  - `RawFrameExt::to_png(&self) -> Result<Vec<u8>, AppError>`（扩展 trait；`RawFrame` 定义在 domain，不能在 capture 添加 inherent impl；调试/测试用）
 
 - [ ] **Step 1: 写失败测试**
 
@@ -998,7 +998,7 @@ Expected: 编译失败。
 
 - [ ] **Step 3: 实现 GDI 抓帧**
 
-`crates/capture/Cargo.toml` 加 `windows` 依赖，至少启用：`Win32_Foundation`、`Win32_Graphics_Gdi`、`Win32_Graphics_Dwm`、`Win32_UI_WindowsAndMessaging`、`Win32_UI_HiDpi`、`Win32_System_Threading`、`Win32_System_ProcessStatus`；另加 `image`（png feature）用于 `RawFrame::to_png`。版本以 `cargo add windows` 实际解析并写入 `Cargo.lock` 为准。
+`crates/capture/Cargo.toml` 加 `windows` 依赖，至少启用：`Win32_Foundation`、`Win32_Graphics_Gdi`、`Win32_Graphics_Dwm`、`Win32_UI_WindowsAndMessaging`、`Win32_UI_HiDpi`、`Win32_System_Threading`、`Win32_System_ProcessStatus`；另加 `image`（png feature）用于 `RawFrameExt::to_png`。版本以 `cargo add windows` 实际解析并写入 `Cargo.lock` 为准。
 
 对每个显示器：
 
