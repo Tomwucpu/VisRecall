@@ -618,7 +618,7 @@ fn startup_recovery_requeues_running_jobs() {
 }
 ```
 
-`mark_job_running_for_test` 是 `#[cfg(test)]` 辅助，直接执行 `UPDATE jobs SET state='running'`；生产路径通过任务状态机修改。
+`mark_job_running_for_test` 是 `#[doc(hidden)] pub` 辅助（集成测试看不到 `#[cfg(test)]` 符号），直接执行 `UPDATE jobs SET state='running'`；生产路径通过任务状态机修改。
 
 - [ ] **Step 2: 运行测试确认失败**
 
@@ -760,6 +760,8 @@ fn schedule_destroy(app: &tauri::AppHandle) {
 
 `show_main_window`：窗口存在则 `show` + `set_focus`；已销毁则用 `WebviewWindowBuilder` 重建并加载 Vite URL（开发）或 `index.html`（生产）。阶段 01 允许重建时间为 300–800ms，前端显示骨架屏。
 
+阶段 01 启动不创建主窗口：从 `tauri.conf.json` 移除 `app.windows` 数组；`show_main_window` 在窗口不存在时用 `WebviewWindowBuilder` 创建。冷启动只到托盘可用；首次打开主窗口通过托盘菜单或单实例回调（与架构 §3.3 一致）。
+
 - [ ] **Step 3: 实现命令与启动恢复**
 
 `crates/app-core/Cargo.toml` 加 `visrecall-library`、`visrecall-domain`、`serde`、`crossbeam-channel`。
@@ -781,7 +783,7 @@ pnpm tauri dev
 ```
 
 Expected:
-1. 主窗口显示；关闭后窗口消失，托盘仍在。
+1. 托盘可用；通过托盘「打开主窗口」创建并显示主窗口；关闭后窗口消失，托盘仍在。
 2. 再次启动第二个实例，已运行实例的主窗口被唤醒，第二进程退出。
 3. 关闭 60s 后任务管理器无 `msedgewebview2.exe` 残留。
 4. 托盘「退出」结束进程。
@@ -810,7 +812,7 @@ git commit -m "feat(shell): add tauri tray single-instance and window lifecycle"
   - `HotkeySpec::parse(&str) -> Result<HotkeySpec, AppError>`
   - `HotkeySpec::format(&self) -> String`
   - `HotkeySpec::register_tuple(&self) -> (u32, u32)`
-  - `spawn_hotkey_thread(spec, Sender<ShellEvent>) -> HotkeyHandle`
+  - `spawn_hotkey_thread(spec, Sender<ShellEvent>) -> Result<HotkeyHandle, AppError>`（等待注册结果后返回，便于 app-core 提示占用）
   - `HotkeyHandle { pub fn stop(&self) }`
 
 - [ ] **Step 1: 写失败测试**
@@ -873,6 +875,8 @@ git commit -m "feat(shell): add global hotkey thread"
 
 **Files:**
 - Create: `crates/capture/src/{lib.rs,display.rs}`
+- Create: `crates/capture/examples/list_displays.rs`
+- Modify: `src-tauri/src/main.rs`
 - Test: `crates/capture/tests/display_geometry.rs`
 
 **Interfaces:**
@@ -993,7 +997,7 @@ Expected: 编译失败。
 
 - [ ] **Step 3: 实现 GDI 抓帧**
 
-`crates/capture/Cargo.toml` 加 `windows` 依赖，至少启用：`Win32_Foundation`、`Win32_Graphics_Gdi`、`Win32_Graphics_Dwm`、`Win32_UI_WindowsAndMessaging`、`Win32_UI_HiDpi`、`Win32_System_Threading`、`Win32_System_ProcessStatus`。版本以 `cargo add windows` 实际解析并写入 `Cargo.lock` 为准。
+`crates/capture/Cargo.toml` 加 `windows` 依赖，至少启用：`Win32_Foundation`、`Win32_Graphics_Gdi`、`Win32_Graphics_Dwm`、`Win32_UI_WindowsAndMessaging`、`Win32_UI_HiDpi`、`Win32_System_Threading`、`Win32_System_ProcessStatus`；另加 `image`（png feature）用于 `RawFrame::to_png`。版本以 `cargo add windows` 实际解析并写入 `Cargo.lock` 为准。
 
 对每个显示器：
 
@@ -1218,7 +1222,7 @@ Run:
 cargo run -p visrecall-shell --example overlay_spike
 ```
 
-Expected: 每台显示器显示一张静态测试图（先用 `tests/fixtures/overlay-4k.png`），内容与屏幕 1:1；在 150% 屏幕上边界不缩放、不偏移；移动鼠标无重影。
+Expected: 每台显示器显示一张静态测试图（example 运行时生成，不提交大二进制 fixture），内容与屏幕 1:1；在 150% 屏幕上边界不缩放、不偏移；移动鼠标无重影。
 
 - [ ] **Step 5: 提交**
 
@@ -1390,7 +1394,8 @@ git commit -m "feat(shell): add overlay input and crop readback"
 **Files:**
 - Create: `crates/app-core/src/capture_flow.rs`
 - Modify: `crates/app-core/src/{app.rs,events.rs}`
-- Create: `tests/capture_flow.rs`
+- Modify: `crates/library/src/files.rs`（可用空间检查）
+- Test: `crates/app-core/tests/capture_flow.rs`
 
 **Interfaces:**
 - Consumes: `FrameGrabber`, `WindowProbe`, `OverlayHandle`, `Library`
@@ -1428,12 +1433,12 @@ fn persist_writes_png_and_inserts_item() {
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `cargo test --test capture_flow`
+Run: `cargo test -p visrecall-app-core --test capture_flow`
 Expected: 编译失败。
 
 - [ ] **Step 3: 实现编排与落盘**
 
-`crates/app-core/Cargo.toml` 追加 `visrecall-library`、`image`（png feature）、`sha2`、`tokio`（rt + time）、`crossbeam-channel`。
+`crates/app-core/Cargo.toml` 追加 `visrecall-library`、`visrecall-capture`、`visrecall-shell`、`image`（png feature）、`sha2`、`tokio`（rt + time）、`crossbeam-channel`、`time`（路径日期格式化，local-offset 失败回退 UTC）。可用空间检查实现为 `crates/library/src/files.rs` 的 `free_space_bytes(path)`（`GetDiskFreeSpaceExW`），由 app-core 调用。
 
 `persist_capture`：
 
@@ -1450,7 +1455,7 @@ Expected: 编译失败。
 
 Run:
 ```bash
-cargo test --test capture_flow
+cargo test -p visrecall-app-core --test capture_flow
 pnpm tauri dev
 ```
 
@@ -1459,7 +1464,7 @@ Expected: 集成测试通过；快捷键 → 框选 → Enter 后，库目录出
 - [ ] **Step 5: 提交**
 
 ```bash
-git add crates/app-core tests
+git add crates/app-core crates/library
 git commit -m "feat(app): wire capture persistence pipeline"
 ```
 
@@ -1470,6 +1475,7 @@ git commit -m "feat(app): wire capture persistence pipeline"
 **Files:**
 - Create: `crates/shell/src/ball.rs`
 - Modify: `crates/shell/src/lib.rs`, `crates/app-core/src/app.rs`
+- Modify: `docs/specs/v0.1/01-capture-loop/design.md`（先补 `ShellEvent::BallMoved` 签名）
 - Test: `crates/shell/tests/ball_position.rs`
 
 **Interfaces:**
@@ -1511,7 +1517,7 @@ Expected: 编译失败。
 - 创建 `WS_POPUP` 窗口，扩展样式 `WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`。
 - 32 位 ARGB DIB，GDI+ 绘制圆/阴影/白色图标；`UpdateLayeredWindow` 显示。
 - 单击（按下后移动 ≤4px）发送 `ShellEvent::CaptureRequest(CaptureTrigger::BallClick)`。
-- 拖动更新窗口位置；松开后按显示器保存归一化坐标到 `config.json`（经 app-core 写配置）。
+- 拖动更新窗口位置；松开后发送 `ShellEvent::BallMoved { display_id, nx, ny }`，由 app-core 写入 `config.json`（悬浮球线程不直接写配置）。
 - `set_visible(false)` 时 `ShowWindow(SW_HIDE)`；快捷键仍工作。
 
 - [ ] **Step 4: 手工验证**
@@ -1534,6 +1540,7 @@ git commit -m "feat(shell): add minimal floating ball"
 **Files:**
 - Create: `crates/shell/src/drop_target.rs`
 - Create: `crates/app-core/src/import_flow.rs`
+- Modify: `crates/app-core/src/app.rs`（路由 `ShellEvent::Drop` 到 ImportFlow）
 - Test: `crates/shell/tests/drop_parse.rs`
 
 **Interfaces:**
@@ -1590,6 +1597,7 @@ Expected: 编译失败。
   - 文本：UTF-8 优先，`encoding_rs` 回退 GB18030；写入 `texts/<id>.txt`；标题取文件名或首个 `# ` 标题。
   - URL：`reqwest` 阻塞客户端超时 5s 抓 `<title>`/站点名；失败标题=URL；阶段 01 允许先用 `reqwest::blocking` 在工作线程。
   - 混合：图片优先，文本写入 `note`。
+  - 文本/链接素材写入成功后标记 `ready`（无缩略图）；图片素材保持 `parsing`，由 Task 17 生成缩略图后转 `ready`。
   - 返回插入的 `Item` 列表并发送事件。
 
 - [ ] **Step 4: 运行测试与四类来源手工验证**
@@ -1623,6 +1631,7 @@ git commit -m "feat(shell): add ole drop target and import flow"
 - Create: `crates/app-core/src/thumbnail.rs`
 - Create: `src-tauri/src/protocol.rs`
 - Modify: `src-tauri/src/main.rs`
+- Modify: `crates/app-core/src/import_flow.rs`（导入图片也生成缩略图）
 - Test: `crates/app-core/tests/thumbnail.rs`
 
 **Interfaces:**
@@ -1663,6 +1672,7 @@ Expected: 编译失败。
 - 在 `CaptureCoordinator::on_overlay_event` 中，`persist_capture` 成功后用 `spawn_blocking` 调用 `generate_thumbnail`；成功后更新 DB 与事件。
 - 捕获提交后：写 `thumbs/<id>.png`，`Library::update_status(id, Ready, Some(relative))`，发 `item_updated`。
 - 缩略图失败：`Library::update_status(id, Failed, None)`，发 `item_updated`；原图与卡片占位保留，不删除素材。
+- 导入图片同样在后台生成 `thumbs/<id>.png` 并转 `ready`；失败转 `failed`，与捕获路径一致。
 - 协议：在 `src-tauri/src/main.rs` 的 `tauri::Builder` 上调用 `register_uri_scheme_protocol("visrecall", ...)`；解析 URI path，只接受 `/thumb/<uuid>`；查 DB → `relative_to_root` → 读文件 → 返回 `200` + `image/png`；非法 ID/路径/缺文件返回 `404` 或 `400`。
 - Windows 上 Tauri 自定义协议实际映射为 `http://visrecall.localhost/thumb/<id>`；前端使用 `@tauri-apps/api/core` 的 `convertFileSrc` 转换逻辑地址，测试中 mock 为原样返回。
 - 不暴露绝对路径；不读取库外文件。

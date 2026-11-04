@@ -121,8 +121,9 @@ pub enum CaptureTrigger { Hotkey, BallClick, UiButton, Drop }
 
 pub enum ShellEvent {
     CaptureRequest(CaptureTrigger),
-    Drop(crate::drop_target::DropContent),
+    Drop(visrecall_domain::drop::DropContent),
     BallVisibility(bool),
+    BallMoved { display_id: String, nx: f32, ny: f32 },
 }
 
 pub enum OverlayCommand {
@@ -250,6 +251,8 @@ pub trait WindowProbe: Send + Sync {
 
 pub fn now_millis() -> i64;  // 全部 captured_at/created_at/updated_at 使用 Unix 毫秒
 ```
+
+> `FrameGrabber`/`WindowProbe` 的 trait 声明与实现位于 `crates/capture`（`trait_defs.rs` / `window.rs`），domain 只定义数据与错误类型；`DropContent` 位于 `crates/domain/src/drop.rs`，由 shell 重新导出。阶段 01 的 `ForegroundInfo.display_name` 解释为进程显示名；所在显示器由 `bounds` 与 `DisplayInfo` 交集推断（schema 不存显示器列）。
 
 > 时间戳统一使用 Unix **毫秒**。阶段 01 的 keyset 游标用 `captured_at`（毫秒）+ `rowid` 兜底；同一毫秒内极少见，阶段 02 若需要可升级为复合游标。
 
