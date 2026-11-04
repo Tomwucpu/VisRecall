@@ -1,6 +1,13 @@
+import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import App from "./app/App";
+import { ErrorBoundary } from "./app/ErrorBoundary";
 import "./styles/globals.css";
 
 createRoot(document.getElementById("root")!).render(
-  <div style={{ padding: 24 }}>VisRecall</div>,
+  <StrictMode>
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
+  </StrictMode>,
 );

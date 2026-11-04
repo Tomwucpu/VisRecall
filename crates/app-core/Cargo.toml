@@ -2,3 +2,14 @@
 name = "visrecall-app-core"
 version.workspace = true
 edition.workspace = true
+
+[dependencies]
+visrecall-domain = { path = "../domain" }
+visrecall-library = { path = "../library" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+crossbeam-channel = "0.5"
+
+[dev-dependencies]
+tempfile = "3"
