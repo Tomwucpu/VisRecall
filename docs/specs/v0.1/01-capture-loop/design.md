@@ -58,6 +58,7 @@ VisRecall/
 │  ├─ build.rs
 │  ├─ tauri.conf.json
 │  ├─ capabilities/default.json
+│  ├─ icons/icon.ico              # 占位图标；正式图标阶段 04 替换
 │  └─ src/{main.rs, tray.rs, ipc.rs, protocol.rs, window_lifecycle.rs}
 ├─ src/
 │  ├─ main.tsx

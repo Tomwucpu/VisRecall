@@ -34,7 +34,7 @@
 - Create: `crates/capture/{Cargo.toml,src/lib.rs}`
 - Create: `crates/shell/{Cargo.toml,src/lib.rs}`
 - Create: `crates/app-core/{Cargo.toml,src/lib.rs}`
-- Create: `src-tauri/{Cargo.toml,build.rs,tauri.conf.json,capabilities/default.json,src/main.rs}`
+- Create: `src-tauri/{Cargo.toml,build.rs,tauri.conf.json,capabilities/default.json,icons/icon.ico,src/main.rs}`（`icon.ico` 为 Windows tauri-build 必需的最小占位图标，阶段 04 替换）
 - Create: `package.json`, `pnpm-workspace.yaml`, `vite.config.ts`, `eslint.config.js`, `tsconfig.json`, `index.html`, `src/main.tsx`, `src/styles/globals.css`, `src/test/setup.ts`
 
 **Interfaces:**
