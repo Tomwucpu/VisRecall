@@ -1177,6 +1177,7 @@ git commit -m "feat(shell): add d3d11 overlay spike"
 **Files:**
 - Modify: `crates/shell/src/overlay/{mod.rs,d3d.rs,render.rs}`
 - Create: `crates/shell/src/overlay/frame.rs`
+- Create: `crates/shell/examples/overlay_frozen.rs`（手工验证：抓一帧并显示冻结画面）
 - Test: `crates/shell/tests/frame_upload.rs`（纯数据/尺寸校验）
 
 **Interfaces:**
@@ -1220,10 +1221,10 @@ Expected: 编译失败。
 
 Run:
 ```bash
-cargo run -p visrecall-shell --example overlay_spike
+cargo run -p visrecall-shell --example overlay_frozen -- --duration 5
 ```
 
-Expected: 每台显示器显示一张静态测试图（example 运行时生成，不提交大二进制 fixture），内容与屏幕 1:1；在 150% 屏幕上边界不缩放、不偏移；移动鼠标无重影。
+Expected: 每台显示器显示抓取的冻结画面（运行时抓屏，不提交大二进制 fixture），内容与屏幕 1:1；在 150% 屏幕上边界不缩放、不偏移；移动鼠标无重影。
 
 - [ ] **Step 5: 提交**
 
