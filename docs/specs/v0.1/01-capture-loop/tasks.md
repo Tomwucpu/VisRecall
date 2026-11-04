@@ -18,7 +18,7 @@
 - 托盘常驻 ≤150MB（目标 40–70MB）；空闲 CPU <1%。
 - 所有几何使用虚拟屏幕物理像素；Per-Monitor V2 DPI 感知。
 - API Key 不进入前端；阶段 01 不接云端。
-- 依赖锁 `Cargo.lock` / `pnpm-lock.yaml`；每个任务结束提交一次。
+- 依赖锁 `Cargo.lock` / `pnpm-lock.yaml`；每个任务结束提交一次。各任务列出的 `git add` 列表默认包含当次依赖变更产生的锁文件更新。
 - 阶段 01 缩略图用 PNG（480px 长边），不是 `.webp`；阶段 04 再评估。
 
 ---
