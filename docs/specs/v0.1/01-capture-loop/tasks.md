@@ -1640,7 +1640,7 @@ git commit -m "feat(shell): add ole drop target and import flow"
 - Create: `crates/app-core/src/thumbnail.rs`
 - Create: `src-tauri/src/protocol.rs`
 - Modify: `src-tauri/src/main.rs`
-- Modify: `crates/app-core/src/import_flow.rs`（导入图片也生成缩略图）
+- Modify: `crates/app-core/src/{capture_flow.rs,import_flow.rs}`（捕获/导入图片都生成缩略图）
 - Test: `crates/app-core/tests/thumbnail.rs`
 
 **Interfaces:**
