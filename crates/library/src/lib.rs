@@ -3,6 +3,7 @@
 //!
 //! 文件落盘（图片/文本/缩略图）由上层编排调用 [`files`] 完成；本 crate 只负责元数据。
 
+pub mod cleanup;
 pub mod config;
 pub mod db;
 pub mod files;
@@ -10,6 +11,7 @@ pub mod items;
 pub mod migrations;
 pub mod paths;
 
+pub use cleanup::StartupCleanup;
 pub use config::{AppConfig, BallConfig, CaptureConfig, HotkeyConfig, PrivacyConfig};
 pub use db::Library;
 pub use paths::{ensure_library_root, AppPaths, LibraryMeta};

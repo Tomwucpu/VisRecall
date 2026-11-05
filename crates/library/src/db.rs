@@ -29,7 +29,9 @@ pub struct Library {
 
 impl Library {
     /// 打开（必要时初始化）库：建目录与 `library.json` → 打开 `visrecall.db`
-    /// → 设置 PRAGMA → 应用未执行的迁移。
+    /// → 设置 PRAGMA → 应用未执行的迁移 → 启动清理（design §3.3 第 4 步）。
+    ///
+    /// 启动清理失败只记录 warn，不影响打开库。
     pub fn open(root: PathBuf) -> Result<Library, AppError> {
         ensure_library_root(&root)?;
 
@@ -37,10 +39,21 @@ impl Library {
         conn.execute_batch(OPEN_PRAGMAS).map_err(db_error)?;
         migrations::apply(&mut conn)?;
 
-        Ok(Library {
+        let library = Library {
             root,
             write: Mutex::new(conn),
-        })
+        };
+
+        match library.cleanup_startup() {
+            Ok(cleanup) => tracing::info!(
+                tmp_removed = cleanup.tmp_removed,
+                orphans = cleanup.orphans,
+                "startup cleanup finished"
+            ),
+            Err(err) => tracing::warn!(%err, "startup cleanup failed"),
+        }
+
+        Ok(library)
     }
 
     /// 库根目录（调用方传入的原始路径，未 canonicalize）。
