@@ -1548,6 +1548,8 @@ git commit -m "feat(shell): add minimal floating ball"
 - Create: `crates/shell/src/drop_target.rs`
 - Create: `crates/app-core/src/import_flow.rs`
 - Modify: `crates/app-core/src/app.rs`（路由 `ShellEvent::Drop` 到 ImportFlow）
+- Modify: `crates/shell/src/{lib.rs,ball.rs}`（OLE 初始化/注册 drop target/拖入视觉）
+- Modify: `crates/library/src/items.rs`（`set_item_note`，混合图片+文本写备注）
 - Test: `crates/shell/tests/drop_parse.rs`
 
 **Interfaces:**

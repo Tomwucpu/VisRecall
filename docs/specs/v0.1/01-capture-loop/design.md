@@ -123,6 +123,7 @@ pub enum CaptureTrigger { Hotkey, BallClick, UiButton, Drop }
 pub enum ShellEvent {
     CaptureRequest(CaptureTrigger),
     Drop(visrecall_domain::drop::DropContent),
+    DropRejected(String),
     BallVisibility(bool),
     BallMoved { display_id: String, nx: f32, ny: f32 },
 }
@@ -235,6 +236,7 @@ pub struct WindowInfo {
 
 pub enum DropContent {
     Files(Vec<std::path::PathBuf>),
+    FilesWithNote { files: Vec<std::path::PathBuf>, note: String },
     Text { plain: String, html: Option<String> },
     Url { url: String },
     ImageDib { width: u32, height: u32, bgra: Vec<u8> },
@@ -500,6 +502,7 @@ pub trait DropTargetSink: Send {
 
 - 悬浮球线程 `OleInitialize` + `RegisterDragDrop`；`DragEnter/DragOver` 只读可用格式并更新视觉状态，`Drop` 读取数据后投递 `ShellEvent::Drop`。
 - 阶段 01 必须支持 `CF_HDROP`、`CF_UNICODETEXT`、`CF_HTML`、`CF_DIB`；`CF_DIB` 用 `GetDIBits` 转 BGRA 后走图片入库。若拖拽源还注册了 PNG 格式，优先按 PNG 解码，失败回退 `CF_DIB`。
+- 混合图片 + 文本使用 `DropContent::FilesWithNote`；图片入库后经 `Library::set_item_note(id, note)` 写入 `items.note`，不单独建文本条目。
 - 文本/HTML 剥离格式用简单标签剥离与 `html_escape` 反向处理；URL 用 `url` crate 判定。
 - 文件导入在 app-core 的导入流程中逐文件校验、复制/转码，不阻塞悬浮球线程。
 
