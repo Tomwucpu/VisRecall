@@ -41,7 +41,7 @@
 - Consumes: 无
 - Produces: 可编译的 Cargo workspace、可启动的 Tauri 窗口、可构建的 React 前端。
 
-- [ ] **Step 1: 创建 Cargo workspace**
+- [x] **Step 1: 创建 Cargo workspace**
 
 ```toml
 # Cargo.toml
@@ -86,7 +86,7 @@ pub fn version() -> &'static str { env!("CARGO_PKG_VERSION") }
 
 其余 crate 同理；`src-tauri` 的 `main.rs` 先只调用 `tauri::Builder::default().run(tauri::generate_context!()).expect("tauri run");`。
 
-- [ ] **Step 2: 创建 Tauri 配置与 React 前端**
+- [x] **Step 2: 创建 Tauri 配置与 React 前端**
 
 `src-tauri/build.rs`：
 
@@ -291,7 +291,7 @@ import "@testing-library/jest-dom/vitest";
 
 `vite.config.ts` 固定端口 5173，`src/main.tsx` 渲染一个最小 `App`，先显示「VisRecall」。
 
-- [ ] **Step 3: 安装依赖并生成锁文件**
+- [x] **Step 3: 安装依赖并生成锁文件**
 
 Run:
 ```bash
@@ -301,7 +301,7 @@ cargo fetch
 
 Expected: 生成 `pnpm-lock.yaml`、`Cargo.lock`，无网络错误。
 
-- [ ] **Step 4: 验证骨架**
+- [x] **Step 4: 验证骨架**
 
 Run:
 ```bash
@@ -313,7 +313,7 @@ pnpm build
 
 Expected: 三条命令均退出码 0；`dist/` 生成。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add Cargo.toml Cargo.lock rust-toolchain.toml .gitignore crates src-tauri package.json pnpm-lock.yaml pnpm-workspace.yaml vite.config.ts tsconfig.json index.html src
@@ -332,7 +332,7 @@ git commit -m "chore: scaffold tauri and cargo workspace"
 - Consumes: 无
 - Produces: `PhysicalPoint`, `PhysicalRect`, `DisplayInfo`, `RawFrame`, `ForegroundInfo`, `CapturedImage`, `DropContent`, `now_millis()`, `ItemKind`, `ItemStatus`, `NewItem`, `Item`, `AppError`（签名见 `design.md` §4）。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `crates/domain/tests/geometry.rs`：
 
@@ -368,12 +368,12 @@ fn contains_uses_half_open_edges() {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cargo test -p visrecall-domain`
 Expected: 编译失败，`PhysicalRect` 未定义。
 
-- [ ] **Step 3: 实现 domain 类型**
+- [x] **Step 3: 实现 domain 类型**
 
 `crates/domain/Cargo.toml` 加 `serde`、`thiserror`、`uuid`；dev-dependencies 加 `proptest`。
 
@@ -398,12 +398,12 @@ pub fn now_millis() -> i64 {
 
 `item.rs` 的枚举用 `#[serde(rename_all = "snake_case")]`，与数据库 CHECK 值一致。
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `cargo test -p visrecall-domain`
 Expected: 4 个测试通过。
 
-- [ ] **Step 5: 增加属性测试**
+- [x] **Step 5: 增加属性测试**
 
 在 `Cargo.toml` 加 `proptest = "1"`，补：
 
@@ -424,7 +424,7 @@ proptest! {
 Run: `cargo test -p visrecall-domain`
 Expected: 属性测试通过。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add crates/domain
@@ -447,7 +447,7 @@ git commit -m "feat(domain): add geometry and core item types"
   - `AppConfig::load_or_default(&Path) -> AppConfig`
   - `AppConfig::save_atomic(&self, &Path) -> Result<(), AppError>`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```rust
 use std::fs;
@@ -487,12 +487,12 @@ fn config_roundtrips_defaults() {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cargo test -p visrecall-library`
 Expected: 编译失败，模块不存在。
 
-- [ ] **Step 3: 实现路径、元数据与配置**
+- [x] **Step 3: 实现路径、元数据与配置**
 
 `crates/library/Cargo.toml` 加 `visrecall-domain`、`serde`、`serde_json`、`uuid`；dev-dependencies 加 `tempfile`。
 
@@ -511,12 +511,12 @@ Expected: 编译失败，模块不存在。
 
 `AppConfig` 使用 `serde`，字段见 `design.md` §10.3；`save_atomic` 写 `config.json.tmp` → `sync_all` → `rename`。读取失败时把坏文件重命名为 `config.json.bad-<unix>` 并返回默认值。
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `cargo test -p visrecall-library`
 Expected: 3 个测试通过。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add crates/library
@@ -546,7 +546,7 @@ git commit -m "feat(library): add config and library metadata"
   - `Library::job_state(&self, item_id: &str, stage: &str) -> Result<String, AppError>`
   - `Library::relative_to_root(&self, rel: &str) -> Result<PathBuf, AppError>`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```rust
 use visrecall_domain::item::{ItemKind, ItemStatus, NewItem};
@@ -620,12 +620,12 @@ fn startup_recovery_requeues_running_jobs() {
 
 `mark_job_running_for_test` 是 `#[doc(hidden)] pub` 辅助（集成测试看不到 `#[cfg(test)]` 符号），直接执行 `UPDATE jobs SET state='running'`；生产路径通过任务状态机修改。
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cargo test -p visrecall-library`
 Expected: 编译失败，`Library`/`insert_item` 未定义。
 
-- [ ] **Step 3: 实现迁移与 CRUD**
+- [x] **Step 3: 实现迁移与 CRUD**
 
 `crates/library/Cargo.toml` 加 `rusqlite = { features = ["bundled"] }`、`visrecall-domain`、`serde_json`；dev-dependencies 加 `tempfile`。版本以 `cargo add` 解析为准。
 
@@ -639,12 +639,12 @@ Expected: 编译失败，`Library`/`insert_item` 未定义。
 - `job_state`：查询 `(item_id, stage)` 的 state。
 - `relative_to_root`：拒绝绝对路径与 `..`，拼接后 `canonicalize` 并校验前缀。
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `cargo test -p visrecall-library`
 Expected: 7 个测试通过（含 Task 3）。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add crates/library
@@ -670,7 +670,7 @@ git commit -m "feat(library): add sqlite items store"
   - `src-tauri/src/ipc.rs` 中的 `ItemDto`、`AppStatus`、`SettingsDto`、`SettingsPatch`、`ApiError`（见 `design.md` §11.1）
   - 事件总线 `AppEvent`（阶段 01 先只定义，后续任务接入）
 
-- [ ] **Step 1: 接入 Tauri 插件与托盘**
+- [x] **Step 1: 接入 Tauri 插件与托盘**
 
 `src-tauri/Cargo.toml` 增加：
 
@@ -725,7 +725,7 @@ fn main() {
 
 命令加 `#[tauri::command] #[specta::specta]`。托盘菜单用 `TrayIconBuilder` + `MenuBuilder`；图标用代码生成的 32×32 RGBA 占位（`tauri::image::Image::new_owned`），不引入图片资源。
 
-- [ ] **Step 2: 实现主窗口 60s 销毁生命周期**
+- [x] **Step 2: 实现主窗口 60s 销毁生命周期**
 
 `window_lifecycle.rs`：
 
@@ -762,7 +762,7 @@ fn schedule_destroy(app: &tauri::AppHandle) {
 
 阶段 01 启动不创建主窗口：从 `tauri.conf.json` 移除 `app.windows` 数组；`show_main_window` 在窗口不存在时用 `WebviewWindowBuilder` 创建。冷启动只到托盘可用；首次打开主窗口通过托盘菜单或单实例回调（与架构 §3.3 一致）。
 
-- [ ] **Step 3: 实现命令与启动恢复**
+- [x] **Step 3: 实现命令与启动恢复**
 
 `crates/app-core/Cargo.toml` 加 `visrecall-library`、`visrecall-domain`、`serde`、`crossbeam-channel`。
 
@@ -775,7 +775,7 @@ fn schedule_destroy(app: &tauri::AppHandle) {
 - `get_settings`/`update_settings`：只允许修改 `ball_enabled`、`ball_size`、`capture_hotkey`；写配置走原子写入；快捷键变更在阶段 02 才支持热重载，阶段 01 返回 `InvalidInput("restart required")` 并保留旧值。
 - 库打开失败：主窗口显示错误状态与库路径，托盘图标进入异常态；不自动新建覆盖。完整的「重试 / 重新定位 / 新建库」恢复页在阶段 02 实现。
 
-- [ ] **Step 4: 手工验证**
+- [x] **Step 4: 手工验证**
 
 Run:
 ```bash
@@ -790,7 +790,7 @@ Expected:
 5. 托盘「打开主窗口」能重新创建窗口。
 6. `src/lib/bindings.ts` 已生成并纳入版本控制；后续 `pnpm typecheck` 依赖它。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src-tauri crates/app-core src/app
@@ -816,7 +816,7 @@ git commit -m "feat(shell): add tauri tray single-instance and window lifecycle"
   - `spawn_hotkey_thread(spec, Sender<ShellEvent>) -> Result<HotkeyHandle, AppError>`（等待注册结果后返回，便于 app-core 提示占用）
   - `HotkeyHandle { pub fn stop(&self) }`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```rust
 use visrecall_shell::hotkey::HotkeySpec;
@@ -839,12 +839,12 @@ fn rejects_unknown_key() {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cargo test -p visrecall-shell`
 Expected: 编译失败，`HotkeySpec` 未定义。
 
-- [ ] **Step 3: 实现解析与注册线程**
+- [x] **Step 3: 实现解析与注册线程**
 
 `crates/shell/Cargo.toml` 追加 `crossbeam-channel`、`windows`（`Win32_UI_Input_KeyboardAndMouse`、`Win32_UI_WindowsAndMessaging`、`Win32_Foundation`）。
 
@@ -853,7 +853,7 @@ Expected: 编译失败，`HotkeySpec` 未定义。
 - 线程：`RegisterHotKey(None, id, mods, vk)` → `GetMessageW` 循环 → 收到 `WM_HOTKEY` 发送 `ShellEvent::CaptureRequest(CaptureTrigger::Hotkey)` → 退出时 `UnregisterHotKey`。
 - 注册失败返回 `AppError::InvalidInput("hotkey occupied")`，由 app-core 发托盘通知。
 
-- [ ] **Step 4: 运行测试并手工验证**
+- [x] **Step 4: 运行测试并手工验证**
 
 Run:
 ```bash
@@ -863,7 +863,7 @@ pnpm tauri dev
 
 Expected: 单测 3 个通过；按 `Ctrl+Shift+S` 日志出现 `CaptureRequest`；用其他程序占用该组合键后，启动日志出现 `hotkey occupied`。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add crates/shell crates/app-core
@@ -888,7 +888,7 @@ git commit -m "feat(shell): add global hotkey thread"
   - `virtual_bounds(displays: &[DisplayInfo]) -> PhysicalRect`
   - `normalize_position(display: &DisplayInfo, point: PhysicalPoint) -> (f32, f32)`（用于悬浮球位置记忆）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```rust
 use visrecall_capture::display::{display_for_point, virtual_bounds};
@@ -918,12 +918,12 @@ fn virtual_bounds_cover_all_displays() {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cargo test -p visrecall-capture`
 Expected: 编译失败。
 
-- [ ] **Step 3: 实现 Win32 枚举**
+- [x] **Step 3: 实现 Win32 枚举**
 
 - `EnumDisplayMonitors` + `GetMonitorInfoW` 获取 `rcMonitor`/`rcWork`/`MONITORINFOF_PRIMARY`。
 - `GetDpiForMonitor(MDT_EFFECTIVE_DPI)` 获取 DPI（若调用失败，退回 96）。
@@ -931,7 +931,7 @@ Expected: 编译失败。
 - 启动时设置 Per-Monitor V2：在 `main.rs` 最早期调用 `SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)`；若已由 manifest 设置则忽略错误。
 - 悬浮球位置归一化：`(point.x - bounds.x) / bounds.width`，保存到配置。
 
-- [ ] **Step 4: 运行测试并打印真实显示器**
+- [x] **Step 4: 运行测试并打印真实显示器**
 
 Run:
 ```bash
@@ -941,7 +941,7 @@ cargo run -p visrecall-capture --example list_displays
 
 `examples/list_displays.rs` 打印每台显示器的 id、bounds、dpi、primary。Expected: 与 Windows 显示设置一致；150% 屏幕 dpi=144。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add crates/capture
@@ -965,7 +965,7 @@ git commit -m "feat(capture): add display enumeration and dpi geometry"
   - `is_blank_frame(frame: &RawFrame) -> bool`
   - `RawFrameExt::to_png(&self) -> Result<Vec<u8>, AppError>`（扩展 trait；`RawFrame` 定义在 domain，不能在 capture 添加 inherent impl；调试/测试用）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```rust
 use visrecall_capture::{grab_gdi::is_blank_frame, trait_defs::RawFrame};
@@ -991,12 +991,12 @@ fn non_black_frame_is_not_blank() {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cargo test -p visrecall-capture`
 Expected: 编译失败。
 
-- [ ] **Step 3: 实现 GDI 抓帧**
+- [x] **Step 3: 实现 GDI 抓帧**
 
 `crates/capture/Cargo.toml` 加 `windows` 依赖，至少启用：`Win32_Foundation`、`Win32_Graphics_Gdi`、`Win32_Graphics_Dwm`、`Win32_UI_WindowsAndMessaging`、`Win32_UI_HiDpi`、`Win32_System_Threading`、`Win32_System_ProcessStatus`；另加 `image`（png feature）用于 `RawFrameExt::to_png`。版本以 `cargo add windows` 实际解析并写入 `Cargo.lock` 为准。
 
@@ -1011,7 +1011,7 @@ Expected: 编译失败。
 
 外层顺序处理显示器，每抓完一台立即返回给调用方上传纹理（Task 11），避免同时持有多个 CPU 位图。
 
-- [ ] **Step 4: 运行测试与真实抓帧**
+- [x] **Step 4: 运行测试与真实抓帧**
 
 Run:
 ```bash
@@ -1021,7 +1021,7 @@ cargo run -p visrecall-capture --example grab_once -- out.png
 
 Expected: 单测通过；`out.png` 是当前主屏截图，尺寸与分辨率一致；拖动窗口时截图内容为抓帧瞬间。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add crates/capture
@@ -1049,7 +1049,7 @@ git commit -m "feat(capture): add gdi frame grabber"
   - `is_desktop_class(class_name: &str) -> bool`
   - `filter_candidates(windows: &[WindowInfo]) -> Vec<&WindowInfo>`（纯函数，测试用）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```rust
 use visrecall_capture::window::{filter_candidates, is_desktop_class, WindowInfo};
@@ -1080,12 +1080,12 @@ fn recognizes_desktop_classes() {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cargo test -p visrecall-capture`
 Expected: 编译失败。
 
-- [ ] **Step 3: 实现 Win32 枚举与命中**
+- [x] **Step 3: 实现 Win32 枚举与命中**
 
 - `EnumWindows`：过滤 `!IsWindowVisible`、`DWMWA_CLOAKED != 0`、`WS_EX_TOOLWINDOW`、空标题；`DWMWA_EXTENDED_FRAME_BOUNDS` 取边界；`GetClassNameW`、`GetWindowTextW`。
 - 进程名：`GetWindowThreadProcessId` → `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` → `QueryFullProcessImageNameW` → 取文件名；失败置空。
@@ -1093,7 +1093,7 @@ Expected: 编译失败。
 - `hit_chain`：`WindowFromPoint` → 循环 `RealChildWindowFromPoint` 构建链；对每个 HWND 组装 `WindowInfo`；桌面类返回当前显示器整屏。
 - 滚轮层级切换由覆盖层维护索引，阶段 01 先支持链上前 8 个窗口。
 
-- [ ] **Step 4: 运行测试与真实枚举**
+- [x] **Step 4: 运行测试与真实枚举**
 
 Run:
 ```bash
@@ -1103,7 +1103,7 @@ cargo run -p visrecall-capture --example list_windows
 
 Expected: 打印当前可见窗口标题、类名、进程名、边界；移动鼠标到 Chrome/资源管理器可看到对应窗口。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add crates/capture
@@ -1126,7 +1126,7 @@ git commit -m "feat(capture): add window enumeration and hit testing"
   - `D3dContext::create_swap_chain(hwnd, width, height) -> Result<SwapChain, AppError>`
   - `Renderer::draw_test_frame(&mut self, frame: &str) -> Result<(), AppError>`
 
-- [ ] **Step 1: 写 spike 示例**
+- [x] **Step 1: 写 spike 示例**
 
 `crates/shell/Cargo.toml` 加 `windows` 依赖（至少启用：`Win32_Foundation`、`Win32_Graphics_Direct3D`、`Win32_Graphics_Direct3D11`、`Win32_Graphics_Direct2D`、`Win32_Graphics_DirectWrite`、`Win32_Graphics_Dxgi`、`Win32_Graphics_Dxgi_Common`、`Win32_System_Com`、`Win32_UI_WindowsAndMessaging`、`Win32_UI_HiDpi`）、`visrecall-domain`、`visrecall-capture`、`crossbeam-channel`。版本以 `cargo add windows` 实际解析为准。
 
@@ -1144,7 +1144,7 @@ loop {
 }
 ```
 
-- [ ] **Step 2: 编译并运行**
+- [x] **Step 2: 编译并运行**
 
 Run:
 ```bash
@@ -1153,7 +1153,7 @@ cargo run -p visrecall-shell --example overlay_spike
 
 Expected: 每台显示器出现覆盖窗口；文字清晰；无闪烁；关闭窗口后进程退出。
 
-- [ ] **Step 3: 性能门禁**
+- [x] **Step 3: 性能门禁**
 
 用 PresentMon 记录 30 秒：
 
@@ -1163,7 +1163,7 @@ Expected: 每台显示器出现覆盖窗口；文字清晰；无闪烁；关闭�
 
 把结果写入 `verification.md` 的「D3D11 门禁」表。若 2 周内不达标，停止本任务后续，按 `design.md` §7.3 降级并更新 spec。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add crates/shell docs/specs/v0.1/01-capture-loop/verification.md
@@ -1188,7 +1188,7 @@ git commit -m "feat(shell): add d3d11 overlay spike"
   - `upload_frame(device: &D3dContext, frame: &RawFrame) -> Result<FrozenTexture, AppError>`
   - `validate_frame_shape(width: u32, height: u32, stride: usize) -> Result<(), AppError>`
 
-- [ ] **Step 1: 写尺寸/行距测试**
+- [x] **Step 1: 写尺寸/行距测试**
 
 ```rust
 use visrecall_shell::overlay::frame::validate_frame_shape;
@@ -1204,12 +1204,12 @@ fn rejects_short_buffer() {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cargo test -p visrecall-shell`
 Expected: 编译失败。
 
-- [ ] **Step 3: 实现窗口与纹理上传**
+- [x] **Step 3: 实现窗口与纹理上传**
 
 - 每个显示器创建覆盖窗口（类名 `VisRecallOverlay`），位置/尺寸用 `DisplayInfo.bounds`；`WS_EX_TOPMOST | WS_EX_TOOLWINDOW`；显示后 `SetForegroundWindow` + `SetFocus`，失败用 `AttachThreadInput`。
 - `upload_frame`：校验 `bgra.len() >= stride * height`；创建 `D3D11_USAGE_DEFAULT` 纹理（`DXGI_FORMAT_B8G8R8A8_UNORM`，`BIND_SHADER_RESOURCE`），`UpdateSubresource` 上传；之后释放 `RawFrame.bgra`。
@@ -1217,7 +1217,7 @@ Expected: 编译失败。
 - 窗口 `WM_PAINT`/定时器统一由覆盖层线程驱动；阶段 01 用 `InvalidateRect` + 输入事件重绘，不用 60fps 常驻定时器。
 - 覆盖层事件循环收到 `OverlayCommand::Cancel` 或提交后销毁/隐藏所有窗口，恢复焦点。
 
-- [ ] **Step 4: 手工验证**
+- [x] **Step 4: 手工验证**
 
 Run:
 ```bash
@@ -1226,7 +1226,7 @@ cargo run -p visrecall-shell --example overlay_frozen -- --duration 5
 
 Expected: 每台显示器显示抓取的冻结画面（运行时抓屏，不提交大二进制 fixture），内容与屏幕 1:1；在 150% 屏幕上边界不缩放、不偏移；移动鼠标无重影。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add crates/shell
@@ -1250,7 +1250,7 @@ git commit -m "feat(shell): render frozen frames in overlay windows"
   - `snap_rect(rect, candidates, threshold) -> PhysicalRect`
   - `clamp_to_virtual_screen(rect, displays) -> PhysicalRect`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```rust
 use visrecall_domain::geometry::{PhysicalPoint, PhysicalRect};
@@ -1280,12 +1280,12 @@ fn escape_cancels_selection() {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cargo test -p visrecall-shell`
 Expected: 编译失败。
 
-- [ ] **Step 3: 实现状态机**
+- [x] **Step 3: 实现状态机**
 
 - `hit_test_handle`：控制点半径 6 物理 px（按 dpi/96 缩放）；内部返回 `Move`；外部 `None`。
 - `drag_rect`：按 handle 调整对应边；`Normalize` 后若宽/高 < min，保持 `min` 并向拖拽方向扩展；不允许反向穿过对边。
@@ -1293,7 +1293,7 @@ Expected: 编译失败。
 - `clamp_to_virtual_screen`：与 `virtual_bounds` 求交；阶段 01 允许跨屏，不按单屏裁剪。
 - `SelectionState::commit`：`rect.width >= 10 && rect.height >= 10` 才返回 `Some`；否则 `None` 并进入 `Cancelled`。
 
-- [ ] **Step 4: 补 proptest 并运行**
+- [x] **Step 4: 补 proptest 并运行**
 
 ```rust
 proptest! {
@@ -1309,7 +1309,7 @@ proptest! {
 Run: `cargo test -p visrecall-shell`
 Expected: 单测与属性测试通过。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add crates/shell
@@ -1334,7 +1334,7 @@ git commit -m "feat(shell): add selection state machine"
   - `OverlayEvent::Cancelled`
   - `compose_bgra(dst_w: u32, dst_h: u32, regions: &[(u32, u32, u32, u32, Vec<u8>)]) -> Vec<u8>`（参数为 `x, y, w, h, bgra`，纯函数，测试用）
 
-- [ ] **Step 1: 写拼接测试**
+- [x] **Step 1: 写拼接测试**
 
 ```rust
 use visrecall_domain::geometry::PhysicalRect;
@@ -1353,12 +1353,12 @@ fn compose_copies_region_at_offset() {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cargo test -p visrecall-shell`
 Expected: 编译失败。
 
-- [ ] **Step 3: 实现输入与回读**
+- [x] **Step 3: 实现输入与回读**
 
 - 覆盖窗口 `WM_LBUTTONDOWN`：若 `GetCursorPos` 不在任何显示器内则忽略；`SetCapture`；若命中控制点/内部进入 `Adjusting`/`Move`，否则 `Dragging`。
 - `WM_MOUSEMOVE`：`GetCursorPos` 全局坐标 → `SelectionState::on_mouse_move`；候选窗口来自 `hit_chain`；`Ctrl` 关闭吸附。
@@ -1369,7 +1369,7 @@ Expected: 编译失败。
 - 提交：对每个显示器求 `selection ∩ display.bounds`；创建 staging texture，`CopyResource` 冻结纹理 → `Map` → 按相交区域裁剪 → `compose_bgra` 拼合为全局选区尺寸。
 - 发送 `OverlayEvent::Committed` 后关闭覆盖层并恢复焦点。
 
-- [ ] **Step 4: 手工验证**
+- [x] **Step 4: 手工验证**
 
 Run:
 ```bash
@@ -1384,7 +1384,7 @@ Expected:
 5. 吸附 8px、Ctrl 临时关闭。
 6. 提交后焦点回到原窗口。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add crates/shell
@@ -1411,7 +1411,13 @@ git commit -m "feat(shell): add overlay input and crop readback"
   - `CaptureCoordinator::on_overlay_event(event: OverlayEvent) -> Result<(), AppError>`
   - `persist_capture(image: CapturedImage, foreground: ForegroundInfo, library: &Library) -> Result<Item, AppError>`
 
-- [ ] **Step 1: 写集成测试（假实现）**
+> **阶段 01 已确认降级（本任务执行记录，不是新范围）**：抓帧失败重试一次仍失败时，**不**实现
+> requirements P1-R03 的「实时模式（透明覆盖层 + 提交时现场抓取）」，直接发
+> `CAPTURE_FAILED` 事件 + 托盘提示。该降级已在 requirements §3 P1-R03 确认，并在
+> `verification.md` E.6 列为已知限制，阶段 02 再评估是否实现。因此下方复选框全勾代表
+> 「阶段 01 范围内的步骤完成」，不代表实时模式已实现。
+
+- [x] **Step 1: 写集成测试（假实现）**
 
 ```rust
 use visrecall_app_core::capture_flow::persist_capture;
@@ -1437,12 +1443,12 @@ fn persist_writes_png_and_inserts_item() {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cargo test -p visrecall-app-core --test capture_flow`
 Expected: 编译失败。
 
-- [ ] **Step 3: 实现编排与落盘**
+- [x] **Step 3: 实现编排与落盘**
 
 `crates/app-core/Cargo.toml` 追加 `visrecall-library`、`visrecall-capture`、`visrecall-shell`、`image`（png feature）、`sha2`、`tokio`（rt + time）、`crossbeam-channel`、`time`（路径日期格式化，local-offset 失败回退 UTC）。可用空间检查实现为 `crates/library/src/files.rs` 的 `free_space_bytes(path)`（`GetDiskFreeSpaceExW`），由 app-core 调用。
 
@@ -1457,7 +1463,7 @@ Expected: 编译失败。
 
 `CaptureCoordinator::start` 按 `design.md` §5 执行；抓帧与覆盖层通过 trait/句柄注入，便于测试。抓帧后若任一显示器 `is_blank_frame` 为真，返回 `AppError::DrmProtected` 并发 `capture_failed { code: "DRM_PROTECTED", message }`，不显示覆盖层。开始抓帧前检查库所在盘可用空间，<2GB 时返回 `AppError::StorageFull` 并发 `capture_failed { code: "STORAGE_FULL", message }`，不进入覆盖层。`on_overlay_event(Committed)` 调用 `persist_capture`，发 `item_created`；本任务结束时素材保持 `parsing`，缩略图在 Task 17 接入。
 
-- [ ] **Step 4: 运行测试与手工闭环**
+- [x] **Step 4: 运行测试与手工闭环**
 
 Run:
 ```bash
@@ -1467,7 +1473,7 @@ pnpm tauri dev
 
 Expected: 集成测试通过；快捷键 → 框选 → Enter 后，库目录出现 PNG，主窗口列表出现卡片（Task 18 完成后）。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add crates/app-core crates/library
@@ -1493,7 +1499,7 @@ git commit -m "feat(app): wire capture persistence pipeline"
   - `normalize_position(display, point) -> (f32, f32)`（与 Task 7 一致）
   - `BallHandle::set_visible(bool)`
 
-- [ ] **Step 1: 写位置测试**
+- [x] **Step 1: 写位置测试**
 
 ```rust
 use visrecall_capture::display::normalize_position;
@@ -1512,12 +1518,12 @@ fn normalized_position_roundtrips() {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cargo test -p visrecall-shell`
 Expected: 编译失败。
 
-- [ ] **Step 3: 实现分层窗口**
+- [x] **Step 3: 实现分层窗口**
 
 `crates/shell/Cargo.toml` 追加 `Win32_Graphics_GdiPlus`、`Win32_Graphics_Gdi`、`Win32_UI_WindowsAndMessaging`、`Win32_Foundation`、`visrecall-domain`、`visrecall-capture`；悬浮球线程启动时 `GdiplusStartup`，退出时 `GdiplusShutdown`。
 
@@ -1527,13 +1533,13 @@ Expected: 编译失败。
 - 拖动更新窗口位置；松开后发送 `ShellEvent::BallMoved { display_id, nx, ny }`，由 app-core 写入 `config.json`（悬浮球线程不直接写配置）。
 - `set_visible(false)` 时 `ShowWindow(SW_HIDE)`；快捷键仍工作。
 
-- [ ] **Step 4: 手工验证**
+- [x] **Step 4: 手工验证**
 
 Run: `pnpm tauri dev`
 
 Expected: 球在桌面置顶、不抢焦点、不进任务栏；单击进入捕获；拖动后重启位置恢复；关闭球后快捷键仍可捕获。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add crates/shell crates/app-core
@@ -1559,7 +1565,7 @@ git commit -m "feat(shell): add minimal floating ball"
   - `DropFormats { hdrop: bool, unicode_text: bool, html: bool, dib: bool }`（`#[derive(Default)]`）
   - `ImportFlow::ingest(content: DropContent) -> Result<Vec<Item>, AppError>`
 
-- [ ] **Step 1: 写分类测试**
+- [x] **Step 1: 写分类测试**
 
 ```rust
 use std::path::PathBuf;
@@ -1586,12 +1592,12 @@ fn image_files_are_preferred_over_text() {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cargo test -p visrecall-shell`
 Expected: 编译失败。
 
-- [ ] **Step 3: 实现 OLE 目标与导入**
+- [x] **Step 3: 实现 OLE 目标与导入**
 
 `crates/shell/Cargo.toml` 追加：`Win32_System_Ole`、`Win32_System_Com`、`Win32_UI_Shell`、`Win32_System_DataExchange`、`Win32_System_Memory`、`Win32_Graphics_Gdi` 与 `url`。`crates/app-core/Cargo.toml` 追加 `image`、`sha2`、`encoding_rs`、`reqwest`（blocking + rustls）。
 
@@ -1609,7 +1615,7 @@ Expected: 编译失败。
   - 文本/链接素材写入成功后标记 `ready`（无缩略图）；图片素材保持 `parsing`，由 Task 17 生成缩略图后转 `ready`。
   - 返回插入的 `Item` 列表并发送事件。
 
-- [ ] **Step 4: 运行测试与四类来源手工验证**
+- [x] **Step 4: 运行测试与四类来源手工验证**
 
 Run:
 ```bash
@@ -1625,7 +1631,7 @@ Expected:
 - 拖文件夹/PDF/压缩包 → 拒绝提示；
 - 拖拽中 Esc → 无记录。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add crates/shell crates/app-core tests
@@ -1649,7 +1655,7 @@ git commit -m "feat(shell): add ole drop target and import flow"
   - `generate_thumbnail(src: &Path, dst: &Path, max_edge: u32) -> Result<(), AppError>`
   - 协议 `visrecall://thumb/<item_id>`
 
-- [ ] **Step 1: 写缩略图测试**
+- [x] **Step 1: 写缩略图测试**
 
 ```rust
 use image::{Rgba, RgbaImage};
@@ -1670,12 +1676,12 @@ fn thumbnail_long_edge_is_480() {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cargo test -p visrecall-app-core --test thumbnail`
 Expected: 编译失败。
 
-- [ ] **Step 3: 实现缩略图与协议**
+- [x] **Step 3: 实现缩略图与协议**
 
 - `generate_thumbnail`：`image::open` → `thumbnail(480, 480)`（保持比例）→ 保存 PNG；失败返回 `AppError::Io`。
 - 在 `CaptureCoordinator::on_overlay_event` 中，`persist_capture` 成功后用 `spawn_blocking` 调用 `generate_thumbnail`；成功后更新 DB 与事件。
@@ -1686,7 +1692,7 @@ Expected: 编译失败。
 - Windows 上 Tauri 自定义协议实际映射为 `http://visrecall.localhost/thumb/<id>`；前端使用 `@tauri-apps/api/core` 的 `convertFileSrc` 转换逻辑地址，测试中 mock 为原样返回。
 - 不暴露绝对路径；不读取库外文件。
 
-- [ ] **Step 4: 运行测试并手工验证**
+- [x] **Step 4: 运行测试并手工验证**
 
 Run:
 ```bash
@@ -1696,7 +1702,7 @@ pnpm tauri dev
 
 Expected: 捕获后卡片显示缩略图；浏览器/前端访问 `visrecall://thumb/<不存在ID>` 返回 404；路径穿越请求被拒绝。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add crates/app-core src-tauri
@@ -1719,7 +1725,7 @@ git commit -m "feat(app): add thumbnails and custom protocol"
 - Consumes: 生成的 `bindings.ts`、`item_created`/`item_updated`
 - Produces: 可浏览的素材网格；新素材自动出现。
 
-- [ ] **Step 1: 写前端测试**
+- [x] **Step 1: 写前端测试**
 
 ```tsx
 import { render, screen } from "@testing-library/react";
@@ -1746,12 +1752,12 @@ test("shows ready thumbnail", () => {
 });
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `pnpm test`
 Expected: 失败，`ItemCard` 不存在。
 
-- [ ] **Step 3: 实现查询与列表**
+- [x] **Step 3: 实现查询与列表**
 
 - `queryClient`：默认 `staleTime: 5_000`、`refetchOnWindowFocus: false`。
 - `useItems`：`useInfiniteQuery` 调用生成的 `list_items`（导出名以 `bindings.ts` 为准）；`getNextPageParam` 使用最后一项 `capturedAt`。
@@ -1761,7 +1767,7 @@ Expected: 失败，`ItemCard` 不存在。
 - `ItemCard`：缩略图/占位、状态徽标（解析中/正常/待解析/失败）、来源应用、相对时间（毫秒时间戳格式化为本地时间）。
 - `EmptyState`：提示「按 Ctrl+Shift+S 或点击悬浮球开始捕获」。
 
-- [ ] **Step 4: 运行测试与手工验证**
+- [x] **Step 4: 运行测试与手工验证**
 
 Run:
 ```bash
@@ -1772,7 +1778,7 @@ pnpm tauri dev
 
 Expected: 测试通过；捕获后卡片自动出现在顶部；状态从「解析中」变「正常」；100 条以内滚动正常。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src
@@ -1791,7 +1797,7 @@ git commit -m "feat(ui): add item grid and event refresh"
 - Consumes: 全部阶段 01 产物
 - Produces: 可复现的验收记录与已知限制清单。
 
-- [ ] **Step 1: 运行自动化验证**
+- [x] **Step 1: 运行自动化验证**
 
 Run:
 ```bash
@@ -1806,7 +1812,7 @@ pnpm build
 
 Expected: 全部通过。若 clippy 有警告，修复后重跑。
 
-- [ ] **Step 2: 手工验收矩阵**
+- [x] **Step 2: 手工验收矩阵**
 
 在目标 Windows 机器上逐项记录：
 
@@ -1828,7 +1834,7 @@ Expected: 全部通过。若 clippy 有警告，修复后重跑。
 | 空库 | 首次启动 | 空状态引导 | |
 | 100 条列表 | 导入/捕获 100 条 | 滚动流畅，排序正确 | |
 
-- [ ] **Step 3: 性能记录**
+- [x] **Step 3: 性能记录**
 
 记录并写入 `verification.md`：
 
@@ -1838,11 +1844,11 @@ Expected: 全部通过。若 clippy 有警告，修复后重跑。
 - 提交到卡片可见时间（100 条库）。
 - D3D11 门禁结果（Task 10）。
 
-- [ ] **Step 4: 记录已知限制**
+- [x] **Step 4: 记录已知限制**
 
 至少记录：DRM/独占全屏、提权窗口、跨屏间隙填充、缩略图 PNG（非 WebP）、CF_DIB 拖放是否完成、ARM64 未验证。
 
-- [ ] **Step 5: 更新阶段状态并提交**
+- [x] **Step 5: 更新阶段状态并提交**
 
 把 `docs/specs/v0.1/README.md` 中阶段 01 状态改为「已完成（日期）」，并写下一阶段入口条件。
 
