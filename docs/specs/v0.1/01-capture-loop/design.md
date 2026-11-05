@@ -346,7 +346,7 @@ Hotkey / BallClick / UI
 失败分支：
 
 - `foreground()` 失败：仍允许捕获，来源字段置空。
-- `grab()` 失败：重试一次；仍失败 → 覆盖层实时模式（透明窗口，提交时现场抓选区）。
+- `grab()` 失败：重试一次；阶段 01 仍失败 → 发 `CAPTURE_FAILED` 并提示（实时模式降级为阶段 02；`CaptureConfig.realtime_fallback` 阶段 01 不生效）。
 - 全黑帧：返回 `DrmProtected`，不显示覆盖层，托盘提示。
 - 提交后落盘失败：覆盖层已关闭，托盘提示 `Io`/`StorageFull`，临时文件清理。
 - 缩略图失败：素材保持 `parsing` 或转 `failed`，列表显示占位；不阻塞主流程。
@@ -613,7 +613,7 @@ pub struct BallConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
-pub struct CaptureConfig { pub realtime_fallback: bool }
+pub struct CaptureConfig { pub realtime_fallback: bool } // 阶段 01 保留字段但未生效（实时模式阶段 02 再评估）
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -781,7 +781,7 @@ src/
 
 | 场景 | 行为 | 用户可见 |
 |---|---|---|
-| GDI 抓帧失败 | 重试一次；仍失败进入实时模式 | 覆盖层角标「实时模式」 |
+| GDI 抓帧失败 | 重试一次；仍失败发 `CAPTURE_FAILED`（阶段 01 不实现实时模式） | 事件 + 托盘提示 |
 | 全黑帧/DRM | 丢弃，不显示覆盖层 | 托盘通知「该窗口无法截取」 |
 | 窗口识别失败 | 不高亮，仍可拖拽 | 不报错 |
 | 选区 <10×10 | 取消 | 提示「选区过小」 |
