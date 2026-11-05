@@ -71,3 +71,24 @@ fn startup_recovery_requeues_running_jobs() {
     assert_eq!(lib.recover_jobs().unwrap(), 1);
     assert_eq!(lib.job_state(&item.id, "thumbnail").unwrap(), "queued");
 }
+
+#[test]
+fn set_item_note_updates_note_and_timestamp() {
+    let dir = tempfile::tempdir().unwrap();
+    let lib = Library::open(dir.path().to_path_buf()).unwrap();
+    let item = lib.insert_item(new_item(1)).unwrap();
+    assert_eq!(item.note, "");
+
+    lib.set_item_note(&item.id, "混合拖放的备注").unwrap();
+    let got = lib.get_item(&item.id).unwrap().unwrap();
+    assert_eq!(got.note, "混合拖放的备注");
+    assert_eq!(got.id, item.id);
+}
+
+#[test]
+fn set_item_note_rejects_unknown_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let lib = Library::open(dir.path().to_path_buf()).unwrap();
+    let err = lib.set_item_note("missing", "note").unwrap_err();
+    assert!(matches!(err, visrecall_domain::AppError::NotFound));
+}

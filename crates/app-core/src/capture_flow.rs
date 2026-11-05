@@ -497,10 +497,14 @@ fn encode_png(image: &CapturedImage) -> Result<Vec<u8>, AppError> {
     for px in image.bgra.chunks_exact(4) {
         rgba.extend_from_slice(&[px[2], px[1], px[0], 0xFF]);
     }
+    encode_rgba_png(image.width, image.height, &rgba)
+}
 
+/// RGBA8 → PNG（导入流程复用：BGRA 图像与文本/链接不经过这里）。
+pub(crate) fn encode_rgba_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, AppError> {
     let mut png = Vec::new();
     PngEncoder::new(&mut png)
-        .write_image(&rgba, image.width, image.height, ExtendedColorType::Rgba8)
+        .write_image(rgba, width, height, ExtendedColorType::Rgba8)
         .map_err(|err| AppError::Internal(format!("png encode failed: {err}")))?;
     Ok(png)
 }
@@ -512,7 +516,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// 目标路径：绝对路径 + 相对库根的路径（`originals/images/YYYY/MM/<id>.png`）。
 ///
 /// 日期取本地时区（用户按本地月份翻找素材）；读不到本地偏移时回退 UTC。
-fn image_target(root: &Path, id: &str) -> (String, PathBuf) {
+pub(crate) fn image_target(root: &Path, id: &str) -> (String, PathBuf) {
     let now = time::OffsetDateTime::now_local().unwrap_or_else(|err| {
         warn!(error = %err, "local time unavailable; falling back to UTC for the image path");
         time::OffsetDateTime::now_utc()
@@ -524,15 +528,27 @@ fn image_target(root: &Path, id: &str) -> (String, PathBuf) {
 
 /// `tmp/<id>.tmp` 写入 + `sync_all` → 建目标目录 → `rename`；任一步失败清理临时文件。
 fn write_png(root: &Path, id: &str, target: &Path, png: &[u8]) -> Result<(), AppError> {
+    write_bytes_atomic(root, id, target, png)
+}
+
+/// 原子写入库内文件（design §10.2）：`tmp/<tmp_id>.tmp` → `sync_all` → `rename`。
+///
+/// 临时文件固定在 `<root>/tmp/`，失败时清理；导入流程的图片与文本都走这里。
+pub(crate) fn write_bytes_atomic(
+    root: &Path,
+    tmp_id: &str,
+    target: &Path,
+    bytes: &[u8],
+) -> Result<(), AppError> {
     let tmp_dir = root.join("tmp");
     fs::create_dir_all(&tmp_dir)
         .map_err(|err| AppError::Io(format!("create dir {}: {err}", tmp_dir.display())))?;
-    let tmp = tmp_dir.join(format!("{id}.tmp"));
+    let tmp = tmp_dir.join(format!("{tmp_id}.tmp"));
 
     let write = || -> Result<(), AppError> {
         let mut file = fs::File::create(&tmp)
             .map_err(|err| AppError::Io(format!("create {}: {err}", tmp.display())))?;
-        file.write_all(png)
+        file.write_all(bytes)
             .map_err(|err| AppError::Io(format!("write {}: {err}", tmp.display())))?;
         file.sync_all()
             .map_err(|err| AppError::Io(format!("sync {}: {err}", tmp.display())))?;

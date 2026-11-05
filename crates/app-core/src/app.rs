@@ -27,6 +27,7 @@ use crate::capture_flow::{
 use crate::events::{
     AppEvent, AppRecoveredEvent, CaptureFailedEvent, EventSink, HotkeyConflictEvent,
 };
+use crate::import_flow::ImportFlow;
 
 /// Tauri 托管的应用状态。
 pub struct AppCore {
@@ -209,16 +210,23 @@ impl AppCore {
             Arc::clone(&self.ball_enabled),
         ));
         let coordinator = CaptureCoordinator::new(
-            library,
+            Arc::clone(&library),
             Arc::new(GdiFrameGrabber::new()),
             Arc::new(Win32WindowProbe::new()),
             overlay.clone(),
             visibility,
             Arc::clone(&self.sink),
         );
+        // 拖放导入与捕获共用核心循环线程；来源应用用独立探针实例（无共享状态）。
+        let import = Arc::new(ImportFlow::new(
+            library,
+            Arc::new(Win32WindowProbe::new()),
+            Arc::clone(&self.sink),
+        ));
 
         spawn_capture_loop(
             coordinator,
+            import,
             shell_rx,
             overlay_rx,
             Arc::clone(&self.config),
@@ -353,6 +361,20 @@ impl AppCore {
                                 display_id = %display_id,
                                 "ball move ignored; runtime not started"
                             );
+                        }
+                        ShellEvent::Drop(_) => {
+                            // 没有库/导入流程时无法落盘，明确告知而不是静默丢弃。
+                            tracing::warn!("drop received; runtime not started");
+                            sink.emit(AppEvent::CaptureFailed(CaptureFailedEvent {
+                                code: "CAPTURE_UNAVAILABLE".into(),
+                                message: "drop import needs an open library".into(),
+                            }));
+                        }
+                        ShellEvent::DropRejected(message) => {
+                            sink.emit(AppEvent::CaptureFailed(CaptureFailedEvent {
+                                code: "DROP_REJECTED".into(),
+                                message,
+                            }));
                         }
                     }
                 }
@@ -564,6 +586,7 @@ enum CaptureStep {
 /// （否则主窗口可能永久隐藏），然后继续等后续事件；通道断开的正常退出不受影响。
 fn spawn_capture_loop(
     coordinator: CaptureCoordinator,
+    import: Arc<ImportFlow>,
     shell: Receiver<ShellEvent>,
     overlay: Receiver<OverlayEvent>,
     config: Arc<Mutex<AppConfig>>,
@@ -603,6 +626,24 @@ fn spawn_capture_loop(
                                         "failed to persist the floating ball position"
                                     );
                                 }
+                                CaptureStep::Continue
+                            }
+                            Ok(ShellEvent::Drop(content)) => {
+                                // 导入在本线程同步执行（不阻塞 UI/球线程）；单张图片与
+                                // 20 张小图的批量都在毫秒级，`ingest` 内部记录耗时。
+                                tracing::info!("drop content received");
+                                match import.ingest(content) {
+                                    Ok(items) => import.emit_created(&items),
+                                    Err(err) => {
+                                        // `ingest` 已经发出 `capture_failed`，这里只记日志。
+                                        tracing::warn!(error = %err, "drop import failed");
+                                    }
+                                }
+                                CaptureStep::Continue
+                            }
+                            Ok(ShellEvent::DropRejected(message)) => {
+                                tracing::warn!(message = %message, "drop rejected by the shell");
+                                import.emit_rejected(&message);
                                 CaptureStep::Continue
                             }
                             Err(_) => CaptureStep::Exit,

@@ -12,9 +12,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 crossbeam-channel = "0.5"
-image = { version = "0.25", default-features = false, features = ["png"] }
+encoding_rs = "0.8"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 sha2 = "0.10"
 time = { version = "0.3", features = ["local-offset"] }
+# 链接标题抓取：阻塞客户端 + rustls（关闭默认 aws-lc 后端，改用 ring，避免 C 工具链依赖）。
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 
 [dev-dependencies]
 tempfile = "3"

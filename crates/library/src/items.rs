@@ -126,6 +126,20 @@ impl Library {
         }
         Ok(())
     }
+    /// 更新备注（混合拖放的图片 + 文字片段，design §9.2）并刷新 `updated_at`。
+    pub fn set_item_note(&self, id: &str, note: &str) -> Result<(), AppError> {
+        let conn = self.conn()?;
+        let updated = conn
+            .execute(
+                "UPDATE items SET note = ?2, updated_at = ?3 WHERE id = ?1",
+                rusqlite::params![id, note, now_millis()],
+            )
+            .map_err(db_error)?;
+        if updated == 0 {
+            return Err(AppError::NotFound);
+        }
+        Ok(())
+    }
 }
 
 fn row_to_item(row: &Row<'_>) -> rusqlite::Result<Item> {

@@ -22,7 +22,7 @@ use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ptr::{addr_of_mut, null_mut};
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -43,14 +43,18 @@ use windows::Win32::Graphics::Gdi::{
     HDC, HGDIOBJ,
 };
 use windows::Win32::Graphics::GdiPlus::{
-    GdipCreateBitmapFromScan0, GdipCreatePen1, GdipCreateSolidFill, GdipDeleteBrush,
-    GdipDeleteGraphics, GdipDeletePen, GdipDisposeImage, GdipDrawEllipse, GdipFillEllipse,
-    GdipGetImageGraphicsContext, GdipGraphicsClear, GdipSetSmoothingMode, GdiplusShutdown,
-    GdiplusStartup, GdiplusStartupInput, GpBitmap, GpBrush, GpGraphics, GpImage, GpPen,
-    GpSolidFill, SmoothingModeAntiAlias, UnitPixel,
+    GdipCreateBitmapFromScan0, GdipCreateFont, GdipCreateFontFamilyFromName, GdipCreatePen1,
+    GdipCreateSolidFill, GdipCreateStringFormat, GdipDeleteBrush, GdipDeleteFont,
+    GdipDeleteFontFamily, GdipDeleteGraphics, GdipDeletePen, GdipDeleteStringFormat,
+    GdipDisposeImage, GdipDrawEllipse, GdipDrawString, GdipFillEllipse,
+    GdipGetImageGraphicsContext, GdipGraphicsClear, GdipSetSmoothingMode, GdipSetStringFormatAlign,
+    GdipSetStringFormatLineAlign, GdiplusShutdown, GdiplusStartup, GdiplusStartupInput, GpBitmap,
+    GpBrush, GpFont, GpFontFamily, GpGraphics, GpImage, GpPen, GpSolidFill, GpStringFormat, RectF,
+    SmoothingModeAntiAlias, StringAlignmentCenter, UnitPixel,
 };
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Ole::{OleInitialize, OleUninitialize};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, VK_LBUTTON,
 };
@@ -65,6 +69,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
+use crate::drop_target::{DropRegistration, DropVisual, WM_BALL_DROP_VISUAL};
 use crate::{CaptureTrigger, ShellEvent};
 
 /// 悬浮球窗口类名（`FindWindowW("VisRecallBall")` 可用于排查）。
@@ -447,13 +452,19 @@ fn run_ball_window(
 
     // 窗口状态放在 `RefCell` 后：`SetWindowPos`/`ShowWindow` 可能同步重入 wndproc，
     // 每次一律短借用，绝不把可变引用跨越窗口 API 调用（M-7）。
+    let drop_visual = Arc::new(Mutex::new(DropVisual::default()));
+    let drop_events = events.clone();
     let state = Box::new(RefCell::new(BallWindowState {
+        base_size: size,
         size,
         position,
+        base_position: position,
         events,
         visible: Arc::clone(visible),
         drag: DragState::inactive(),
         hwnd_slot: Arc::clone(&hwnd_slot),
+        drop_visual: Arc::clone(&drop_visual),
+        drop_target: None,
     }));
     let state_ptr = Box::into_raw(state);
 
@@ -469,13 +480,22 @@ fn run_ball_window(
     // SAFETY: 状态由本线程独占，窗口销毁（消息循环退出）之前一直有效。
     unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize) };
 
-    if let Err(err) = render_ball(hwnd, size, position) {
+    if let Err(err) = render_ball(hwnd, size, position, None, true) {
         // SAFETY: 窗口与状态都由本线程管理；销毁窗口后取回状态。
         unsafe {
             let _ = DestroyWindow(hwnd);
             drop(Box::from_raw(state_ptr));
         }
         return Err(err);
+    }
+
+    // OLE 拖放目标：注册失败只降级（单击捕获仍可用），不阻断悬浮球。
+    match DropRegistration::register(hwnd, drop_events, Arc::clone(&drop_visual)) {
+        Ok(registration) => {
+            let _ = with_state_mut(hwnd, |state| state.drop_target = Some(registration));
+            info!("floating ball registered as an OLE drop target");
+        }
+        Err(err) => warn!(error = %err, "OLE drop target unavailable; drag and drop disabled"),
     }
 
     hwnd_slot.store(hwnd.0 as isize, Ordering::SeqCst);
@@ -517,15 +537,24 @@ fn run_ball_window(
 
 /// 窗口消息处理所需的状态；只在悬浮球线程访问，每次消息短借用（见 [`with_state`]）。
 struct BallWindowState {
+    /// 配置的球体边长（拖入时按 1.15× 放大，离开后恢复）。
+    base_size: u32,
+    /// 当前绘制边长（拖动视觉可临时放大）。
     size: u32,
     /// 当前左上角（全局物理像素）。
     position: PhysicalPoint,
+    /// 未放大时的左上角；拖入视觉以它为中心放大/还原。
+    base_position: PhysicalPoint,
     events: Sender<ShellEvent>,
     visible: Arc<AtomicBool>,
     /// 拖动状态机（纯逻辑，见 [`DragState`]）。
     drag: DragState,
     /// 共享窗口句柄；窗口销毁时置 0，让跨线程投递不再打到失效句柄（M-4）。
     hwnd_slot: Arc<AtomicIsize>,
+    /// OLE 回调写入的拖入视觉状态（本线程的 wndproc 读取）。
+    drop_visual: Arc<Mutex<DropVisual>>,
+    /// OLE 拖放注册；窗口销毁前释放（`RevokeDragDrop`）。
+    drop_target: Option<DropRegistration>,
 }
 
 /// 拖动进度。
@@ -685,7 +714,16 @@ unsafe extern "system" fn ball_window_proc(
             set_ball_visible(hwnd, wparam.0 != 0);
             LRESULT(0)
         }
+        // OLE 回调只写共享视觉状态；实际放大/绘制由本线程在这里完成。
+        WM_BALL_DROP_VISUAL => {
+            refresh_drop_visual(hwnd);
+            LRESULT(0)
+        }
         WM_CLOSE => {
+            // OLE 注册必须在窗口销毁前撤销；`take` 后借用结束再 drop。
+            if let Some(registration) = with_state_mut(hwnd, |state| state.drop_target.take()) {
+                drop(registration);
+            }
             // SAFETY: `hwnd` 有效；WM_DESTROY 里退出消息循环。
             unsafe {
                 let _ = DestroyWindow(hwnd);
@@ -693,6 +731,10 @@ unsafe extern "system" fn ball_window_proc(
             LRESULT(0)
         }
         WM_DESTROY => {
+            // 兜底：`WM_CLOSE` 之外的销毁路径也要撤销拖放注册。
+            if let Some(registration) = with_state_mut(hwnd, |state| state.drop_target.take()) {
+                drop(registration);
+            }
             // M-4：窗口销毁之前先让共享句柄失效，跨线程投递从此拿到 0。
             let _ = with_state(hwnd, |state| state.hwnd_slot.store(0, Ordering::SeqCst));
             // SAFETY: 结束本线程消息循环（`GetMessageW` 返回 WM_QUIT）。
@@ -861,6 +903,55 @@ fn set_ball_visible(hwnd: HWND, visible: bool) {
     debug!(visible, "floating ball visibility changed");
 }
 
+/// 拖入时球体放大倍数（design §9.1）。
+const DROP_SCALE: f32 = 1.15;
+
+/// 应用 OLE 拖入视觉：可接受时放大到 1.15× 并绘制动作文案，拒绝时显示灰色提示。
+///
+/// 由 `WM_BALL_DROP_VISUAL` 触发；视觉状态来自共享的 [`DropVisual`]，本函数只读快照，
+/// 不持有互斥锁调用窗口 API。
+fn refresh_drop_visual(hwnd: HWND) {
+    let Some((visual, base_size, base_position)) = with_state(hwnd, |state| {
+        let visual = state
+            .drop_visual
+            .lock()
+            .map(|slot| slot.clone())
+            .unwrap_or_default();
+        (visual, state.base_size, state.base_position)
+    }) else {
+        return;
+    };
+
+    let target_size = if visual.active {
+        ((base_size as f32 * DROP_SCALE).round() as u32).max(1)
+    } else {
+        base_size
+    };
+    // 放大/还原都以配置尺寸的中心为锚点，球不会「跳」到一边。
+    let center = PhysicalPoint {
+        x: base_position.x + base_size as i32 / 2,
+        y: base_position.y + base_size as i32 / 2,
+    };
+    let target_position = PhysicalPoint {
+        x: center.x - target_size as i32 / 2,
+        y: center.y - target_size as i32 / 2,
+    };
+    let label = if visual.active && !visual.label.is_empty() {
+        Some(visual.label.as_str())
+    } else {
+        None
+    };
+
+    if let Err(err) = render_ball(hwnd, target_size, target_position, label, visual.accepted) {
+        warn!(error = %err, "failed to render the drop visual");
+        return;
+    }
+    let _ = with_state_mut(hwnd, |state| {
+        state.size = target_size;
+        state.position = target_position;
+    });
+}
+
 /// 移动窗口（不改变尺寸/Z 序、不激活）；返回是否成功。
 fn move_window(hwnd: HWND, position: PhysicalPoint, size: u32) -> bool {
     // SAFETY: `hwnd` 属于本线程；忽略 Z 序与尺寸。
@@ -957,7 +1048,16 @@ fn create_ball_window(
 }
 
 /// 画一次球并用 `UpdateLayeredWindow` 呈现；绘制资源在返回前全部释放。
-fn render_ball(hwnd: HWND, size: u32, position: PhysicalPoint) -> Result<(), AppError> {
+///
+/// `label` 非空时在球内绘制拖放动作文案（如「存为图片」）；`accepted == false`
+/// 时球体转灰，提示这次拖放不会被接受。
+fn render_ball(
+    hwnd: HWND,
+    size: u32,
+    position: PhysicalPoint,
+    label: Option<&str>,
+    accepted: bool,
+) -> Result<(), AppError> {
     // SAFETY: `GetDC(None)` 返回屏幕 DC；失败时为空句柄。
     let screen = unsafe { GetDC(None) };
     if screen.is_invalid() {
@@ -966,7 +1066,7 @@ fn render_ball(hwnd: HWND, size: u32, position: PhysicalPoint) -> Result<(), App
             WinError::from_thread()
         )));
     }
-    let result = render_with_screen(hwnd, size, position, screen);
+    let result = render_with_screen(hwnd, size, position, screen, label, accepted);
     // SAFETY: 与 `GetDC` 成对调用。
     unsafe { ReleaseDC(None, screen) };
     result
@@ -977,6 +1077,8 @@ fn render_with_screen(
     size: u32,
     position: PhysicalPoint,
     screen: HDC,
+    label: Option<&str>,
+    accepted: bool,
 ) -> Result<(), AppError> {
     // SAFETY: `screen` 有效；失败时为空句柄。
     let memory = unsafe { CreateCompatibleDC(Some(screen)) };
@@ -1053,8 +1155,8 @@ fn render_with_screen(
         )));
     }
 
-    let rendered =
-        draw_ball(bits, size).and_then(|()| present_layered(hwnd, screen, memory, size, position));
+    let rendered = draw_ball(bits, size, label, accepted)
+        .and_then(|()| present_layered(hwnd, screen, memory, size, position));
 
     // SAFETY: 释放顺序为「恢复原对象 → 删除位图 → 删除内存 DC」。
     unsafe {
@@ -1066,7 +1168,14 @@ fn render_with_screen(
 }
 
 /// 用 GDI+ 在 DIB 上画圆底、阴影与简单镜头图标（预乘 alpha，透明背景）。
-fn draw_ball(bits: *mut c_void, size: u32) -> Result<(), AppError> {
+///
+/// 有 `label` 时改为绘制动作文案（拖放反馈）；`accepted == false` 用灰色球体。
+fn draw_ball(
+    bits: *mut c_void,
+    size: u32,
+    label: Option<&str>,
+    accepted: bool,
+) -> Result<(), AppError> {
     let width = size as i32;
     let stride = width * 4;
     let mut bitmap: *mut GpBitmap = null_mut();
@@ -1089,14 +1198,19 @@ fn draw_ball(bits: *mut c_void, size: u32) -> Result<(), AppError> {
         )));
     }
 
-    let painted = paint_ball(bitmap, size);
+    let painted = paint_ball(bitmap, size, label, accepted);
     // SAFETY: 位图由上面的调用创建，图形上下文已在 `paint_ball` 内释放。
     unsafe { GdipDisposeImage(bitmap.cast::<GpImage>()) };
     painted
 }
 
 /// 实际的绘制步骤；GDI+ 对象都在本函数内创建并释放。
-fn paint_ball(bitmap: *mut GpBitmap, size: u32) -> Result<(), AppError> {
+fn paint_ball(
+    bitmap: *mut GpBitmap,
+    size: u32,
+    label: Option<&str>,
+    accepted: bool,
+) -> Result<(), AppError> {
     let mut graphics: *mut GpGraphics = null_mut();
     // SAFETY: `bitmap` 有效且未被释放。
     let status = unsafe { GdipGetImageGraphicsContext(bitmap.cast::<GpImage>(), &mut graphics) };
@@ -1108,6 +1222,13 @@ fn paint_ball(bitmap: *mut GpBitmap, size: u32) -> Result<(), AppError> {
     }
 
     let edge = size as f32;
+    // 拖入反馈：拒绝时球体转灰；接受时保持品牌蓝（放大由窗口尺寸负责）。
+    let (body, border) = if accepted {
+        (argb(255, 59, 130, 246), argb(255, 37, 99, 235))
+    } else {
+        (argb(255, 107, 114, 128), argb(255, 75, 85, 99))
+    };
+
     // SAFETY: `graphics` 有效；每个 GDI+ 对象都在使用后立即释放。
     unsafe {
         // 清成全透明，否则 UpdateLayeredWindow 会把未初始化像素算进 alpha。
@@ -1123,47 +1244,116 @@ fn paint_ball(bitmap: *mut GpBitmap, size: u32) -> Result<(), AppError> {
             0.80 * edge,
             0.80 * edge,
         );
-        // 球体：品牌蓝圆底。
+        // 球体：品牌蓝圆底（拖入反馈可换成灰色）。
         fill_ellipse(
             graphics,
-            argb(255, 59, 130, 246),
+            body,
             0.08 * edge,
             0.06 * edge,
             0.84 * edge,
             0.84 * edge,
         );
-        // 描边：更深的蓝，界定边界。
+        // 描边：更深的同色系，界定边界。
         stroke_ellipse(
             graphics,
-            argb(255, 37, 99, 235),
+            border,
             0.05 * edge,
             0.08 * edge,
             0.06 * edge,
             0.84 * edge,
             0.84 * edge,
         );
-        // 图标：白色镜头环 + 中心点（阶段 01 的占位图形）。
-        stroke_ellipse(
-            graphics,
-            argb(255, 255, 255, 255),
-            0.075 * edge,
-            0.30 * edge,
-            0.28 * edge,
-            0.40 * edge,
-            0.40 * edge,
-        );
-        fill_ellipse(
-            graphics,
-            argb(255, 255, 255, 255),
-            0.45 * edge,
-            0.43 * edge,
-            0.10 * edge,
-            0.10 * edge,
-        );
+
+        match label {
+            Some(label) => draw_label(graphics, edge, label),
+            None => {
+                // 图标：白色镜头环 + 中心点（阶段 01 的占位图形）。
+                stroke_ellipse(
+                    graphics,
+                    argb(255, 255, 255, 255),
+                    0.075 * edge,
+                    0.30 * edge,
+                    0.28 * edge,
+                    0.40 * edge,
+                    0.40 * edge,
+                );
+                fill_ellipse(
+                    graphics,
+                    argb(255, 255, 255, 255),
+                    0.45 * edge,
+                    0.43 * edge,
+                    0.10 * edge,
+                    0.10 * edge,
+                );
+            }
+        }
 
         GdipDeleteGraphics(graphics);
     }
     Ok(())
+}
+
+/// 在球体中央绘制拖放动作文案（白色、居中、自动换行）。
+///
+/// 任一步 GDI+ 创建失败都静默跳过：文案只是反馈，不能影响拖放本身。
+fn draw_label(graphics: *mut GpGraphics, edge: f32, label: &str) {
+    let family_name = wide("Microsoft YaHei");
+    let text = wide(label);
+    let mut family: *mut GpFontFamily = null_mut();
+    // SAFETY: 名称/文案以 NUL 结尾且在调用期间存活；每个对象使用后立即释放。
+    unsafe {
+        if GdipCreateFontFamilyFromName(PCWSTR(family_name.as_ptr()), null_mut(), &mut family).0
+            != 0
+            || family.is_null()
+        {
+            return;
+        }
+
+        let chars = label.chars().count() as f32;
+        let em = if chars <= 5.0 {
+            edge * 0.16
+        } else {
+            edge * 0.125
+        };
+        let mut font: *mut GpFont = null_mut();
+        let mut format: *mut GpStringFormat = null_mut();
+        if GdipCreateFont(family, em, 0, UnitPixel, &mut font).0 != 0 || font.is_null() {
+            GdipDeleteFontFamily(family);
+            return;
+        }
+        if GdipCreateStringFormat(0, 0, &mut format).0 != 0 || format.is_null() {
+            GdipDeleteFont(font);
+            GdipDeleteFontFamily(family);
+            return;
+        }
+
+        GdipSetStringFormatAlign(format, StringAlignmentCenter);
+        GdipSetStringFormatLineAlign(format, StringAlignmentCenter);
+        let inset = edge * 0.12;
+        let layout = RectF {
+            X: inset,
+            Y: inset,
+            Width: edge - inset * 2.0,
+            Height: edge - inset * 2.0,
+        };
+        let mut brush: *mut GpSolidFill = null_mut();
+        if GdipCreateSolidFill(argb(255, 255, 255, 255), &mut brush).0 == 0 && !brush.is_null() {
+            GdipDrawString(
+                graphics,
+                PCWSTR(text.as_ptr()),
+                -1,
+                font,
+                &layout,
+                format,
+                brush.cast::<GpBrush>(),
+            );
+            GdipDeleteBrush(brush.cast::<GpBrush>());
+        }
+
+        GdipDeleteStringFormat(format);
+        GdipDeleteFont(font);
+        GdipDeleteFontFamily(family);
+    }
 }
 
 /// 填充椭圆；创建刷子失败时跳过该图元（不阻断整体绘制）。
@@ -1244,23 +1434,43 @@ fn present_layered(
     .map_err(|err| AppError::Internal(format!("UpdateLayeredWindow failed: {err}")))
 }
 
-/// COM 单线程 apartment 守卫：离开作用域时 `CoUninitialize`。
+/// COM/OLE apartment 守卫。
+///
+/// 拖放需要 OLE（`OleInitialize` 同时完成 STA 初始化）；OLE 不可用时回退到普通 STA，
+/// 悬浮球的单击/拖动仍可用，只是没有拖放（design §3、§9.2）。
 ///
 /// `!Send`：apartment 绑定当前线程，守卫只能由创建它的悬浮球线程 drop。
 struct ComGuard {
+    mode: ComMode,
     _not_send: PhantomData<*const ()>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ComMode {
+    Ole,
+    Com,
 }
 
 impl ComGuard {
     fn init() -> Option<ComGuard> {
         // SAFETY: 单线程 apartment 初始化；`None` 表示默认内存分配器。
-        match unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.ok() {
+        match unsafe { OleInitialize(None) } {
             Ok(()) => Some(ComGuard {
+                mode: ComMode::Ole,
                 _not_send: PhantomData,
             }),
             Err(err) => {
-                warn!(error = %err, "CoInitializeEx failed for the floating ball thread");
-                None
+                warn!(error = %err, "OleInitialize failed; falling back to a plain STA (no drag and drop)");
+                match unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.ok() {
+                    Ok(()) => Some(ComGuard {
+                        mode: ComMode::Com,
+                        _not_send: PhantomData,
+                    }),
+                    Err(err) => {
+                        warn!(error = %err, "CoInitializeEx failed for the floating ball thread");
+                        None
+                    }
+                }
             }
         }
     }
@@ -1268,8 +1478,13 @@ impl ComGuard {
 
 impl Drop for ComGuard {
     fn drop(&mut self) {
-        // SAFETY: 与 `CoInitializeEx` 成对调用，且只在悬浮球线程。
-        unsafe { CoUninitialize() };
+        // SAFETY: 与初始化成对调用，且只在悬浮球线程。
+        unsafe {
+            match self.mode {
+                ComMode::Ole => OleUninitialize(),
+                ComMode::Com => CoUninitialize(),
+            }
+        }
     }
 }
 
