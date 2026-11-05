@@ -169,11 +169,44 @@ impl EventSink for TauriEventSink {
             }
         }
 
+        // 捕获失败同理：阶段 01 还没有前端提示，托盘 tooltip 是唯一的用户可见反馈。
+        if let AppEvent::CaptureFailed(payload) = &event {
+            match self.app.tray_by_id(crate::tray::TRAY_ID) {
+                Some(tray) => {
+                    let tooltip = capture_failed_tooltip(&payload.code, &payload.message);
+                    match tray.set_tooltip(Some(tooltip)) {
+                        Ok(()) => {
+                            tracing::info!(code = %payload.code, "capture failure shown on tray")
+                        }
+                        Err(err) => tracing::warn!(error = %err, "failed to update tray tooltip"),
+                    }
+                }
+                None => tracing::warn!("tray icon missing; cannot show capture failure"),
+            }
+        }
+
         let name = event.name();
         if let Err(err) = self.app.emit(name, event.payload()) {
             tracing::warn!(event = name, error = %err, "failed to emit event");
         }
     }
+}
+
+/// 托盘 tooltip 的字符上限（Windows 通知区域提示约 128 字符，留出余量）。
+const TOOLTIP_MAX_CHARS: usize = 120;
+
+/// `capture_failed` 的托盘提示文本：`目记 VisRecall — <message> (<code>)`。
+///
+/// 错误信息可能很长（例如带完整路径的 IO 错误），超出上限时截断并加省略号，
+/// 避免 `set_tooltip` 因长度失败导致反馈丢失。
+fn capture_failed_tooltip(code: &str, message: &str) -> String {
+    let text = format!("目记 VisRecall — {message} ({code})");
+    if text.chars().count() <= TOOLTIP_MAX_CHARS {
+        return text;
+    }
+    let mut truncated: String = text.chars().take(TOOLTIP_MAX_CHARS).collect();
+    truncated.push('…');
+    truncated
 }
 
 /// 所有阶段 01 命令的注册点；命令同时带 `#[tauri::command]` 与 `#[specta::specta]`。
@@ -348,6 +381,22 @@ mod tests {
         let restart = ApiError::from(&AppError::InvalidInput("restart required".into()));
         assert_eq!(restart.code, "INVALID_INPUT");
         assert_eq!(restart.message, "restart required");
+    }
+
+    #[test]
+    fn capture_failed_tooltip_carries_message_and_code() {
+        let tooltip = capture_failed_tooltip("STORAGE_FULL", "storage full");
+        assert_eq!(tooltip, "目记 VisRecall — storage full (STORAGE_FULL)");
+    }
+
+    #[test]
+    fn capture_failed_tooltip_truncates_long_messages() {
+        let message = "x".repeat(500);
+        let tooltip = capture_failed_tooltip("IO", &message);
+        // 截断到上限 + 一个省略号，且仍然是合法 UTF-8（中文前缀未被切坏）。
+        assert_eq!(tooltip.chars().count(), TOOLTIP_MAX_CHARS + 1);
+        assert!(tooltip.starts_with("目记 VisRecall — xxx"));
+        assert!(tooltip.ends_with('…'));
     }
 
     #[test]

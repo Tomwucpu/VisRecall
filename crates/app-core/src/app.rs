@@ -17,8 +17,12 @@ use visrecall_shell::hotkey::{spawn_hotkey_thread, HotkeyHandle, HotkeySpec};
 use visrecall_shell::overlay::{spawn_overlay_thread, OverlayHandle};
 use visrecall_shell::{OverlayEvent, ShellEvent};
 
-use crate::capture_flow::{CaptureCoordinator, NoopWindowVisibility, WindowVisibility};
-use crate::events::{AppEvent, AppRecoveredEvent, EventSink, HotkeyConflictEvent};
+use crate::capture_flow::{
+    guard_session, CaptureCoordinator, NoopWindowVisibility, WindowVisibility,
+};
+use crate::events::{
+    AppEvent, AppRecoveredEvent, CaptureFailedEvent, EventSink, HotkeyConflictEvent,
+};
 
 /// Tauri 托管的应用状态。
 pub struct AppCore {
@@ -191,7 +195,8 @@ impl AppCore {
     /// 失败不阻止应用启动，只上报 [`AppEvent::HotkeyConflict`]；重复调用是空操作。
     ///
     /// 已启动 [`AppCore::start_runtime`] 时，热键事件直接进捕获循环；未启动时
-    /// （测试路径）退回临时通道并打印事件，避免事件丢失、也不触发真实抓帧。
+    /// （库不可用等降级场景）退回临时通道，收到请求后只发
+    /// `capture_failed { CAPTURE_UNAVAILABLE }`，不触发真实抓帧，也避免事件丢失。
     pub fn start_hotkey(&self) -> Result<(), AppError> {
         if self.lock_hotkey().is_some() {
             tracing::debug!("capture hotkey already started");
@@ -233,19 +238,25 @@ impl AppCore {
         Ok(())
     }
 
-    /// 未启动运行时（测试路径）的临时消费者：只打印，不触发捕获。
+    /// 未启动运行时（例如库打不开）的临时消费者：不触发捕获，但把
+    /// `capture_failed { CAPTURE_UNAVAILABLE }` 发出去，让托盘/前端能看到捕获不可用。
     fn spawn_shell_event_consumer(&self, spec: HotkeySpec, rx: Receiver<ShellEvent>) {
+        let sink = Arc::clone(&self.sink);
         let spawned = thread::Builder::new()
             .name("visrecall-shell-events".into())
             .spawn(move || {
                 for event in rx.iter() {
                     match event {
                         ShellEvent::CaptureRequest(trigger) => {
-                            tracing::info!(
+                            tracing::warn!(
                                 hotkey = %spec,
                                 ?trigger,
                                 "capture requested; runtime not started"
                             );
+                            sink.emit(AppEvent::CaptureFailed(CaptureFailedEvent {
+                                code: "CAPTURE_UNAVAILABLE".into(),
+                                message: "capture runtime not started".into(),
+                            }));
                         }
                     }
                 }
@@ -316,10 +327,20 @@ impl AppCore {
     }
 }
 
+/// 捕获循环单步结果：`Continue` 继续等事件，`Exit` 两个通道都断开（正常退出）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CaptureStep {
+    Continue,
+    Exit,
+}
+
 /// 捕获循环线程：串行处理快捷键触发与覆盖层结果。
 ///
 /// 抓帧与落盘都是同步 IO/CPU 工作，放在专用线程（design §3 的 capture worker），
 /// 不占主线程；两个通道都断开（`AppCore` 释放）时退出。
+///
+/// 每步都包在 [`guard_session`] 里：某一步 panic 时记录 error、恢复自有窗口
+/// （否则主窗口可能永久隐藏），然后继续等后续事件；通道断开的正常退出不受影响。
 fn spawn_capture_loop(
     coordinator: CaptureCoordinator,
     shell: Receiver<ShellEvent>,
@@ -329,24 +350,32 @@ fn spawn_capture_loop(
         .name("visrecall-capture-loop".into())
         .spawn(move || {
             loop {
-                select! {
-                    recv(shell) -> message => match message {
-                        Ok(ShellEvent::CaptureRequest(trigger)) => {
-                            tracing::info!(?trigger, "capture requested");
-                            if let Err(err) = coordinator.start(trigger) {
-                                tracing::warn!(error = %err, "capture start failed");
+                let step = guard_session(&coordinator, || {
+                    select! {
+                        recv(shell) -> message => match message {
+                            Ok(ShellEvent::CaptureRequest(trigger)) => {
+                                tracing::info!(?trigger, "capture requested");
+                                if let Err(err) = coordinator.start(trigger) {
+                                    tracing::warn!(error = %err, "capture start failed");
+                                }
+                                CaptureStep::Continue
                             }
-                        }
-                        Err(_) => break,
-                    },
-                    recv(overlay) -> message => match message {
-                        Ok(event) => {
-                            if let Err(err) = coordinator.on_overlay_event(event) {
-                                tracing::warn!(error = %err, "overlay event handling failed");
+                            Err(_) => CaptureStep::Exit,
+                        },
+                        recv(overlay) -> message => match message {
+                            Ok(event) => {
+                                if let Err(err) = coordinator.on_overlay_event(event) {
+                                    tracing::warn!(error = %err, "overlay event handling failed");
+                                }
+                                CaptureStep::Continue
                             }
-                        }
-                        Err(_) => break,
-                    },
+                            Err(_) => CaptureStep::Exit,
+                        },
+                    }
+                });
+
+                if step == Some(CaptureStep::Exit) {
+                    break;
                 }
             }
             tracing::debug!("capture loop exited");
@@ -550,5 +579,36 @@ mod tests {
         // 幂等：重复启动不再注册，也不产出冲突事件。
         core.start_hotkey().expect("second call is a no-op");
         assert!(sink.events().is_empty());
+    }
+
+    /// I3：运行时未启动（库不可用等降级场景）时按快捷键不能只写日志，
+    /// 要让托盘/前端看到 `CAPTURE_UNAVAILABLE`。
+    #[test]
+    fn runtime_less_capture_request_reports_capture_unavailable() {
+        use visrecall_shell::CaptureTrigger;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (core, sink) = open(dir.path());
+        let spec = HotkeySpec::parse("Ctrl+Shift+S").expect("parse hotkey");
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        core.spawn_shell_event_consumer(spec, rx);
+        tx.send(ShellEvent::CaptureRequest(CaptureTrigger::Hotkey))
+            .unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if let Some(AppEvent::CaptureFailed(payload)) = sink.events().first() {
+                assert_eq!(payload.code, "CAPTURE_UNAVAILABLE");
+                assert_eq!(payload.message, "capture runtime not started");
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no capture_failed event within 2s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        drop(tx);
     }
 }
