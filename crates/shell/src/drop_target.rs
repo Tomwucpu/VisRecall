@@ -10,6 +10,10 @@
 //! 支持的剪贴板格式：`CF_HDROP`、`CF_UNICODETEXT`、`CF_HTML`（注册格式
 //! `HTML Format`）、`CF_DIB`/`TYMED_GDI`，以及拖拽源注册的 `PNG`。PNG 优先于
 //! `CF_DIB`：解码失败再回退 `CF_DIB`（design §9.2）。
+//!
+//! 只有 `HTML Format`（没有 `CF_UNICODETEXT`）的源也算文本：`DragEnter` 判定与 `Drop`
+//! 读取都会回退到 HTML 片段剥离结果。`CF_DIB` 在交给 GDI 之前校验尺寸/位深，
+//! 畸形头部直接拒绝（不越界读）。
 
 use std::ffi::c_void;
 use std::mem::size_of;
@@ -46,6 +50,10 @@ pub use visrecall_domain::drop::DropContent;
 pub const MAX_DROP_FILES: usize = 20;
 /// 文本/HTML 片段的最大字符数；超出明确拒绝、不截断（P1-R09）。
 pub const MAX_TEXT_CHARS: usize = 10_000;
+/// 单个拖放位图的像素上限（8000×8000，与导入流程的长边上限一致）。
+///
+/// 超过上限直接拒绝：避免按畸形/超大位图分配巨量 BGRA 缓冲（I2 的健壮性要求）。
+const MAX_DIB_PIXELS: usize = 8000 * 8000;
 
 /// 通知悬浮球窗口重新应用拖入视觉（`WM_APP + 2`）。
 pub(crate) const WM_BALL_DROP_VISUAL: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 2;
@@ -324,6 +332,7 @@ impl IDropTarget_Impl for BallDropTarget_Impl {
             Ok(data) => read_content(data),
             Err(err) => Err(AppError::InvalidInput(format!("drop without data: {err}"))),
         };
+        let accepted = result.is_ok();
         match result {
             Ok(content) => {
                 debug!(?content, "drop content captured");
@@ -335,8 +344,14 @@ impl IDropTarget_Impl for BallDropTarget_Impl {
             }
         }
         self.reset_visual();
-        // SAFETY: 同 `DragEnter`；读取失败时也不再显示「可放下」光标。
-        unsafe { *pdweffect = DROPEFFECT_COPY };
+        // SAFETY: 同 `DragEnter`；读取/校验失败时不能让拖拽源以为放成功了（不报 COPY）。
+        unsafe {
+            *pdweffect = if accepted {
+                DROPEFFECT_COPY
+            } else {
+                DROPEFFECT_NONE
+            };
+        }
         Ok(())
     }
 }
@@ -344,17 +359,14 @@ impl IDropTarget_Impl for BallDropTarget_Impl {
 /// DragEnter 的轻量判定：只读文件列表与文本（不解码位图）。
 fn decision_for(data: &IDataObject) -> DragDecision {
     let formats = available_formats(data);
-    let files = if formats.hdrop {
-        read_files(data).unwrap_or_default()
-    } else {
-        Vec::new()
+    let files = match read_optional_files(data, &formats) {
+        Ok(files) => files,
+        Err(err) => {
+            debug!(error = %err, "drop file list is unreadable");
+            return DragDecision::rejected("无法读取文件列表");
+        }
     };
-    let plain = if formats.unicode_text {
-        read_utf16_text(data, CF_UNICODETEXT.0)
-    } else {
-        None
-    }
-    .filter(|text| !text.trim().is_empty());
+    let plain = plain_text_for_decision(data, &formats, &files);
 
     if !files.is_empty() {
         if files.len() > MAX_DROP_FILES {
@@ -387,14 +399,42 @@ fn decision_for(data: &IDataObject) -> DragDecision {
     }
 }
 
+/// 读取 `CF_HDROP`；没有该格式时返回空列表，格式存在但读不出来时返回错误（不静默当空）。
+fn read_optional_files(
+    data: &IDataObject,
+    formats: &DropFormats,
+) -> Result<Vec<PathBuf>, AppError> {
+    if !formats.hdrop {
+        return Ok(Vec::new());
+    }
+    read_files(data)
+}
+
+/// DragEnter 用的纯文本：优先 `CF_UNICODETEXT`，没有时回退到 HTML 片段剥离结果
+/// （只有 `HTML Format` 的源也能被接受，与 `read_content` 的回退一致）。
+fn plain_text_for_decision(
+    data: &IDataObject,
+    formats: &DropFormats,
+    files: &[PathBuf],
+) -> Option<String> {
+    let plain = if formats.unicode_text {
+        read_utf16_text(data, CF_UNICODETEXT.0)
+    } else {
+        None
+    }
+    .filter(|text| !text.trim().is_empty());
+    if plain.is_some() || !formats.html || !files.is_empty() {
+        return plain;
+    }
+    read_html(data)
+        .map(|raw| strip_html(html_fragment(&raw)))
+        .filter(|text| !text.trim().is_empty())
+}
+
 /// 读取完整拖放载荷；文件 → 文本 → 位图的优先级与 design §9.2 一致。
 fn read_content(data: &IDataObject) -> Result<DropContent, AppError> {
     let formats = available_formats(data);
-    let files = if formats.hdrop {
-        read_files(data).unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let files = read_optional_files(data, &formats)?;
 
     let html = if formats.html {
         read_html(data).map(|raw| {
@@ -420,6 +460,7 @@ fn read_content(data: &IDataObject) -> Result<DropContent, AppError> {
         if let Some(image) = read_image(data) {
             return Ok(image);
         }
+        debug!("bitmap drop could not be decoded; falling back to text/files");
     }
 
     let mut content = classify_drop(&formats, plain.as_deref(), &files)?;
@@ -573,9 +614,15 @@ fn read_html(data: &IDataObject) -> Option<String> {
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-fn read_files(data: &IDataObject) -> Option<Vec<PathBuf>> {
-    let medium = get_medium(data, CF_HDROP.0, TYMED_HGLOBAL)?;
-    let handle = global_handle(&medium)?;
+/// 读取 `CF_HDROP` 里的文件列表。
+///
+/// 读不出来时返回错误：调用方不能把「读取失败」当成「没有文件」——那会把紧跟着读取的
+/// 文本（资源管理器总会附带文件名文本）当成用户文本片段导入。列表为空同样视为错误。
+fn read_files(data: &IDataObject) -> Result<Vec<PathBuf>, AppError> {
+    let medium = get_medium(data, CF_HDROP.0, TYMED_HGLOBAL)
+        .ok_or_else(|| AppError::InvalidInput("drop file list is unavailable".into()))?;
+    let handle = global_handle(&medium)
+        .ok_or_else(|| AppError::InvalidInput("drop file list is not a global handle".into()))?;
     let hdrop = HDROP(handle.0);
 
     // SAFETY: `hdrop` 是有效的 `CF_HDROP` 句柄，`medium` 在函数返回前一直存活。
@@ -599,7 +646,10 @@ fn read_files(data: &IDataObject) -> Option<Vec<PathBuf>> {
 
     // 释放 `HDROP` 的全局内存（不要用 `DragFinish`：内存归 OLE 所有）。
     drop(medium);
-    Some(files)
+    if files.is_empty() {
+        return Err(AppError::InvalidInput("drop file list is empty".into()));
+    }
+    Ok(files)
 }
 
 // ---------------------------------------------------------------------------
@@ -654,6 +704,8 @@ fn read_dib(data: &IDataObject) -> Option<DropContent> {
 
 fn convert_medium_to_bgra(medium: &OwnedMedium, screen: HDC) -> Option<DropContent> {
     // `CF_DIB` 可能以 GDI 位图（TYMED_GDI）或打包的 DIB（TYMED_HGLOBAL）提供。
+    // TYMED_GDI 的基本校验：句柄不能为空（`is_invalid`），尺寸由 `bitmap_to_bgra` 里的
+    // `GetObjectW` 复核（`bmWidth/bmHeight > 0`，像素数有上限）；句柄归 `medium` 所有。
     let (bitmap, owned) = if medium.0.tymed & TYMED_GDI.0 as u32 != 0 {
         // SAFETY: tymed 表明联合体里是 `hBitmap`；所有权仍在 `medium`。
         let bitmap = unsafe { medium.0.u.hBitmap };
@@ -678,6 +730,10 @@ fn convert_medium_to_bgra(medium: &OwnedMedium, screen: HDC) -> Option<DropConte
 }
 
 /// 从打包的 `CF_DIB`（`BITMAPINFOHEADER` + 调色板 + 像素）创建 GDI 位图。
+///
+/// I2：`CreateDIBitmap` 会按头部读像素，因此调用前必须用 [`dib_layout`] 校验
+/// 「头部 + 调色板 + `stride × |biHeight|` 全部落在 `GlobalSize` 之内」；校验不过直接
+/// 放弃这次拖放（返回 `None` → 上层报 `DROP_REJECTED`），绝不越界读。
 fn bitmap_from_dib_global(screen: HDC, handle: HGLOBAL) -> Option<HBITMAP> {
     let size = unsafe { GlobalSize(handle) };
     if size < size_of::<BITMAPINFOHEADER>() {
@@ -691,38 +747,83 @@ fn bitmap_from_dib_global(screen: HDC, handle: HGLOBAL) -> Option<HBITMAP> {
             return None;
         }
         let header = &*(base as *const BITMAPINFOHEADER);
-        let valid = header.biSize as usize >= size_of::<BITMAPINFOHEADER>()
-            && header.biWidth > 0
-            && header.biHeight != 0;
-        if !valid {
+        let Some((pixel_offset, pixel_bytes)) = dib_layout(header, size) else {
+            warn!(
+                width = header.biWidth,
+                height = header.biHeight,
+                bit_count = header.biBitCount,
+                global_size = size,
+                "malformed CF_DIB rejected"
+            );
             let _ = GlobalUnlock(handle);
             return None;
-        }
-
-        let palette_entries = if header.biClrUsed > 0 {
-            header.biClrUsed as usize
-        } else if header.biBitCount <= 8 {
-            1usize << header.biBitCount
-        } else {
-            0
         };
-        let offset = header.biSize as usize + palette_entries * size_of::<u32>();
-        if offset > size {
-            let _ = GlobalUnlock(handle);
-            return None;
-        }
+        debug!(
+            width = header.biWidth,
+            height = header.biHeight,
+            pixel_offset,
+            pixel_bytes,
+            "validated packed CF_DIB"
+        );
 
         let bitmap = CreateDIBitmap(
             screen,
             Some(base as *const BITMAPINFOHEADER),
             CBM_INIT as u32,
-            Some(base.add(offset) as *const c_void),
+            Some(base.add(pixel_offset) as *const c_void),
             Some(base as *const BITMAPINFO),
             DIB_RGB_COLORS,
         );
         let _ = GlobalUnlock(handle);
         (!bitmap.is_invalid()).then_some(bitmap)
     }
+}
+
+/// 校验 `BITMAPINFOHEADER` 并算出 `(像素偏移, 像素字节数)`（纯函数，便于畸形输入测试）。
+///
+/// 拒绝的情形（I2）：
+/// - `biSize` 小于 `BITMAPINFOHEADER` 或大于整块数据；
+/// - `biWidth <= 0`、`biHeight == 0`、`biPlanes != 1`；
+/// - `biBitCount` 不在 `{1,4,8,16,24,32}`；
+/// - `offset + stride × |biHeight| > total`，其中
+///   `stride = ((biWidth × biBitCount + 31) / 32) × 4`、`offset = biSize + palette × 4`。
+///
+/// 所有算术都用 `checked_*`：畸形头部（超大宽高、超大 `biClrUsed`）不会溢出，只会被拒绝。
+fn dib_layout(header: &BITMAPINFOHEADER, total: usize) -> Option<(usize, usize)> {
+    let header_size = usize::try_from(header.biSize).ok()?;
+    if header_size < size_of::<BITMAPINFOHEADER>() || header_size > total {
+        return None;
+    }
+    if header.biWidth <= 0 || header.biHeight == 0 || header.biPlanes != 1 {
+        return None;
+    }
+    if !matches!(header.biBitCount, 1 | 4 | 8 | 16 | 24 | 32) {
+        return None;
+    }
+
+    let palette_entries = if header.biClrUsed > 0 {
+        usize::try_from(header.biClrUsed).ok()?
+    } else if header.biBitCount <= 8 {
+        1usize << header.biBitCount
+    } else {
+        0
+    };
+    let offset = header_size.checked_add(palette_entries.checked_mul(size_of::<u32>())?)?;
+
+    let width = usize::try_from(header.biWidth).ok()?;
+    let bit_count = usize::from(header.biBitCount);
+    let stride = width
+        .checked_mul(bit_count)?
+        .checked_add(31)?
+        .checked_div(32)?
+        .checked_mul(4)?;
+    let height = usize::try_from(header.biHeight.unsigned_abs()).ok()?;
+    let pixel_bytes = stride.checked_mul(height)?;
+
+    if offset > total || offset.checked_add(pixel_bytes)? > total {
+        return None;
+    }
+    Some((offset, pixel_bytes))
 }
 
 /// `GetDIBits` → top-down BGRA8；源位图没有 alpha 通道时补成不透明。
@@ -741,6 +842,14 @@ fn bitmap_to_bgra(screen: HDC, bitmap: HBITMAP) -> Option<DropContent> {
     }
     let width = info.bmWidth as u32;
     let height = info.bmHeight as u32;
+    // 像素数上限：畸形/超大位图（例如 60000×60000）直接拒绝，不分配巨量缓冲。
+    if (width as usize).saturating_mul(height as usize) > MAX_DIB_PIXELS {
+        warn!(
+            width,
+            height, "drop bitmap exceeds the pixel limit; rejected"
+        );
+        return None;
+    }
     let image_bytes = (width as usize)
         .checked_mul(height as usize)
         .and_then(|pixels| pixels.checked_mul(4))?;
@@ -843,6 +952,11 @@ pub(crate) fn strip_html(html: &str) -> String {
         if byte == b'<' {
             match html[index..].find('>') {
                 Some(end) => {
+                    // 块级标签换成空格，避免 `<p>a</p><p>b</p>` 粘成 `ab`；
+                    // 行内标签（`<b>`、`<span>`）不插空格，保留原词的连续文本。
+                    if is_block_tag(&html[index + 1..index + end]) {
+                        text.push(' ');
+                    }
                     index += end + 1;
                     continue;
                 }
@@ -858,6 +972,58 @@ pub(crate) fn strip_html(html: &str) -> String {
 
     let decoded = decode_entities(&text);
     collapsed_whitespace(&decoded)
+}
+
+/// 标签体（`<` 与 `>` 之间）是否属于块级/换行标签；结尾的空白折叠由调用方负责。
+fn is_block_tag(tag: &str) -> bool {
+    let name = tag
+        .trim_start_matches('/')
+        .split(|c: char| c.is_whitespace() || c == '/')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "address"
+            | "article"
+            | "aside"
+            | "blockquote"
+            | "br"
+            | "dd"
+            | "details"
+            | "div"
+            | "dl"
+            | "dt"
+            | "fieldset"
+            | "figcaption"
+            | "figure"
+            | "footer"
+            | "form"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "header"
+            | "hr"
+            | "li"
+            | "main"
+            | "nav"
+            | "ol"
+            | "p"
+            | "pre"
+            | "section"
+            | "summary"
+            | "table"
+            | "tbody"
+            | "td"
+            | "tfoot"
+            | "th"
+            | "thead"
+            | "tr"
+            | "ul"
+    )
 }
 
 fn decode_entities(text: &str) -> String {
@@ -929,15 +1095,25 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// 假数据对象：按剪贴板格式返回 HGLOBAL 载荷，覆盖 `QueryGetData`/`GetData`。
+    ///
+    /// `gdi` 里的条目按 `TYMED_GDI` 返回位图句柄（所有权交给 `ReleaseStgMedium`）。
     #[implement(IDataObject)]
     struct TestDataObject {
         entries: Vec<(u16, Vec<u8>)>,
+        gdi: Vec<(u16, HBITMAP)>,
     }
 
     impl IDataObject_Impl for TestDataObject_Impl {
         fn GetData(&self, format: *const FORMATETC) -> windows::core::Result<STGMEDIUM> {
             // SAFETY: OLE/测试代码传入的 `FORMATETC` 在调用期间有效。
             let format = unsafe { &*format };
+            if let Some((_, bitmap)) = self.gdi.iter().find(|(cf, _)| *cf == format.cfFormat) {
+                return Ok(STGMEDIUM {
+                    tymed: TYMED_GDI.0 as u32,
+                    u: STGMEDIUM_0 { hBitmap: *bitmap },
+                    pUnkForRelease: ManuallyDrop::new(None),
+                });
+            }
             let Some((_, bytes)) = self.entries.iter().find(|(cf, _)| *cf == format.cfFormat)
             else {
                 return Err(windows::core::Error::from_hresult(DV_E_FORMATETC));
@@ -961,7 +1137,9 @@ mod tests {
         fn QueryGetData(&self, format: *const FORMATETC) -> windows::core::HRESULT {
             // SAFETY: 同 `GetData`。
             let format = unsafe { &*format };
-            if self.entries.iter().any(|(cf, _)| *cf == format.cfFormat) {
+            if self.entries.iter().any(|(cf, _)| *cf == format.cfFormat)
+                || self.gdi.iter().any(|(cf, _)| *cf == format.cfFormat)
+            {
                 S_OK
             } else {
                 DV_E_FORMATETC
@@ -1025,7 +1203,19 @@ mod tests {
     }
 
     fn data_object(entries: Vec<(u16, Vec<u8>)>) -> IDataObject {
-        ComObject::new(TestDataObject { entries }).into_interface::<IDataObject>()
+        ComObject::new(TestDataObject {
+            entries,
+            gdi: Vec::new(),
+        })
+        .into_interface::<IDataObject>()
+    }
+
+    fn gdi_data_object(cf: u16, bitmap: HBITMAP) -> IDataObject {
+        ComObject::new(TestDataObject {
+            entries: Vec::new(),
+            gdi: vec![(cf, bitmap)],
+        })
+        .into_interface::<IDataObject>()
     }
 
     fn utf16_bytes(text: &str) -> Vec<u8> {
@@ -1055,26 +1245,34 @@ mod tests {
 
     /// 2×1 的 24bpp DIB：左像素红、右像素蓝（bottom-up，行填充到 4 字节）。
     fn dib_bytes() -> Vec<u8> {
-        let header = BITMAPINFOHEADER {
+        let header = dib_header(2, 1, 24);
+        // BGR 顺序：红 = 00 00 FF，蓝 = FF 00 00；每行 8 字节（2px*3 + 2 填充）。
+        packed_dib(&header, &[0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00])
+    }
+
+    fn dib_header(width: i32, height: i32, bit_count: u16) -> BITMAPINFOHEADER {
+        BITMAPINFOHEADER {
             biSize: size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: 2,
-            biHeight: 1,
+            biWidth: width,
+            biHeight: height,
             biPlanes: 1,
-            biBitCount: 24,
+            biBitCount: bit_count,
             biCompression: BI_RGB.0,
-            biSizeImage: 8,
             ..Default::default()
-        };
+        }
+    }
+
+    /// `BITMAPINFOHEADER` + 像素（不含调色板）。
+    fn packed_dib(header: &BITMAPINFOHEADER, pixels: &[u8]) -> Vec<u8> {
         let mut bytes = Vec::new();
         // SAFETY: `BITMAPINFOHEADER` 是 POD，按字节追加。
         bytes.extend_from_slice(unsafe {
             std::slice::from_raw_parts(
-                &header as *const BITMAPINFOHEADER as *const u8,
+                header as *const BITMAPINFOHEADER as *const u8,
                 size_of::<BITMAPINFOHEADER>(),
             )
         });
-        // BGR 顺序：红 = 00 00 FF，蓝 = FF 00 00；每行 8 字节（2px*3 + 2 填充）。
-        bytes.extend_from_slice(&[0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00]);
+        bytes.extend_from_slice(pixels);
         bytes
     }
 
@@ -1227,5 +1425,159 @@ mod tests {
         let err = read_content(&data).unwrap_err();
         assert!(format!("{err}").contains("10000"));
         assert_eq!(decision_for(&data).effect, DROPEFFECT_NONE);
+    }
+
+    // -----------------------------------------------------------------------
+    // Fix round 1：HTML-only 拖拽源、块级标签空格、畸形 DIB、GDI 位图
+    // -----------------------------------------------------------------------
+
+    /// 只有 `HTML Format`（没有 `CF_UNICODETEXT`）的源：DragEnter 也要接受，
+    /// 判定依据是剥离后的 HTML 文本（与 `read_content` 的回退一致）。
+    #[test]
+    fn html_only_drag_enter_is_accepted() {
+        let id = html_format_id();
+        let data = data_object(vec![(id, html_payload("<p>只有 HTML 的拖拽源</p>"))]);
+
+        let decision = decision_for(&data);
+        assert!(decision.accepted, "HTML-only drop must be accepted");
+        assert_eq!(decision.effect, DROPEFFECT_COPY);
+        assert_eq!(decision.label, "存为片段");
+
+        match read_content(&data).unwrap() {
+            DropContent::Text { plain, .. } => assert_eq!(plain, "只有 HTML 的拖拽源"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    /// HTML-only 的 URL 片段同样走链接判定。
+    #[test]
+    fn html_only_url_fragment_is_detected_as_a_link() {
+        let id = html_format_id();
+        let data = data_object(vec![(id, html_payload("<a>https://example.com/x</a>"))]);
+        assert_eq!(decision_for(&data).label, "存为链接");
+    }
+
+    /// 块级/相邻标签之间要有空格，行内标签不能拆词。
+    #[test]
+    fn strip_html_keeps_block_text_apart() {
+        assert_eq!(strip_html("<p>第一段</p><p>第二段</p>"), "第一段 第二段");
+        assert_eq!(strip_html("a<br/>b"), "a b");
+        assert_eq!(strip_html("<ul><li>一</li><li>二</li></ul>"), "一 二");
+        assert_eq!(strip_html("<h1>标题</h1><div>正文</div>"), "标题 正文");
+        // 行内标签保持连续（不把词拆开）。
+        assert_eq!(strip_html("<b>加粗</b><span>文本</span>"), "加粗文本");
+        assert_eq!(strip_html("<p>五 <b>六</b></p>"), "五 六");
+    }
+
+    /// `dib_layout`：合法布局给出像素偏移/字节数，畸形头部一律拒绝（不 panic、不溢出）。
+    #[test]
+    fn dib_layout_validates_bounds_and_bit_count() {
+        let header = dib_header(2, 1, 24);
+        let header_size = size_of::<BITMAPINFOHEADER>();
+        let full = header_size + 8;
+        // 2px × 24bpp = 8 字节（行已 4 字节对齐）。
+        assert_eq!(dib_layout(&header, full), Some((header_size, 8)));
+
+        // 截断：像素区少一个字节。
+        assert_eq!(dib_layout(&header, full - 1), None);
+        // 数据块连头部都放不下。
+        assert_eq!(dib_layout(&header, header_size - 1), None);
+
+        // 不支持的位深。
+        let mut bad = header;
+        bad.biBitCount = 7;
+        assert_eq!(dib_layout(&bad, full), None);
+        bad.biBitCount = 0;
+        assert_eq!(dib_layout(&bad, full), None);
+
+        // 零宽 / 零高 / 多平面。
+        let mut bad = header;
+        bad.biWidth = 0;
+        assert_eq!(dib_layout(&bad, full), None);
+        let mut bad = header;
+        bad.biHeight = 0;
+        assert_eq!(dib_layout(&bad, full), None);
+        let mut bad = header;
+        bad.biPlanes = 2;
+        assert_eq!(dib_layout(&bad, full), None);
+
+        // 8bpp 默认 256 色调色板：只有头部时调色板就越界。
+        let header8 = dib_header(2, 1, 8);
+        assert_eq!(dib_layout(&header8, header_size), None);
+        assert!(dib_layout(&header8, header_size + 256 * 4 + 4).is_some());
+
+        // 负高度（top-down）按绝对值算。
+        let mut top_down = dib_header(2, 1, 24);
+        top_down.biHeight = -1;
+        assert_eq!(dib_layout(&top_down, full), Some((header_size, 8)));
+
+        // 超大宽高不溢出，只被拒绝。
+        let huge = dib_header(i32::MAX, i32::MAX, 32);
+        assert_eq!(dib_layout(&huge, 4096), None);
+
+        // 32bpp 1×1 = 4 字节。
+        assert_eq!(
+            dib_layout(&dib_header(1, 1, 32), header_size + 4),
+            Some((header_size, 4))
+        );
+    }
+
+    /// 截断的 `CF_DIB`（头部声称 2×1 24bpp，实际只有 4 字节像素）必须在
+    /// `CreateDIBitmap` 之前被拒绝：不崩溃，Drop 报错。
+    #[test]
+    fn truncated_dib_is_rejected_through_ole() {
+        let header = dib_header(2, 1, 24);
+        let data = data_object(vec![(CF_DIB.0, packed_dib(&header, &[0; 4]))]);
+        assert!(read_image(&data).is_none(), "truncated DIB must not decode");
+        assert!(
+            read_content(&data).is_err(),
+            "truncated DIB drop is rejected"
+        );
+    }
+
+    /// 非法 `biBitCount` 的 `CF_DIB` 同样拒绝。
+    #[test]
+    fn invalid_bit_count_dib_is_rejected_through_ole() {
+        let mut header = dib_header(2, 1, 24);
+        header.biBitCount = 3;
+        let data = data_object(vec![(CF_DIB.0, packed_dib(&header, &[0; 8]))]);
+        assert!(read_image(&data).is_none());
+        assert!(read_content(&data).is_err());
+    }
+
+    /// `TYMED_GDI` 分支：空句柄直接拒绝（不调用 `GetDIBits`）。
+    #[test]
+    fn null_gdi_bitmap_handle_is_rejected() {
+        let data = gdi_data_object(CF_DIB.0, HBITMAP(std::ptr::null_mut()));
+        assert!(read_image(&data).is_none());
+    }
+
+    /// `TYMED_GDI` 分支：真实 DDB 能转成 top-down BGRA。
+    ///
+    /// 句柄所有权随 `STGMEDIUM` 交给 `ReleaseStgMedium`，测试不手动删除。
+    #[test]
+    fn gdi_bitmap_medium_is_converted_to_bgra() {
+        // 2×1 的 32bpp DDB（BGRA：左红右蓝）。
+        let bits: [u8; 8] = [0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0x00, 0x00];
+        // SAFETY: 位缓冲区在调用期间存活；失败返回空句柄。
+        let bitmap = unsafe {
+            windows::Win32::Graphics::Gdi::CreateBitmap(2, 1, 1, 32, Some(bits.as_ptr().cast()))
+        };
+        assert!(!bitmap.is_invalid(), "CreateBitmap failed");
+
+        let data = gdi_data_object(CF_DIB.0, bitmap);
+        match read_image(&data) {
+            Some(DropContent::ImageDib {
+                width,
+                height,
+                bgra,
+            }) => {
+                assert_eq!((width, height), (2, 1));
+                assert_eq!(bgra.len(), 8);
+                // 源位图没有 alpha：转出来必须是不透明的。
+                assert!(bgra.chunks_exact(4).all(|pixel| pixel[3] == 255));
+            }
+            other => panic!("expected ImageDib, got {other:?}"),
+        }
     }
 }

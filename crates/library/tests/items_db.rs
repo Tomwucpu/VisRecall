@@ -79,10 +79,22 @@ fn set_item_note_updates_note_and_timestamp() {
     let item = lib.insert_item(new_item(1)).unwrap();
     assert_eq!(item.note, "");
 
+    let (created_at, before) = lib.item_timestamps_for_test(&item.id).unwrap();
+    assert_eq!(created_at, before);
+    // 时间戳是毫秒：确保 `now_millis()` 一定前进（否则断言可能在同一毫秒内假负）。
+    std::thread::sleep(std::time::Duration::from_millis(2));
+
     lib.set_item_note(&item.id, "混合拖放的备注").unwrap();
     let got = lib.get_item(&item.id).unwrap().unwrap();
     assert_eq!(got.note, "混合拖放的备注");
     assert_eq!(got.id, item.id);
+
+    let (created_at_after, after) = lib.item_timestamps_for_test(&item.id).unwrap();
+    assert_eq!(created_at_after, created_at, "created_at must not change");
+    assert!(
+        after > before,
+        "set_item_note must refresh updated_at ({after} should be newer than {before})"
+    );
 }
 
 #[test]

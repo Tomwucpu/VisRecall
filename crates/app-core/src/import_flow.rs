@@ -1,20 +1,25 @@
 //! 拖放导入：把 [`DropContent`] 落盘并入库（design §5/§9.2/§10.2、P1-R09）。
 //!
-//! 本模块在 app-core 的核心循环线程上同步执行（与捕获落盘同一线程），悬浮球线程只
-//! 负责读取 OLE 数据并投递事件。逐项处理、部分失败不影响其他项：每个失败都会发
-//! `capture_failed`，成功的素材由调用方统一发 `item_created`。
+//! 线程模型（I3）：悬浮球线程只读取 OLE 数据并投递事件；app-core 的捕获循环收到
+//! [`ShellEvent::Drop`] 后**不在循环线程上执行 [`ImportFlow::ingest`]**，而是交给独立的
+//! 导入工作线程（见 `app::spawn_import`）。因此链接标题的 5s 超时、批量图片转码都不会让
+//! 捕获请求/覆盖层事件排队。
+//!
+//! 逐项处理、部分失败不影响其他项：每个失败都会发 `capture_failed`，成功的素材由调用方
+//! 统一发 `item_created`。
 //!
 //! 阶段 01 的边界：
 //! - 图片（含 `ImageDib`）保持 `parsing`，缩略图由 Task 17 生成后转 `ready`；
 //! - 文本/链接没有缩略图，写入后立即标 `ready`；
-//! - 链接标题抓取是阻塞调用（5s 超时），失败时标题回退 URL。
+//! - 链接标题抓取是阻塞调用（5s 超时、响应体最多 512KB），失败时标题回退 URL。
 
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Once, OnceLock};
 use std::time::{Duration, Instant};
 
-use encoding_rs::GB18030;
+use encoding_rs::{GB18030, UTF_16BE, UTF_16LE};
 use image::{DynamicImage, ImageFormat, RgbaImage};
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
@@ -39,6 +44,8 @@ pub const MAX_IMAGE_EDGE: u32 = 8000;
 pub const MAX_SNIPPET_CHARS: usize = 10_000;
 /// 链接标题抓取超时（P1-R09）。
 pub const URL_TIMEOUT: Duration = Duration::from_secs(5);
+/// 链接标题抓取最多读取的响应体字节数（512KB）；标题在 `<head>` 里，够用即可。
+pub const MAX_URL_BODY_BYTES: u64 = 512 * 1024;
 
 /// 从拖放内容导入素材的入口。
 pub struct ImportFlow {
@@ -108,8 +115,15 @@ impl ImportFlow {
 
     /// 悬浮球拒绝了一次拖放（无数据/不支持）：发 `capture_failed { DROP_REJECTED }`。
     pub fn emit_rejected(&self, message: &str) {
+        self.emit_failed("DROP_REJECTED", message);
+    }
+
+    /// 上报一次导入失败（`code` 是稳定错误码，`message` 面向用户）。
+    ///
+    /// 除了 `ingest` 内部的逐项失败，导入工作线程起不来等基础设施问题也从这里上报。
+    pub fn emit_failed(&self, code: &str, message: &str) {
         self.sink.emit(AppEvent::CaptureFailed(CaptureFailedEvent {
-            code: "DROP_REJECTED".to_string(),
+            code: code.to_string(),
             message: message.to_string(),
         }));
     }
@@ -436,10 +450,14 @@ impl ImportFlow {
                 response.status().as_u16()
             )));
         }
-        let body = response
-            .text()
+        // 标题在 `<head>` 里，读前 512KB 足够；极端大的页面不会把整页读进内存。
+        let mut reader = response.take(MAX_URL_BODY_BYTES);
+        let mut body = Vec::new();
+        reader
+            .read_to_end(&mut body)
             .map_err(|err| AppError::Io(format!("read {url}: {err}")))?;
-        Ok(extract_html_title(&body))
+        // 页面编码不保证是 UTF-8：用有损解码只为了取标题。
+        Ok(extract_html_title(&String::from_utf8_lossy(&body)))
     }
 
     fn http_client(&self) -> Result<&reqwest::blocking::Client, AppError> {
@@ -569,8 +587,29 @@ fn file_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-/// 文本解码：UTF-8 优先，失败回退 GB18030（P1-R09）。
+/// 文本解码：BOM 优先（UTF-16 LE/BE）→ UTF-8 → GB18030（P1-R09）。
+///
+/// Windows 记事本导出的「Unicode」文本是带 BOM 的 UTF-16LE（`FF FE`），按 UTF-8/GB18030
+/// 解码会得到乱码，所以先按 BOM 判定；`encoding_rs` 的 `decode` 会吃掉 BOM 本身。
 fn decode_text(bytes: &[u8]) -> String {
+    match bytes {
+        [0xFF, 0xFE, rest @ ..] => strip_bom(&UTF_16LE.decode(rest).0),
+        [0xFE, 0xFF, rest @ ..] => strip_bom(&UTF_16BE.decode(rest).0),
+        // UTF-8 BOM：直接跳过，避免文件开头出现 U+FEFF。
+        [0xEF, 0xBB, 0xBF, _rest @ ..] => std::str::from_utf8(bytes)
+            .map(|text| text.trim_start_matches('\u{feff}').to_string())
+            .unwrap_or_else(|_| decode_without_bom(bytes)),
+        _ => decode_without_bom(bytes),
+    }
+}
+
+/// 去掉解码后残留的 U+FEFF（重复 BOM 或编码声明错误时可能出现）。
+fn strip_bom(text: &str) -> String {
+    text.trim_start_matches('\u{feff}').to_string()
+}
+
+/// 无 BOM：UTF-8 优先，失败回退 GB18030。
+fn decode_without_bom(bytes: &[u8]) -> String {
     match std::str::from_utf8(bytes) {
         Ok(text) => text.to_string(),
         Err(_) => GB18030.decode(bytes).0.into_owned(),
@@ -992,6 +1031,80 @@ mod tests {
             Some("example.com".into())
         );
         assert_eq!(site_name("not a url"), None);
+    }
+
+    /// 文本解码顺序：UTF-16 BOM → UTF-8（含 BOM）→ GB18030。
+    #[test]
+    fn decode_text_handles_utf16_and_utf8_boms() {
+        // 「中文」：U+4E2D U+6587。
+        assert_eq!(decode_text(&[0xFF, 0xFE, 0x2D, 0x4E, 0x87, 0x65]), "中文");
+        assert_eq!(decode_text(&[0xFE, 0xFF, 0x4E, 0x2D, 0x65, 0x87]), "中文");
+        let mut utf8_bom = vec![0xEF, 0xBB, 0xBF];
+        utf8_bom.extend_from_slice("中文".as_bytes());
+        assert_eq!(decode_text(&utf8_bom), "中文");
+        assert_eq!(decode_text("中文".as_bytes()), "中文");
+        // 无 BOM 的 GB18030 仍走回退。
+        assert_eq!(decode_text(&[0xD6, 0xD0, 0xCE, 0xC4]), "中文");
+    }
+
+    /// 记事本导出的「Unicode」文本文件（UTF-16LE + BOM）导入后不能是乱码。
+    #[test]
+    fn utf16_text_file_is_decoded_before_gb18030() {
+        let fixture = fixture();
+        let source = fixture._dir.path().join("utf16.txt");
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in "# UTF-16 标题\n正文".encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        fs::write(&source, bytes).unwrap();
+
+        let items = fixture
+            .flow
+            .ingest(DropContent::Files(vec![source]))
+            .unwrap();
+        let stored = fixture.library.get_item(&items[0].id).unwrap().unwrap();
+        assert_eq!(stored.source_title.as_deref(), Some("UTF-16 标题"));
+        let text = fs::read_to_string(fixture.library.root().join(&stored.original_path)).unwrap();
+        assert_eq!(text, "# UTF-16 标题\n正文");
+    }
+
+    /// 标题抓取最多读 `MAX_URL_BODY_BYTES`：`<title>` 落在限制之后时不解析（也不读整页）。
+    #[test]
+    fn fetched_title_is_not_read_beyond_the_body_limit() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                // 读掉请求头（内容无关）；随后写回一个大响应体。
+                let mut scratch = [0u8; 2048];
+                let _ = stream.read(&mut scratch);
+                let body = format!(
+                    "<html><head>{}</head><title>too late</title></html>",
+                    "x".repeat(600 * 1024)
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\
+                     Connection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                // 客户端会在 512KB 处断开：写入失败是预期的。
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+
+        let fixture = fixture();
+        let title = fixture
+            .flow
+            .fetch_title(&format!("http://127.0.0.1:{port}/"))
+            .unwrap();
+        assert_eq!(
+            title, None,
+            "a title beyond MAX_URL_BODY_BYTES must not be read"
+        );
+        server.join().unwrap();
     }
 
     #[test]

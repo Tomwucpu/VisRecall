@@ -458,7 +458,6 @@ fn run_ball_window(
         base_size: size,
         size,
         position,
-        base_position: position,
         events,
         visible: Arc::clone(visible),
         drag: DragState::inactive(),
@@ -543,8 +542,6 @@ struct BallWindowState {
     size: u32,
     /// 当前左上角（全局物理像素）。
     position: PhysicalPoint,
-    /// 未放大时的左上角；拖入视觉以它为中心放大/还原。
-    base_position: PhysicalPoint,
     events: Sender<ShellEvent>,
     visible: Arc<AtomicBool>,
     /// 拖动状态机（纯逻辑，见 [`DragState`]）。
@@ -910,32 +907,23 @@ const DROP_SCALE: f32 = 1.15;
 ///
 /// 由 `WM_BALL_DROP_VISUAL` 触发；视觉状态来自共享的 [`DropVisual`]，本函数只读快照，
 /// 不持有互斥锁调用窗口 API。
+///
+/// C1：缩放锚点是**当前**窗口中心（`state.position` + `state.size`），不是启动时冻结的
+/// 位置——用户拖动过球之后，每次 DragEnter 都不能把球移回初始位置。
 fn refresh_drop_visual(hwnd: HWND) {
-    let Some((visual, base_size, base_position)) = with_state(hwnd, |state| {
+    let Some((visual, base_size, size, position)) = with_state(hwnd, |state| {
         let visual = state
             .drop_visual
             .lock()
             .map(|slot| slot.clone())
             .unwrap_or_default();
-        (visual, state.base_size, state.base_position)
+        (visual, state.base_size, state.size, state.position)
     }) else {
         return;
     };
 
-    let target_size = if visual.active {
-        ((base_size as f32 * DROP_SCALE).round() as u32).max(1)
-    } else {
-        base_size
-    };
-    // 放大/还原都以配置尺寸的中心为锚点，球不会「跳」到一边。
-    let center = PhysicalPoint {
-        x: base_position.x + base_size as i32 / 2,
-        y: base_position.y + base_size as i32 / 2,
-    };
-    let target_position = PhysicalPoint {
-        x: center.x - target_size as i32 / 2,
-        y: center.y - target_size as i32 / 2,
-    };
+    let (target_size, target_position) =
+        drop_visual_bounds(position, size, base_size, visual.active);
     let label = if visual.active && !visual.label.is_empty() {
         Some(visual.label.as_str())
     } else {
@@ -950,6 +938,33 @@ fn refresh_drop_visual(hwnd: HWND) {
         state.size = target_size;
         state.position = target_position;
     });
+}
+
+/// 拖入视觉的目标尺寸与左上角（纯函数，便于回归测试）。
+///
+/// 以 `position` + `size`（当前显示的窗口框）的中心为锚点：激活时放大到
+/// `base_size × DROP_SCALE`，未激活时还原到 `base_size`。两种情形都不改变球的中心，
+/// 也不依赖任何「启动位置」，因此拖动过的球不会被拖入事件拉回原位。
+fn drop_visual_bounds(
+    position: PhysicalPoint,
+    size: u32,
+    base_size: u32,
+    active: bool,
+) -> (u32, PhysicalPoint) {
+    let target_size = if active {
+        ((base_size as f32 * DROP_SCALE).round() as u32).max(1)
+    } else {
+        base_size
+    };
+    let center = PhysicalPoint {
+        x: position.x + size as i32 / 2,
+        y: position.y + size as i32 / 2,
+    };
+    let target_position = PhysicalPoint {
+        x: center.x - target_size as i32 / 2,
+        y: center.y - target_size as i32 / 2,
+    };
+    (target_size, target_position)
 }
 
 /// 移动窗口（不改变尺寸/Z 序、不激活）；返回是否成功。
@@ -1765,5 +1780,56 @@ mod tests {
         assert_eq!(drag.on_move((8, 8), true), DragUpdate::Pending);
         assert_eq!(drag.finish(), Some(false));
         assert!(!drag.is_active());
+    }
+
+    /// C1 回归：用户把球拖到别处后，未激活的拖入视觉刷新不能改变窗口位置。
+    ///
+    /// 旧实现用启动时冻结的 `base_position` 做锚点，每次 DragEnter 都会把球移回初始位置。
+    #[test]
+    fn drop_visual_refresh_keeps_the_current_position_when_inactive() {
+        let start = point(2000, 1000);
+        let moved = point(500, 400);
+        let base_size = 48;
+
+        // 未激活（DragLeave / Drop 之后的还原）：位置与尺寸都保持当前值。
+        assert_eq!(
+            drop_visual_bounds(moved, base_size, base_size, false),
+            (base_size, moved)
+        );
+        // 连续多次刷新也不漂移。
+        let (size, position) = drop_visual_bounds(moved, base_size, base_size, false);
+        assert_eq!(
+            drop_visual_bounds(position, size, base_size, false),
+            (base_size, moved)
+        );
+        // 与启动位置无关：锚点来自传入的当前位置。
+        assert_ne!(moved, start);
+    }
+
+    /// C1 回归：激活拖入视觉只围绕**当前**位置缩放，中心不变、左上角随放大内缩。
+    #[test]
+    fn drop_visual_scales_around_the_current_center() {
+        let base_size = 48;
+        let moved = point(500, 400);
+        let (scaled, scaled_position) = drop_visual_bounds(moved, base_size, base_size, true);
+
+        assert_eq!(scaled, (base_size as f32 * DROP_SCALE).round() as u32);
+        assert!(scaled > base_size);
+        // 中心不变：放大只让窗口向四周各扩一点。
+        assert_eq!(
+            scaled_position.x + scaled as i32 / 2,
+            moved.x + base_size as i32 / 2
+        );
+        assert_eq!(
+            scaled_position.y + scaled as i32 / 2,
+            moved.y + base_size as i32 / 2
+        );
+        assert!(scaled_position.x < moved.x && scaled_position.y < moved.y);
+
+        // 还原回到放大前的位置（往返无漂移）。
+        assert_eq!(
+            drop_visual_bounds(scaled_position, scaled, base_size, false),
+            (base_size, moved)
+        );
     }
 }

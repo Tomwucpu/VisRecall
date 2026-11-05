@@ -140,6 +140,20 @@ impl Library {
         }
         Ok(())
     }
+
+    /// 测试用：读取一行的 `(created_at, updated_at)`（`Item` 不暴露这两个字段）。
+    #[doc(hidden)]
+    pub fn item_timestamps_for_test(&self, id: &str) -> Result<(i64, i64), AppError> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT created_at, updated_at FROM items WHERE id = ?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(db_error)?
+        .ok_or(AppError::NotFound)
+    }
 }
 
 fn row_to_item(row: &Row<'_>) -> rusqlite::Result<Item> {

@@ -11,6 +11,7 @@ use std::thread;
 
 use crossbeam_channel::{select, Receiver, Sender};
 use visrecall_capture::{GdiFrameGrabber, Win32WindowProbe};
+use visrecall_domain::drop::DropContent;
 use visrecall_domain::AppError;
 use visrecall_library::paths::AppPaths;
 use visrecall_library::{AppConfig, Library};
@@ -217,7 +218,8 @@ impl AppCore {
             visibility,
             Arc::clone(&self.sink),
         );
-        // 拖放导入与捕获共用核心循环线程；来源应用用独立探针实例（无共享状态）。
+        // 拖放导入：`Drop` 事件到达捕获循环后派发到独立工作线程（`spawn_import`），
+        // 导入的落盘/转码/联网不会占住捕获事件循环。来源应用用独立探针实例。
         let import = Arc::new(ImportFlow::new(
             library,
             Arc::new(Win32WindowProbe::new()),
@@ -577,10 +579,34 @@ enum CaptureStep {
     Exit,
 }
 
+/// 在独立工作线程上执行一次拖放导入（design §9.2、I3）。
+///
+/// 捕获循环只调用本函数派发，不等待导入完成：链接标题抓取（最长 5s）与批量图片转码
+/// 都在工作线程里跑，捕获请求/覆盖层事件因此不会排队。失败不会让进程退出；`ingest`
+/// 自己会发 `capture_failed`，成功的素材在这里补 `item_created`。
+fn spawn_import(import: Arc<ImportFlow>, content: DropContent) -> Result<(), AppError> {
+    let spawned = thread::Builder::new()
+        .name("visrecall-import".into())
+        .spawn(move || match import.ingest(content) {
+            Ok(items) => import.emit_created(&items),
+            Err(err) => {
+                // `ingest` 已经发出 `capture_failed`，这里只记日志。
+                tracing::warn!(error = %err, "drop import failed");
+            }
+        });
+
+    spawned
+        .map(|_| ())
+        .map_err(|err| AppError::Internal(format!("spawn import worker: {err}")))
+}
+
 /// 捕获循环线程：串行处理快捷键/悬浮球触发、悬浮球位置与覆盖层结果。
 ///
 /// 抓帧与落盘都是同步 IO/CPU 工作，放在专用线程（design §3 的 capture worker），
 /// 不占主线程；两个通道都断开（`AppCore` 释放）时退出。
+///
+/// 拖放导入**不在本线程执行**：`ShellEvent::Drop` 只派发到独立的导入工作线程
+/// （[`spawn_import`]），保证 5s 的 URL 标题抓取/批量转码不阻塞捕获事件循环。
 ///
 /// 每步都包在 [`guard_session`] 里：某一步 panic 时记录 error、恢复自有窗口
 /// （否则主窗口可能永久隐藏），然后继续等后续事件；通道断开的正常退出不受影响。
@@ -629,15 +655,12 @@ fn spawn_capture_loop(
                                 CaptureStep::Continue
                             }
                             Ok(ShellEvent::Drop(content)) => {
-                                // 导入在本线程同步执行（不阻塞 UI/球线程）；单张图片与
-                                // 20 张小图的批量都在毫秒级，`ingest` 内部记录耗时。
+                                // I3：导入（落盘/转码/URL 标题 5s 超时）跑在独立的导入
+                                // 工作线程上，捕获/覆盖层事件不会排队。这里只负责派发。
                                 tracing::info!("drop content received");
-                                match import.ingest(content) {
-                                    Ok(items) => import.emit_created(&items),
-                                    Err(err) => {
-                                        // `ingest` 已经发出 `capture_failed`，这里只记日志。
-                                        tracing::warn!(error = %err, "drop import failed");
-                                    }
+                                if let Err(err) = spawn_import(Arc::clone(&import), content) {
+                                    tracing::warn!(error = %err, "failed to start the drop import");
+                                    import.emit_failed("INTERNAL", &err.to_string());
                                 }
                                 CaptureStep::Continue
                             }
@@ -1038,6 +1061,85 @@ mod tests {
         // 幂等：重复启动不再注册，也不产出冲突事件。
         core.start_hotkey().expect("second call is a no-op");
         assert!(sink.events().is_empty());
+    }
+
+    /// I3：拖放导入在独立工作线程执行——派发立即返回，入库（含 `item_created`）
+    /// 由工作线程完成，捕获循环不会被 5s 的 URL 抓取或批量转码占住。
+    #[test]
+    fn spawn_import_dispatches_to_a_worker_thread() {
+        use std::time::{Duration, Instant};
+
+        use visrecall_capture::WindowProbe;
+        use visrecall_domain::capture::ForegroundInfo;
+        use visrecall_domain::geometry::PhysicalRect;
+        use visrecall_domain::WindowInfo;
+
+        /// 不触碰真实桌面的窗口探针。
+        struct FakeProbe;
+
+        impl WindowProbe for FakeProbe {
+            fn foreground(&self) -> Result<ForegroundInfo, AppError> {
+                Ok(ForegroundInfo {
+                    hwnd: 0,
+                    pid: 7,
+                    process_name: "chrome.exe".into(),
+                    display_name: "Chrome".into(),
+                    title: "Example page".into(),
+                    bounds: PhysicalRect::new(0, 0, 100, 100),
+                })
+            }
+            fn enumerate(&self) -> Result<Vec<WindowInfo>, AppError> {
+                Ok(Vec::new())
+            }
+            fn hit_chain(
+                &self,
+                _point: visrecall_domain::PhysicalPoint,
+            ) -> Result<Vec<WindowInfo>, AppError> {
+                Ok(Vec::new())
+            }
+            fn hit_chain_excluding(
+                &self,
+                _point: visrecall_domain::PhysicalPoint,
+                _excluded_pid: u32,
+            ) -> Result<Vec<WindowInfo>, AppError> {
+                Ok(Vec::new())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let library = Arc::new(Library::open(dir.path().join("import-lib")).unwrap());
+        let sink = Arc::new(RecordingSink::default());
+        let import = Arc::new(ImportFlow::new(
+            Arc::clone(&library),
+            Arc::new(FakeProbe),
+            Arc::clone(&sink) as Arc<dyn EventSink>,
+        ));
+
+        let started = Instant::now();
+        spawn_import(
+            Arc::clone(&import),
+            DropContent::Text {
+                plain: "后台线程导入".into(),
+                html: None,
+            },
+        )
+        .expect("spawn import worker");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "dispatch must not wait for the import to finish"
+        );
+
+        // 入库在工作线程完成：`item_created` 与库里的行都会出现。
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while sink.events().is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "item_created must arrive from the import worker within 5s"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(matches!(sink.events()[0], AppEvent::ItemCreated(_)));
+        assert_eq!(library.list_items(None, 10).unwrap().len(), 1);
     }
 
     /// I3：运行时未启动（库不可用等降级场景）时按快捷键不能只写日志，
