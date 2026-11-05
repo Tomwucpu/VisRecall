@@ -572,7 +572,7 @@ CREATE INDEX idx_jobs_due ON jobs(state, next_run_at, priority);
 - 图片：`tmp/<uuid>.tmp` 写入 → `File::sync_all` → `rename` 到 `originals/images/YYYY/MM/<uuid>.png` → 插入 DB。
 - 文本：`texts/<uuid>.txt`，UTF-8；同样走临时文件 + rename。
 - 路径存相对库根目录；读取时拼接并 `canonicalize` 校验仍在库内。
-- 启动时删除 `tmp/` 下超过 24h 的文件；扫描 `originals/` 与 `texts/` 中数据库不存在的孤儿文件，记录日志但不自动删除（阶段 02 提供清理入口）。
+- 启动时清空 `tmp/` 下的临时文件（原子写残留不会被数据库引用，可直接删除，满足 P1-R06 的强杀恢复）；扫描 `originals/` 与 `texts/` 中数据库不存在的孤儿文件，记录日志但不自动删除（阶段 02 提供清理入口）。
 - 缩略图：`thumbs/<uuid>.png`，长边 480px；生成失败不阻塞列表。
 
 ### 10.3 配置
