@@ -1755,7 +1755,7 @@ Expected: 失败，`ItemCard` 不存在。
 
 - `queryClient`：默认 `staleTime: 5_000`、`refetchOnWindowFocus: false`。
 - `useItems`：`useInfiniteQuery` 调用生成的 `list_items`（导出名以 `bindings.ts` 为准）；`getNextPageParam` 使用最后一项 `capturedAt`。
-- `events.ts`：监听 `item_created`/`item_updated`，`queryClient.invalidateQueries({ queryKey: ["items"] })`。
+- `events.ts`：监听 `item_created`/`item_updated`，`queryClient.resetQueries({ queryKey: ["items"] })`（重置到第一页再重取；旧 pageParams 的游标会在新素材插入后跳过边界项）。
 - `ItemGrid`：CSS grid，`auto-fill minmax(180px, 1fr)`；阶段 01 先渲染全部已加载项（≤100 条），不做复杂虚拟化；加载更多按钮。
 - `ItemCardData`：`{ id, kind, status, capturedAt, sourceApp, sourceTitle, thumbUrl }`；`useItems` 把生成的 `ItemDto` 映射为 `ItemCardData`，并用 `convertFileSrc` 转换 `thumbUrl`（测试中 mock 为原样返回）。
 - `ItemCard`：缩略图/占位、状态徽标（解析中/正常/待解析/失败）、来源应用、相对时间（毫秒时间戳格式化为本地时间）。
