@@ -20,7 +20,9 @@ export function toThumbSrc(url: string | null): string | null {
   return `${convertFileSrc("thumb", "visrecall")}/${encodeURIComponent(id)}`;
 }
 
-/** 状态徽标文案（design §11.1：parsing/ready/pending/failed）。 */
+const KNOWN_STATUSES = ["parsing", "ready", "pending", "failed"] as const;
+
+/** 状态徽标文案（design §11.1：parsing/ready/pending/failed）；未知值给中文兜底。 */
 export function statusLabel(status: string): string {
   switch (status) {
     case "parsing":
@@ -32,11 +34,16 @@ export function statusLabel(status: string): string {
     case "failed":
       return "失败";
     default:
-      return status;
+      return "未知状态";
   }
 }
 
-/** 素材类型文案。 */
+/** 徽标样式后缀：未知状态统一落到默认样式，避免出现无样式的裸徽标。 */
+export function statusTone(status: string): string {
+  return (KNOWN_STATUSES as readonly string[]).includes(status) ? status : "unknown";
+}
+
+/** 素材类型文案；未知值给中文兜底。 */
 export function kindLabel(kind: string): string {
   switch (kind) {
     case "image":
@@ -46,7 +53,7 @@ export function kindLabel(kind: string): string {
     case "link":
       return "链接";
     default:
-      return kind;
+      return "未知类型";
   }
 }
 

@@ -232,6 +232,20 @@ button:disabled {
   padding: 4px 0 16px;
 }
 
+/* 已有素材时刷新失败：保留网格，只在顶部提示。 */
+.item-grid-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid #f3c2c2;
+  border-radius: 8px;
+  background: #fff5f5;
+  font-size: 12px;
+  color: #991b1b;
+}
+
 .item-card {
   display: flex;
   flex: 1;
@@ -311,6 +325,12 @@ button:disabled {
 .item-status-failed {
   background: #fee2e2;
   color: #991b1b;
+}
+
+/* 未知状态：后端新增枚举时也不至于出现无样式/裸英文徽标。 */
+.item-status-unknown {
+  background: #e5e7eb;
+  color: #4b5563;
 }
 
 .item-kind {
