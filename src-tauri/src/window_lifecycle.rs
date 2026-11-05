@@ -9,11 +9,12 @@
 //! 阻塞等待主线程应答，持锁等待主线程就会互锁。因此计时线程只把「检查 + 销毁」
 //! 投递到主线程，临界区内不做 sleep、也不做跨线程等待。
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use tauri::{App, AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use visrecall_app_core::WindowVisibility;
 
 /// 主窗口 label；与 `capabilities/default.json` 的 `windows` 对应。
 pub const MAIN_LABEL: &str = "main";
@@ -177,6 +178,115 @@ fn lock_lifecycle() -> MutexGuard<'static, ()> {
 
 fn next_generation() -> u64 {
     GENERATION.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+/// 等待主线程完成窗口可见性操作的超时。
+///
+/// 正常情况下主线程消息循环很快应答；超时只用于兜底（例如主线程正在等本线程），
+/// 避免一次捕获永久卡在「隐藏窗口」上。
+const VISIBILITY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// 抓帧期间隐藏主窗口的 [`WindowVisibility`] 实现（design §5 步骤 2）。
+///
+/// - 隐藏时记录「抓帧前主窗口是否可见」，只隐藏可见窗口；抓帧结束后仅当之前可见
+///   且窗口仍然存在时恢复显示（不重建，重建由 [`show_main_window`] 负责）。
+/// - 窗口操作统一投递到主线程并**等待应答**，确保 `DwmFlush`/抓帧开始时窗口已隐藏。
+/// - 只捕获 `AppHandle`，不捕获窗口克隆：事件监听器存放在窗口内部，捕获克隆会形成
+///   引用环，销毁窗口后 WebView2 进程无法退出。
+pub struct MainWindowVisibility {
+    app: AppHandle,
+    was_visible: AtomicBool,
+}
+
+impl MainWindowVisibility {
+    pub fn new(app: AppHandle) -> Self {
+        Self {
+            app,
+            was_visible: AtomicBool::new(false),
+        }
+    }
+}
+
+impl WindowVisibility for MainWindowVisibility {
+    fn hide_own_windows(&self) {
+        let visible = run_on_main(&self.app, |app| {
+            let Some(window) = app.get_webview_window(MAIN_LABEL) else {
+                return false;
+            };
+            match window.is_visible() {
+                Ok(visible) => {
+                    if visible {
+                        if let Err(err) = window.hide() {
+                            tracing::warn!(error = %err, "failed to hide main window for capture");
+                            return false;
+                        }
+                        tracing::info!("main window hidden for capture");
+                    } else {
+                        tracing::debug!("main window already hidden; nothing to hide for capture");
+                    }
+                    visible
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "cannot read main window visibility; not hiding");
+                    false
+                }
+            }
+        });
+        // 只有原本可见时才标记，避免重复隐藏把「需要恢复」抹掉。
+        if visible == Some(true) {
+            self.was_visible.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn show_own_windows(&self) {
+        // 抓帧前不可见（冷启动托盘态/用户已关闭）时保持不可见。
+        if !self.was_visible.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        // 失败（超时/投递失败）已在 `run_on_main` 内部记录；这里不改变捕获流程。
+        let _ = run_on_main(&self.app, |app| {
+            match app.get_webview_window(MAIN_LABEL) {
+                Some(window) => {
+                    if let Err(err) = window.show() {
+                        tracing::warn!(error = %err, "failed to restore main window after capture");
+                    } else {
+                        tracing::info!("main window restored after capture");
+                    }
+                }
+                // 窗口在隐藏期间被销毁（60s 定时销毁）：不重建，用户从托盘打开。
+                None => tracing::debug!("main window gone after capture; not recreating"),
+            }
+        });
+    }
+}
+
+/// 在主线程执行 `work` 并等待其完成，返回闭包结果。
+///
+/// Tauri 的窗口 getter 在非主线程调用会阻塞等待主线程应答，因此窗口操作必须在
+/// 主线程内完成；这里用 `run_on_main_thread` + 单值通道把结果同步带回调用线程。
+fn run_on_main<T, F>(app: &AppHandle, work: F) -> Option<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&AppHandle) -> T + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let handle = app.clone();
+    if let Err(err) = app.run_on_main_thread(move || {
+        let value = work(&handle);
+        // 接收端可能因超时提前离开；发送失败无需处理。
+        let _ = tx.send(value);
+    }) {
+        tracing::warn!(error = %err, "failed to dispatch window visibility change to main thread");
+        return None;
+    }
+
+    match rx.recv_timeout(VISIBILITY_TIMEOUT) {
+        Ok(value) => Some(value),
+        Err(err) => {
+            tracing::warn!(error = %err, "timed out waiting for main thread window visibility change");
+            None
+        }
+    }
 }
 
 #[cfg(test)]

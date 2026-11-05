@@ -41,7 +41,14 @@ fn main() {
         .setup(|app| {
             let sink: Arc<dyn visrecall_app_core::EventSink> =
                 Arc::new(ipc::TauriEventSink::new(app.handle().clone()));
-            let core = visrecall_app_core::AppCore::open(resolve_paths(), sink);
+            let visibility: Arc<dyn visrecall_app_core::WindowVisibility> = Arc::new(
+                window_lifecycle::MainWindowVisibility::new(app.handle().clone()),
+            );
+            let core = visrecall_app_core::AppCore::open_with_visibility(
+                resolve_paths(),
+                sink,
+                visibility,
+            );
             let library_ok = core.library_ok();
             app.manage(core);
 
@@ -49,6 +56,11 @@ fn main() {
             // 库打不开时托盘进入异常态（红色图标 + 「库不可用」提示），但不阻止驻留。
             tray::create(app, library_ok)?;
             window_lifecycle::install(app);
+
+            // 覆盖层线程/D3D 设备在启动时预创建；失败只记录，不影响托盘驻留。
+            if let Err(err) = app.state::<visrecall_app_core::AppCore>().start_runtime() {
+                tracing::warn!(error = %err, "capture runtime unavailable; captures disabled");
+            }
 
             // 热键必须在托盘之后启动：注册失败要能立刻把提示挂到托盘上。
             if let Err(err) = app.state::<visrecall_app_core::AppCore>().start_hotkey() {

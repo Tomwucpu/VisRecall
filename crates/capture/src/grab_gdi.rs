@@ -15,6 +15,7 @@ use tracing::{debug, warn};
 use visrecall_domain::capture::{DisplayInfo, RawFrame};
 use visrecall_domain::error::AppError;
 use windows::core::Error as WinError;
+use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
     SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CAPTUREBLT, DIB_RGB_COLORS, HBITMAP, HDC,
@@ -108,6 +109,15 @@ pub fn is_blank_frame(frame: &RawFrame) -> bool {
         .chunks_exact(4)
         .step_by(BLANK_SAMPLE_STEP)
         .all(|px| px.iter().all(|&b| b == 0))
+}
+
+/// 等待 DWM 合成一帧，确保刚隐藏的自有窗口不再出现在抓帧结果里（design §5）。
+///
+/// 失败（例如 DWM 未运行）不阻止捕获：调用方记录日志后继续抓帧，
+/// 此时旧窗口内容可能仍在合成队列里。
+pub fn dwm_flush() -> Result<(), AppError> {
+    // SAFETY: 无参数、无生命周期要求的同步调用；失败时返回 Win32 错误。
+    unsafe { DwmFlush() }.map_err(|err| AppError::Internal(format!("DwmFlush failed: {err}")))
 }
 
 /// `GetDC(NULL)` 的 RAII 包装，`Drop` 时 `ReleaseDC`。

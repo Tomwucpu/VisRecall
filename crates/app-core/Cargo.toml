@@ -6,11 +6,15 @@ edition.workspace = true
 [dependencies]
 visrecall-domain = { path = "../domain" }
 visrecall-library = { path = "../library" }
+visrecall-capture = { path = "../capture" }
 visrecall-shell = { path = "../shell" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 crossbeam-channel = "0.5"
+image = { version = "0.25", default-features = false, features = ["png"] }
+sha2 = "0.10"
+time = { version = "0.3", features = ["local-offset"] }
 
 [dev-dependencies]
 tempfile = "3"

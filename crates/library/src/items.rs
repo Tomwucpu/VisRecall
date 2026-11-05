@@ -12,7 +12,14 @@ const COLUMNS: &str = "id, kind, status, captured_at, source_app, source_title, 
 impl Library {
     /// 插入新素材：生成 id 与时间戳，初始 `status = parsing`，`note` 为空。
     pub fn insert_item(&self, new: NewItem) -> Result<Item, AppError> {
-        let id = new_item_id();
+        self.insert_item_with_id(new_item_id(), new)
+    }
+
+    /// 同 [`Library::insert_item`]，但 id 由调用方提供。
+    ///
+    /// 捕获落盘需要先用 id 命名文件（`originals/images/YYYY/MM/<id>.png`），再按同一
+    /// id 入库，避免文件名与素材 id 不一致。
+    pub fn insert_item_with_id(&self, id: String, new: NewItem) -> Result<Item, AppError> {
         let now = now_millis();
         let item = Item {
             id,

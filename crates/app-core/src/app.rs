@@ -1,4 +1,4 @@
-//! 应用编排核心：持有库句柄、配置与事件发送端。
+//! 应用编排核心：持有库句柄、配置、捕获运行时与事件发送端。
 //!
 //! 本模块不依赖 Tauri；`src-tauri` 只负责把命令参数/返回值映射成 DTO。
 //! 库打开失败不会 panic：错误保存在 [`AppCore::library`] 里，由命令层转成
@@ -8,33 +8,60 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{select, Receiver, Sender};
+use visrecall_capture::{GdiFrameGrabber, Win32WindowProbe};
 use visrecall_domain::AppError;
 use visrecall_library::paths::AppPaths;
 use visrecall_library::{AppConfig, Library};
 use visrecall_shell::hotkey::{spawn_hotkey_thread, HotkeyHandle, HotkeySpec};
-use visrecall_shell::ShellEvent;
+use visrecall_shell::overlay::{spawn_overlay_thread, OverlayHandle};
+use visrecall_shell::{OverlayEvent, ShellEvent};
 
+use crate::capture_flow::{CaptureCoordinator, NoopWindowVisibility, WindowVisibility};
 use crate::events::{AppEvent, AppRecoveredEvent, EventSink, HotkeyConflictEvent};
 
 /// Tauri 托管的应用状态。
 pub struct AppCore {
     paths: AppPaths,
     /// 库打开失败时保留错误；后续命令据此返回错误码。
-    library: Result<Library, AppError>,
+    library: Result<Arc<Library>, AppError>,
     config: Mutex<AppConfig>,
     sink: Arc<dyn EventSink>,
     /// 全局热键线程句柄；`start_hotkey` 之后才有值，drop 时自动注销。
     hotkey: Mutex<Option<HotkeyHandle>>,
+    /// 捕获运行时；`start_runtime` 之后才有值，drop 时通知线程退出。
+    runtime: Mutex<Option<CaptureRuntime>>,
+    /// 抓帧期间隐藏/恢复自有窗口；测试与无 UI 场景使用 [`NoopWindowVisibility`]。
+    visibility: Arc<dyn WindowVisibility>,
+}
+
+/// 捕获运行时的线程句柄与通道。
+///
+/// 字段顺序无关紧要；drop 时先丢弃 `shell_tx`（捕获循环退出），再丢弃覆盖层
+/// 命令发送端（覆盖层线程退出并清理 D3D 资源）。
+struct CaptureRuntime {
+    /// 热键/悬浮球线程投递捕获请求的发送端。
+    shell_tx: Sender<ShellEvent>,
+    /// 只为持有覆盖层线程：命令通道断开后覆盖层线程自行退出。
+    _overlay: OverlayHandle,
 }
 
 impl AppCore {
-    /// 加载配置 → 打开库 → 恢复遗留任务。
+    /// 加载配置 → 打开库 → 恢复遗留任务；不涉及真实窗口（测试/无 UI 路径）。
     ///
     /// - 配置缺失/损坏由 [`AppConfig::load_or_default`] 兜底为默认值。
     /// - 库打开失败只记录日志并把错误留在结构体里，主窗口据此显示错误状态。
     /// - 恢复任务数 > 0 时发出 [`AppEvent::AppRecovered`]。
     pub fn open(paths: AppPaths, sink: Arc<dyn EventSink>) -> AppCore {
+        Self::open_with_visibility(paths, sink, Arc::new(NoopWindowVisibility))
+    }
+
+    /// 同 [`AppCore::open`]，但注入自有窗口的隐藏/恢复实现（`src-tauri` 用主窗口）。
+    pub fn open_with_visibility(
+        paths: AppPaths,
+        sink: Arc<dyn EventSink>,
+        visibility: Arc<dyn WindowVisibility>,
+    ) -> AppCore {
         let config = AppConfig::load_or_default(&paths.config_file);
         let library_path = config.library_path.clone();
         tracing::info!(
@@ -55,7 +82,7 @@ impl AppCore {
                         tracing::warn!(error = %err, "failed to recover jobs");
                     }
                 }
-                Ok(library)
+                Ok(Arc::new(library))
             }
             Err(err) => {
                 tracing::error!(
@@ -73,6 +100,8 @@ impl AppCore {
             config: Mutex::new(config),
             sink,
             hotkey: Mutex::new(None),
+            runtime: Mutex::new(None),
+            visibility,
         }
     }
 
@@ -82,7 +111,7 @@ impl AppCore {
 
     /// 库句柄；打开失败时返回启动时的错误。
     pub fn library(&self) -> Result<&Library, &AppError> {
-        self.library.as_ref()
+        self.library.as_ref().map(Arc::as_ref)
     }
 
     pub fn library_ok(&self) -> bool {
@@ -108,10 +137,61 @@ impl AppCore {
         &self.sink
     }
 
+    /// 启动捕获运行时：预创建覆盖层线程 → 建立 ShellEvent 通道 → 起捕获循环线程。
+    ///
+    /// 幂等；失败只返回错误（调用方记录日志），不阻止应用继续驻留托盘。
+    /// 覆盖层线程在启动时完成 D3D 设备/窗口/交换链预创建，避免首次捕获超过
+    /// 150ms 的入口预算（design §3、P1-R12）。
+    pub fn start_runtime(&self) -> Result<(), AppError> {
+        if self.lock_runtime().is_some() {
+            tracing::debug!("capture runtime already started");
+            return Ok(());
+        }
+
+        let library = match &self.library {
+            Ok(library) => Arc::clone(library),
+            Err(err) => {
+                tracing::error!(error = %err, "capture runtime not started: library unavailable");
+                return Err(AppError::Internal(format!("library unavailable: {err}")));
+            }
+        };
+
+        let (overlay_tx, overlay_rx) = crossbeam_channel::unbounded();
+        let overlay = match spawn_overlay_thread(overlay_tx) {
+            Ok(overlay) => overlay,
+            Err(err) => {
+                tracing::error!(error = %err, "failed to start overlay thread");
+                return Err(err);
+            }
+        };
+
+        let coordinator = CaptureCoordinator::new(
+            library,
+            Arc::new(GdiFrameGrabber::new()),
+            Arc::new(Win32WindowProbe::new()),
+            overlay.clone(),
+            Arc::clone(&self.visibility),
+            Arc::clone(&self.sink),
+        );
+
+        let (shell_tx, shell_rx) = crossbeam_channel::unbounded();
+        spawn_capture_loop(coordinator, shell_rx, overlay_rx)?;
+
+        *self.lock_runtime() = Some(CaptureRuntime {
+            shell_tx,
+            _overlay: overlay,
+        });
+        tracing::info!("capture runtime started");
+        Ok(())
+    }
+
     /// 启动全局捕获热键（解析配置 → 注册 → 起事件消费线程）。
     ///
     /// 必须在托盘创建之后调用：注册失败要把「快捷键冲突」立刻显示在托盘提示上。
     /// 失败不阻止应用启动，只上报 [`AppEvent::HotkeyConflict`]；重复调用是空操作。
+    ///
+    /// 已启动 [`AppCore::start_runtime`] 时，热键事件直接进捕获循环；未启动时
+    /// （测试路径）退回临时通道并打印事件，避免事件丢失、也不触发真实抓帧。
     pub fn start_hotkey(&self) -> Result<(), AppError> {
         if self.lock_hotkey().is_some() {
             tracing::debug!("capture hotkey already started");
@@ -128,7 +208,14 @@ impl AppCore {
             }
         };
 
-        let (tx, rx) = crossbeam_channel::unbounded();
+        let (fallback_tx, fallback_rx) = crossbeam_channel::unbounded();
+        let runtime_tx = self
+            .lock_runtime()
+            .as_ref()
+            .map(|runtime| runtime.shell_tx.clone());
+        let uses_runtime = runtime_tx.is_some();
+        let tx = runtime_tx.unwrap_or(fallback_tx);
+
         let handle = match spawn_hotkey_thread(spec, tx) {
             Ok(handle) => handle,
             Err(err) => {
@@ -138,13 +225,15 @@ impl AppCore {
             }
         };
 
-        self.spawn_shell_event_consumer(spec, rx);
+        if !uses_runtime {
+            self.spawn_shell_event_consumer(spec, fallback_rx);
+        }
         *self.lock_hotkey() = Some(handle);
         tracing::info!(hotkey = %spec, "capture hotkey started");
         Ok(())
     }
 
-    /// 阶段 01 的临时消费者：Task 14 换成真正的捕获编排，在此之前只打印、不丢事件。
+    /// 未启动运行时（测试路径）的临时消费者：只打印，不触发捕获。
     fn spawn_shell_event_consumer(&self, spec: HotkeySpec, rx: Receiver<ShellEvent>) {
         let spawned = thread::Builder::new()
             .name("visrecall-shell-events".into())
@@ -155,7 +244,7 @@ impl AppCore {
                             tracing::info!(
                                 hotkey = %spec,
                                 ?trigger,
-                                "capture requested; orchestration arrives in task 14"
+                                "capture requested; runtime not started"
                             );
                         }
                     }
@@ -219,6 +308,53 @@ impl AppCore {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
     }
+
+    fn lock_runtime(&self) -> MutexGuard<'_, Option<CaptureRuntime>> {
+        self.runtime
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+}
+
+/// 捕获循环线程：串行处理快捷键触发与覆盖层结果。
+///
+/// 抓帧与落盘都是同步 IO/CPU 工作，放在专用线程（design §3 的 capture worker），
+/// 不占主线程；两个通道都断开（`AppCore` 释放）时退出。
+fn spawn_capture_loop(
+    coordinator: CaptureCoordinator,
+    shell: Receiver<ShellEvent>,
+    overlay: Receiver<OverlayEvent>,
+) -> Result<(), AppError> {
+    let spawned = thread::Builder::new()
+        .name("visrecall-capture-loop".into())
+        .spawn(move || {
+            loop {
+                select! {
+                    recv(shell) -> message => match message {
+                        Ok(ShellEvent::CaptureRequest(trigger)) => {
+                            tracing::info!(?trigger, "capture requested");
+                            if let Err(err) = coordinator.start(trigger) {
+                                tracing::warn!(error = %err, "capture start failed");
+                            }
+                        }
+                        Err(_) => break,
+                    },
+                    recv(overlay) -> message => match message {
+                        Ok(event) => {
+                            if let Err(err) = coordinator.on_overlay_event(event) {
+                                tracing::warn!(error = %err, "overlay event handling failed");
+                            }
+                        }
+                        Err(_) => break,
+                    },
+                }
+            }
+            tracing::debug!("capture loop exited");
+        });
+
+    spawned
+        .map(|_| ())
+        .map_err(|err| AppError::Internal(format!("spawn capture loop: {err}")))
 }
 
 #[cfg(test)]

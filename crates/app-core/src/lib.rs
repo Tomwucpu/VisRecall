@@ -1,11 +1,16 @@
-//! VisRecall 应用编排层：配置、库句柄与事件总线。
+//! VisRecall 应用编排层：配置、库句柄、捕获编排与事件总线。
 //!
 //! 本 crate 不依赖 Tauri，便于集成测试；`src-tauri` 负责命令、托盘与窗口生命周期。
 
 pub mod app;
+pub mod capture_flow;
 pub mod events;
 
 pub use app::AppCore;
+pub use capture_flow::{
+    persist_capture, CaptureCoordinator, NoopWindowVisibility, OverlayPresenter, WindowVisibility,
+    MIN_FREE_BYTES,
+};
 pub use events::{
     AppEvent, AppRecoveredEvent, CaptureFailedEvent, EventSink, HotkeyConflictEvent, ItemEvent,
     ItemUpdatedEvent, NullEventSink, RecordingSink,

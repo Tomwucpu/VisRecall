@@ -10,7 +10,7 @@ pub mod window;
 pub use display::{
     display_for_point, enumerate_displays, normalize_position, set_per_monitor_v2, virtual_bounds,
 };
-pub use grab_gdi::GdiFrameGrabber;
+pub use grab_gdi::{dwm_flush, is_blank_frame, GdiFrameGrabber};
 pub use trait_defs::{FrameGrabber, RawFrame};
 pub use window::{
     enumerate_windows, filter_candidates, foreground_info, hit_chain, hit_chain_excluding,

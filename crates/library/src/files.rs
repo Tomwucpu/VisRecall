@@ -1,16 +1,45 @@
 //! 可复用的文件写入工具：临时文件 + `sync_all` + `rename` 原子替换。
 //!
 //! 配置与 `library.json` 都走这里；图片/文本落盘（阶段 01 Task 14）也会复用。
-//! 本模块不包含磁盘可用空间检查（Task 14 负责）。
+//! 另外提供磁盘可用空间查询（[`free_space_bytes`]），供捕获前的最低空间门禁使用。
 
 use std::fs;
 use std::io::Write;
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use visrecall_domain::{now_millis, AppError};
+use windows::core::PCWSTR;
+use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
 fn io_error(operation: &str, path: &Path, err: impl std::fmt::Display) -> AppError {
     AppError::Io(format!("{operation} {}: {err}", path.display()))
+}
+
+/// 查询 `path` 所在卷对当前用户可用的空闲字节数（`GetDiskFreeSpaceExW`）。
+///
+/// `path` 不必已存在：系统按所在卷解析。路径为空、卷不可用或查询失败都返回
+/// [`AppError::Io`]，由调用方决定是否阻止捕获（design §5/§12：<2GB 拒绝新捕获）。
+pub fn free_space_bytes(path: &Path) -> Result<u64, AppError> {
+    if path.as_os_str().is_empty() {
+        return Err(AppError::Io("free space: empty path".into()));
+    }
+
+    let mut wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // 根目录形式（`C:`）以反斜杠补齐，避免被解释成「当前目录所在卷」。
+    if wide.len() == 3 && wide[1] == b':' as u16 {
+        wide.insert(2, b'\\' as u16);
+    }
+
+    let mut free_bytes: u64 = 0;
+    // SAFETY: 字符串以 NUL 结尾且在调用期间存活；其余输出指针是可写的栈上变量。
+    unsafe { GetDiskFreeSpaceExW(PCWSTR(wide.as_ptr()), Some(&mut free_bytes), None, None) }
+        .map_err(|err| io_error("free space", path, err))?;
+    Ok(free_bytes)
 }
 
 /// 与 `path` 同目录的临时文件路径（`<文件名>.tmp`）。
@@ -117,5 +146,20 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .starts_with("library.json.bad-"));
+    }
+
+    #[test]
+    fn free_space_bytes_reports_a_positive_amount() {
+        let dir = tempfile::tempdir().unwrap();
+        let free = free_space_bytes(dir.path()).unwrap();
+        assert!(free > 0, "free space should be positive, got {free}");
+    }
+
+    #[test]
+    fn free_space_bytes_rejects_empty_path() {
+        assert!(matches!(
+            free_space_bytes(Path::new("")),
+            Err(AppError::Io(_))
+        ));
     }
 }
