@@ -3,9 +3,10 @@
 本文件记录手工验收与性能门禁的**实测**结果。逐任务的自动化测试见各 crate 的
 `cargo test`；本文件只放需要真实机器测量的项目。
 
-> Task 10 建立本文件并写入「D3D11 门禁」；其余验收矩阵（P1-R01–P1-R12 全量、
-> 30 分钟连续使用、双屏/混合 DPI 手工矩阵）由 Task 19 补齐。未填写的项一律视为
-> **未验证**，不得当作通过。
+> Task 10 建立本文件并写入「D3D11 门禁」；Task 19（2026-11-05）补齐阶段 01 验收矩阵、
+> 性能记录、已知限制与结论（见文末「阶段 01 退出验收」一节）。仍有一批项目**没有**
+> 在本机条件下测到（物理 4K、PresentMon、双屏/混合 DPI、物理拖放、DRM、100% 缩放等），
+> 文末逐项标 `NOT RUN` 并写明原因。未填写的项一律视为 **未验证**，不得当作通过。
 
 ## 测量环境
 
@@ -187,3 +188,147 @@ SPIKE_RESULT width=3840 height=2160 windows=2 summary_window=0 summary_is_aggreg
 4. **完整首帧链路**：本表首帧不含抓帧/纹理上传/选区，P1-R12 在 Task 11/13/14 后复测。
 5. **拖动控制点时的帧时间**：design §7.3 要求「拖动控制点」场景，Task 10 只有每帧
    移动的矩形，未覆盖交互负载。
+
+---
+
+# 阶段 01 退出验收（Task 19，2026-11-05）
+
+本节是阶段 01 的退出验收记录，**不改写**上文 Task 10 的 D3D 门禁数据。所有数字都是
+在本机实测的；没有测到的项一律标 `NOT RUN` 并写原因，**不把「代码路径 + 单元测试」
+当作实测**。引用其它任务已实测证据时明确标注来源。
+
+## A. 自动化门禁（全部实跑）
+
+分支 `master`，基线提交 `10a477c`（Task 19 补丁：启动清理 tmp/孤儿扫描），Windows 11 22621。
+
+| 命令 | 退出码 | 结果 |
+|---|---|---|
+| `cargo fmt --all -- --check` | 0 | 无输出 |
+| `cargo clippy --workspace --all-targets -- -D warnings` | 0 | `Finished dev profile`，无告警 |
+| `cargo test --workspace` | 0 | **322 passed / 0 failed**（20 个测试二进制 + 5 个 doc-test 套件，0 ignored） |
+| `pnpm lint` | 0 | 无输出 |
+| `pnpm typecheck` | 0 | `tsc --noEmit` 无输出 |
+| `pnpm test` | 0 | **4 个文件 / 13 个用例全通过**（ItemCard 8、ItemGrid 2、EmptyState 1、events 2） |
+| `pnpm build` | 0 | `86 modules transformed`；`dist/assets/index-BDc_oIcF.js` **266.29 kB**（gzip 82.94 kB）、`index-4cN57Dsb.css` 3.97 kB（gzip 1.32 kB）；1.34 s |
+
+`cargo build --release -p visrecall` 产物 18,302,976 字节（17.5 MiB）。
+
+## B. 测量环境（Task 19 手工矩阵）
+
+| 项目 | 值 |
+|---|---|
+| 日期 | 2026-11-05 |
+| 操作系统 | Windows 11 家庭中文版 10.0.22621，16 逻辑核 |
+| 显示器 | **1 台**，2560×1440 @165Hz，缩放 **150%**（DPI 144），`\\.\DISPLAY1` |
+| GPU | AMD Radeon(TM) 780M（覆盖层 `hardware` 驱动，无 WARP 回退） |
+| 配置隔离 | `USERPROFILE`/`APPDATA`/`LOCALAPPDATA` 全部指向 `%TEMP%\vr19\*`，不触碰真实库 |
+| 二进制 | `target/release/visrecall.exe`（`--features tauri/custom-protocol`，内嵌 `dist/`）；对照 `target/debug/visrecall.exe` |
+| 输入注入 | PowerShell `mouse_event(MOVE|ABSOLUTE)` / `keybd_event`，进程 PMv2 感知（物理像素） |
+| 日志 | `VISRECALL_LOG=debug`，退出时 `tracing` 写到重定向文件 |
+| 干扰说明 | 验收期间本机同时存在**其它真实输入/自动化**（外部鼠标两次拖动过悬浮球、并两次「唤醒主窗口」使 60s 销毁计时器作废）。受影响项已重测，下文只记录**受控一次**的结果 |
+
+## C. 阶段 01 验收矩阵
+
+图例：`PASS` 实测通过；`PASS*` 实测通过但口径有限（见备注）；`NOT RUN` 本机条件不足未测；
+`REF` 本轮未重测，引用先前任务的实测证据（不重复算通过）。
+
+| # | 场景 | 方法 | 期望 | 结果 | 证据 / 备注 |
+|---|---|---|---|---|---|
+| 1 | 冷启动 → 托盘 | 临时 profile 冷启动 release | 进程驻留、仅托盘、无主窗口、库自动建好 | **PASS** | 日志 `tray icon created library_ok=true`、`cold start to tray: 136/141/194 ms`（release）、`210/231 ms`（debug）；窗口枚举只有 `VisRecallBall`/`VisRecallOverlay`/`tray_icon_app`，无 `Tauri Window` |
+| 2 | 托盘空闲工作集 | 主窗口销毁 60s 后读 `WorkingSet64` | ≤150MB（目标 40–70MB） | **PASS** | release：WS **53.7MB**、私有 **36.9MB**、47 线程、~1000 句柄、`msedgewebview2` **0** 个（启动态 WS 43.0MB / debug 51.6MB） |
+| 3 | 快捷键 → 拖拽 → Enter（150%，Ctrl 关吸附） | 热键 `Ctrl+Shift+S`，400,300 → 900,700，Enter | 图与选区一致、PNG/DB/列表正确 | **PASS** | `selection readback complete width=500 height=400 x=400 y=300`；PNG IHDR 500×400、bit depth 8 / color type 6（RGBA）；PNG 魔数正确；DB `status=ready` + `thumbs/<id>.png`；`tmp/` 无残留 |
+| 4 | Esc 取消 | 拖拽后 Esc | 无记录 | **PASS** | `overlay session cancelled by user`；`items` 行数不变（2 → 2） |
+| 5 | 右键取消 | 拖拽后右键 | 无记录 | **PASS** | 同上，`items` 行数不变 |
+| 6 | 选区过小（5×5） | 400,300 → 405,305，Enter | 提示「选区过小」、取消、无记录 | **PASS** | `selection too small notice expired; cancelling session` → `overlay cancelled; own windows restored`；行数不变 |
+| 7 | 方向键微调 | 拖 500×400 后按 `→` ×3，Enter | 位置 +1px/次、尺寸不变 | **PASS** | `selection readback complete width=500 height=400 x=403 y=300`（原 x=400） |
+| 8 | Ctrl 关闭吸附 | 按住 Ctrl 拖拽 | 选区精确等于手绘矩形 | **PASS\*** | 本次 Ctrl 按住时 1px 不差；**未**构造「贴近窗口边缘、开/关 Ctrl 对比」的对照，吸附本身由 Task 12 单测与 Task 13 实测覆盖 |
+| 9 | 悬浮球位置保存/重启恢复 | 拖动球 → 读 `config.json` → 重启 | 位置持久化并恢复 | **PASS** | 拖动后 `positions.\\.\DISPLAY1 = [0.8203125, 0.625]`；重启日志 `floating ball window created size=48 x=2076 y=876`（= 2100/2560、900/1440 归一化反算） |
+| 10 | 悬浮球单击捕获 | 单击球心 (2100,900) | 触发捕获、球抓帧期间隐藏 | **PASS** | `capture requested trigger=BallClick` → `capture starting trigger=BallClick` → `frozen overlay shown show_total_ms=59.3` |
+| 11 | 关闭悬浮球后热键可用 | `ball.enabled=false` 重启 → 热键捕获 | 球不可见、捕获正常、球不被误开 | **PASS** | `VisRecallBall:visible=False`；`capture starting trigger=Hotkey` → overlay 正常 → Esc 取消；全程无 `floating ball visibility changed visible=true` |
+| 12 | 第二实例 | 再次启动 exe（4 次） | 第二进程退出并唤醒主窗口 | **PASS** | `SECOND_EXIT=0`、`visrecall` 进程数保持 1；首实例 `second instance detected; showing main window` + `main window created` |
+| 13 | 强杀恢复 + 启动清理 | 库内放 `tmp/stale.tmp` + `tmp/another.tmp`，`Stop-Process -Force` 后重启 | tmp 被清空、已入库素材可读、库无损坏 | **PASS** | `startup cleanup finished tmp_removed=2 orphans=0`；`tmp/` 空；`PRAGMA integrity_check` = `ok`；原 2 条素材仍 `ready` 且缩略图在 |
+| 14 | 空库 EmptyState | 首次启动空库 | 显示引导文案 | **REF** | Task 18 实测（「还没有素材 / 按 Ctrl+Shift+S 或点击悬浮球开始捕获」，PrintWindow 截图确认）+ `EmptyState.test.tsx`；本轮空库实例被前台 Chrome 抢占，未取到新截图 |
+| 15 | 列表自动刷新 | 主窗口打开时捕获一条 | 新卡片置顶，无需手动刷新 | **PASS** | 截图见本轮「后捕获」快照：新卡片「目记 VisRecall / visrecall.exe / 刚刚」出现在第一格；工具栏计数由 102 回到 50（`resetQueries` 语义，Task 18 Fix 1） |
+| 16 | 状态 parsing → ready | 捕获后看卡片徽标 | 先「解析中」后「正常」 | **PASS\*** | 本轮只观察到终态「正常」：小图缩略图 8ms 完成（`persisted` 37.413 → `thumbnail generated` 37.421），中间态未在界面上截到；事件顺序由 Task 17/18 单测固定 |
+| 17 | 100 条列表 | 临时库插入 100 条 metadata（复制真实 PNG/缩略图）→ 共 104 条 | 网格渲染、排序 DESC、分页、滚动 | **PASS\*** | 「已加载 102 条」（截图时刻）→ 滚轮 30 格到第 34–43 条；卡片顺序按 `captured_at` 降序（「38 分钟前」→「47 分钟前」）；缩略图经 `visrecall://thumb` 全部加载；**滚动帧率未量化** |
+| 18 | 提交到列表可见 | 捕获后在主窗口截图 | ≤3s | **PASS** | release：`persisted` 07:30:37.413 → 截图约 07:30:38 时卡片已可见（≤1s）；Task 17 记录缩略图链路 480ms（debug） |
+| 19 | 关闭主窗口 60s → WebView2 退出 | `WM_CLOSE` 后 5s 轮询 75s | 60s 销毁窗口、WebView2 进程退出、进程常驻 | **PASS** | `hidden main window destroyed after 60s`（关闭后 60.0s）；`Tauri Window` 消失；`msedgewebview2`（`com.visrecall.desktop`）**6 → 0**；`visrecall` 仍驻留、球与托盘在（前两次尝试被外部「唤醒主窗口」作废计时器，见 B 表干扰说明） |
+| 20 | 窗口点击采用窗口 | 在窗口上按下-抬起无位移 | 选中该窗口 bounds | **REF** | Task 13 实测（微信小窗 → `EVENT committed 15x90+876+736` 等于窗口 bounds）；本轮首次（受干扰）捕获也表现为「采用 Chrome 窗口 bounds」 |
+| 21 | 滚轮层级下钻 | 浏览器内容区滚轮 | 高亮链下钻/上移 | **REF** | Task 13：滚轮事件正常处理、`hover window changed` 可见；**未**单独断言「切到第 N 个候选」。本轮未复测 |
+| 22 | 拖放（真实 OLE 管线 12 场景） | 真实剪贴板 + `DoDragDrop` + 真实 `RegisterDragDrop` | 文本/PNG/txt/md/混合/CF_DIB/URL/超限/PDF/文件夹/取消 | **REF** | Task 16：12 个场景全部符合预期（超限 10001 字与 21 文件在 `DragEnter` 即拒绝 `effect=0`；21MB 图 Drop 后 `INVALID_INPUT`；PDF/文件夹 `DROP_REJECTED`；Esc 取消不落盘） |
+| 23 | 物理四来源拖拽 | Chrome 文字 / Word 文本 / 资源管理器图片 / 微信图片 | 正确入库 | **NOT RUN** | 需真实物理拖拽；本机拖拽源应用与 OLE 会话无法在脚本中稳定复现（Task 16 已用真实 OLE 管线替代，未用物理鼠标） |
+| 24 | 单屏 100% / 125% / 200% | 改缩放后重跑 | 无偏移 | **NOT RUN** | 修改显示缩放需注销/重启会话，会打断本轮验收；本轮只覆盖 150% |
+| 25 | 双屏同 DPI / 混合 DPI / 负坐标 | 跨屏框选 | 图覆盖跨屏、边界不偏移 | **NOT RUN** | 本机只有 1 台显示器；相关逻辑（`compose_bgra` 拼合、`owned_center` 临空边、屏缝去重、负原点）只有 Task 13 单测 |
+| 26 | 物理 4K 面板 | 4K 屏上重跑 | 帧时间/截图正确 | **NOT RUN** | 本机无 4K 屏；Task 10 的 4K 是**合成 4K 窗口**（DWM 只裁剪不缩放），不能替代 |
+| 27 | DRM / 独占全屏 | 播放 DRM 视频后捕获 | 丢弃并提示，不产生记录 | **NOT RUN** | 未构造真实 DRM 窗口；`is_blank_frame` → `DRM_PROTECTED` 只有 Task 14 单测（假全黑帧） |
+| 28 | 提权窗口（UIPI） | 以管理员身份运行的目标窗口 | 明确失败或可捕获 | **NOT RUN** | 需 UAC 提权会话；`RegisterHotKey`/抓帧/拖放在高完整性级别下的行为未验证 |
+| 29 | ARM64 | ARM64 设备构建运行 | 可用 | **NOT RUN** | 阶段 04 范围；本机 x64 |
+| 30 | 30 分钟连续使用 + ≥20 次真实捕获 | 长时间使用 | 无崩溃、≥20 次捕获 | **NOT RUN** | 本轮共 6 次成功捕获 + 2 次取消 + 1 次过小提交；进程累计运行约 21 分钟（含多次重启）**未崩溃**，但时长与次数都不足退出条件（requirements §5.2） |
+
+## D. 性能记录
+
+| 指标 | 目标 | 实测 | 构建/口径 | 来源 |
+|---|---|---|---|---|
+| 捕获入口响应（快捷键 → 覆盖层首帧） | ≤150 ms | **104 ms**（主窗口可见，含隐藏主窗口）；**51 / 117 / 118 / 135 ms**（托盘态、球单击、球关闭态） | release（首行）/debug，日志时间戳差 | 本轮（`hotkey pressed`/`capture starting` → `frozen overlay shown`） |
+| 覆盖层内部 show → first Present | — | **6.9–49.1 ms**（`show_to_first_present_ms`） | debug/release | 本轮 `frozen overlay shown` |
+| 覆盖层绘制 CPU 提交（一次重绘所有窗口 `draw_scene`） | — | avg **0.53–0.87 ms**，max **0.78–12.9 ms** | debug/release | 本轮 `OVERLAY_PERF`（Task 13 同口径 avg 0.46–0.56 / max 1.94–11.73 ms） |
+| 鼠标输入 → Present | 高亮跟随 ≤50 ms | avg **1.79–4.42 ms**，max **3.4–17.8 ms**（1 个样本 17.84 ms，超出 16.7 ms 单帧预算但远低于 50 ms） | debug/release | 本轮 `OVERLAY_PERF`；Task 13 曾出现 15.64 ms 峰值 |
+| 选区交互帧率 | 60 fps | 未用 PresentMon/帧率工具测量；`draw` + `Present` 耗时在 165 Hz 单帧预算内（见上两行） | — | 本轮 + Task 13 |
+| 提交到列表可见（≤100 条库） | ≤3 s | **≤1 s**（缩略图 `persisted`+8 ms 完成，截图已见卡片）；Task 17 记录 **480 ms** | release（本轮）/debug（Task 17） | 本轮 + Task 17 |
+| 托盘常驻内存（主窗口销毁后，无 WebView2） | ≤150 MB（目标 40–70 MB） | WS **53.7 MB** / 私有 **36.9 MB** | release | 本轮 |
+| 托盘空闲 CPU | <1% | **60 s 采样内 CPU 时间增量 0.000 s**（16 逻辑核 → 0%）；**不是**要求的 10 分钟 PerfMon 门禁 | release | 本轮（短采样） |
+| 4K 双屏抓帧工作集增量 | ≤100 MB | **NOT RUN**（无物理 4K / 无双屏） | — | — |
+| 冷启动到托盘 | ≤2 s | **136–194 ms**（release，热文件系统）；210/231 ms（debug）；1093 ms 为 debug + 同时跑 release 编译时的抖动 | release/debug | 本轮（Task 5 曾测 44–56 ms，仅到托盘创建；本口径含覆盖层线程初始化） |
+| 4K 合成 Present 帧时间 | design §7.3 | 见上文 Task 10 表：avg ≈6.06 ms、P95 ≤6.28 ms、max ≤13.18 ms、drops=0、首帧 116–132 ms | release，合成 4K，165 Hz | Task 10（**不是**物理 4K，**无** PresentMon） |
+
+结论口径（沿用 Task 10 的措辞）：**Task 10 合成 4K 子项通过；design §7.3 完整门禁
+（物理 4K 面板 + 抓帧 + 拖动控制点 + PresentMon 交叉验证）仍为 CONDITIONAL**。
+
+## E. 已知限制（阶段 01）
+
+1. **DRM / 独占全屏**：全黑帧判定与 `DRM_PROTECTED` 只有单测（假全黑帧）；未用真实 DRM
+   视频、未在独占全屏游戏/播放器上实测。
+2. **提权窗口（UIPI）**：以管理员运行的目标窗口在高完整性级别下，捕获、`RegisterHotKey`
+   与 OLE 拖放的行为未验证；拖放目标对提权源进程同样受 UIPI 限制。
+3. **UIPI 拖放**：跨完整性级别拖放未验证（与上一条同源）。
+4. **跨屏间隙填 0**：`compose_bgra` 对未覆盖像素填 0（透明黑），只有单测；真实多屏
+   间隙/负坐标下的合成结果未目视确认。
+5. **缩略图是 PNG，不是 WebP**：`thumbs/<id>.png`，480 px 长边；库体积与解码开销未评估。
+6. **实时模式在阶段 01 降级**：抓帧失败重试一次后直接 `CAPTURE_FAILED`，透明覆盖层 +
+   提交时现场抓取的降级路径**未实现**（requirements P1-R03 已确认降级，阶段 02 再评估）。
+7. **物理 4K / PresentMon 未验证**：4K 数据来自合成窗口；所有帧时间来自进程内 QPC。
+8. **多屏 / 混合 DPI / 负坐标未验证**：本机单屏；控制点临空边、标签归属、跨屏拼合、
+   `Present(1,0)/(0,0)` 分支只有单测。
+9. **Word / 微信 / Chrome / 资源管理器的物理拖放未验证**：现有证据是真实 OLE 管线
+   （真实剪贴板格式 + 真实 `DoDragDrop` + 真实 `RegisterDragDrop`），不是物理鼠标。
+10. **ARM64 未验证**（阶段 04）。
+11. **托盘内存 / 空闲 CPU 未按门禁口径完整测量**：内存是一次快照；CPU 是 60 s 短采样，
+    不是 10 分钟 PerfMon。
+12. **100 条列表滚动未完整实测**：只做了「渲染 + 滚轮滚动 + 分页」的视觉检查，没有帧率
+    或掉帧量化；超过 50 条的「加载更多」交互由实现与截图确认，未做反复翻页压测。
+13. **真实库中可能残留 Task 18 手工验证写入的 1 条素材**（`Documents\VisRecall`，来源
+    `Code.exe`）；本轮验收全部在临时 profile 中进行，未清理该条，用户可自行删除。
+14. **打包产物未验收**：阶段 01 没有执行 `pnpm tauri build`。实测发现用
+    `cargo build --release -p visrecall`（未启用 `tauri/custom-protocol`）生成的二进制
+    仍指向 `devUrl`（主窗口显示「localhost 拒绝连接」），只有
+    `--features tauri/custom-protocol` 才会内嵌 `dist/`。发布路径需要在阶段 02 的打包任务
+    里确认 `src-tauri/Cargo.toml` 的 feature 配置与产物验收（本任务不改代码）。
+15. **60 s 销毁与外部唤醒**：窗口被外部唤醒（托盘点击/第二实例）时，销毁计时器按设计
+    作废（`destroy timer superseded; main window kept`）。验收期间出现过两次，属正常行为，
+    但意味着「60 s 销毁」只能在无并发唤醒时测得。
+16. **状态 `parsing` 中间态**：缩略图 8 ms 内完成，界面上一闪而过，未截到「解析中」；
+    由 Task 17/18 单测固定事件顺序与徽标文案。
+
+## F. 结论
+
+**阶段 01 有条件完成（2026-11-05）。**
+
+- 自动化门禁全部通过：`cargo fmt` / `clippy -D warnings` / `cargo test --workspace`
+  （322 passed）/ `pnpm lint` / `pnpm typecheck` / `pnpm test`（13 passed）/ `pnpm build`。
+- 单屏 150% 主链路实测通过：冷启动 → 托盘 → 快捷键/悬浮球 → 冻结帧 → 选区（拖拽、
+  方向键、最小选区、Esc/右键）→ 提交 → PNG + 入库 → 缩略图 → 列表置顶可见；托盘常驻
+  内存 53.7 MB、60 s 后 WebView2 进程归零、强杀后临时文件清理与库完整性正常。
+- **未验证、必须在阶段 02 启动前补齐**：物理 4K 面板与 PresentMon 交叉验证、双屏与
+  混合 DPI（含负坐标）、物理 OLE 四来源拖放、DRM/独占全屏、提权窗口与 UIPI 拖放、
+  100% 缩放下的一致性、30 分钟连续使用且 ≥20 次真实捕获、打包产物（`pnpm tauri build`）。
+  详见上文 E 与 `docs/specs/v0.1/README.md` 的「阶段 02 启动前必须补齐」。
