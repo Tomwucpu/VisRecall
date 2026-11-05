@@ -23,7 +23,8 @@
 //! 其他取舍：
 //!
 //! - 抬起鼠标后不直接提交，保留选区等待 `Enter`；只有“按下/抬起之间没有任何位移”
-//!   的单击才把 `rect` 换成 `hover_rect`。
+//!   的单击才把 `rect` 换成 `hover_rect`（私有 `dragged` 标记记录是否真的移动过，
+//!   因此“拖出去又拖回起点”的零面积拖拽不会被误判为单击）。
 //! - 吸附按拖动方式分成三种变体：`Move` 只做整框平移（宽高不变），边/角手柄只吸附
 //!   被拖动的那条边（固定边不动），框选只吸附随指针移动的边（`anchor` 那一侧不动）。
 //!   `Ctrl` 关闭吸附；方向键微调后不吸附。
@@ -131,6 +132,9 @@ pub struct SelectionState {
     candidates: Vec<PhysicalRect>,
     /// 滚轮当前指向的候选索引。
     hover_index: usize,
+    /// 本次按下之后是否发生过位移。`false` 表示“单击”（按下→抬起之间没有移动），
+    /// 只有这种情况 `on_mouse_up` 才把 `hover_rect` 采用为 `rect`。
+    dragged: bool,
 }
 
 impl Default for SelectionState {
@@ -151,6 +155,7 @@ impl SelectionState {
             active: None,
             candidates: Vec::new(),
             hover_index: 0,
+            dragged: false,
         }
     }
 
@@ -161,9 +166,11 @@ impl SelectionState {
     ///
     /// 三种情况的 `anchor`/`start_rect` 都重新记录，后续 `on_mouse_move` 以此计算增量。
     /// `hover_rect` 不动：单击（按下抬起间无位移）时 `on_mouse_up` 才会采用它。
+    /// 每次按下都会清空 `dragged` 标记。
     pub fn on_mouse_down(&mut self, p: PhysicalPoint, handle: Option<Handle>) {
         self.anchor = p;
         self.start_rect = self.rect;
+        self.dragged = false;
         match handle {
             Some(h) => {
                 self.phase = SelectionPhase::Adjusting;
@@ -195,6 +202,9 @@ impl SelectionState {
 
         match self.phase {
             SelectionPhase::Dragging => {
+                if p != self.anchor {
+                    self.dragged = true;
+                }
                 let mut rect = PhysicalRect::from_points(self.anchor, p);
                 if !m.ctrl {
                     rect = snap_drag_rect(self.anchor, rect, candidates, SNAP_THRESHOLD);
@@ -202,6 +212,9 @@ impl SelectionState {
                 self.rect = rect;
             }
             SelectionPhase::Adjusting => {
+                if p != self.anchor {
+                    self.dragged = true;
+                }
                 let delta = PhysicalPoint {
                     x: p.x.saturating_sub(self.anchor.x),
                     y: p.y.saturating_sub(self.anchor.y),
@@ -248,11 +261,12 @@ impl SelectionState {
     /// 结束拖拽/调整，回到 `HoverWindow` 等待 `Enter`。
     ///
     /// `Dragging` 期间没有任何位移（单击）且存在悬停高亮时，把 `rect` 换成 `hover_rect`，
-    /// 即“单击采用窗口边界”；拖动过则原样保留用户选区。
+    /// 即“单击采用窗口边界”；拖动过（哪怕最终回到起点、面积为 0）则原样保留用户选区，
+    /// 避免零宽/零高拖拽被误判为单击。
     pub fn on_mouse_up(&mut self) {
         match self.phase {
             SelectionPhase::Dragging => {
-                if self.rect.is_empty() && !self.hover_rect.is_empty() {
+                if !self.dragged && self.rect.is_empty() && !self.hover_rect.is_empty() {
                     self.rect = self.hover_rect;
                 }
                 self.phase = SelectionPhase::HoverWindow;
@@ -376,6 +390,7 @@ impl SelectionState {
         self.candidates.clear();
         self.hover_index = 0;
         self.active = None;
+        self.dragged = false;
     }
 }
 

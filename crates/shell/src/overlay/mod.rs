@@ -10,20 +10,29 @@
 //! 「上传纹理 → 显示窗口 → 首帧 `Present`」，避免每次捕获重复 D3D 初始化（Task 10
 //! 实测首帧 139ms，已接近 150ms 预算）。
 //!
-//! 阶段 01 的 Task 11 只实现冻结帧显示与线程/句柄，不包含选区状态机、输入处理与
-//! 提交回读（Task 12/13）；窗口过程只处理绘制/擦除消息。
+//! 交互（Task 13）：窗口过程只把鼠标/键盘消息翻译成 [`input::InputEvent`] 放进线程
+//! 本地队列（见 [`input`] 的模块文档），覆盖层线程 pump 完消息后统一处理——
+//! `WM_LBUTTONDOWN` 用 [`hit_test_handle`] 决定框选/移动/缩放，`WM_MOUSEMOVE` 用
+//! `hit_chain_excluding(.., 当前进程)` 取外部窗口候选（覆盖层自身永远被排除），
+//! `Enter` 提交、`Esc`/右键取消、方向键 1px（`Shift` 10px）微调、滚轮切换高亮窗口。
+//! 提交时对每台显示器求选区交集，用 staging 纹理从冻结纹理回读并在 CPU 侧重拼成
+//! 全局选区尺寸的 BGRA 图（[`input::compose_bgra`]）。
 //!
 //! 重绘：冻结帧由 D3D/D2D 直接呈现到交换链，因此 `WM_PAINT` 不能走 GDI 绘制。窗口
 //! 过程在 `WM_PAINT`/`WM_DISPLAYCHANGE`/`WM_DPICHANGED` 时置位线程级原子
-//! [`REDRAW_REQUESTED`]，覆盖层线程 pump 完消息后对全部活动窗口重新
-//! `draw_frozen + present`；空闲时不使用定时器。
+//! [`REDRAW_REQUESTED`]，覆盖层线程 pump 完消息后对全部活动窗口重新绘制完整场景
+//! （冻结帧 + 压暗 + 选区 + 高亮 + 角标）并 `Present`。空闲时没有定时器；「已冻结」
+//! 角标在显示后用 50ms `SetTimer` 驱动淡出，淡出结束后 `KillTimer`（取消/提交时同样
+//! 立即停止），不常驻 60fps 空闲重绘。
 
 pub mod d3d;
 pub mod frame;
+pub mod input;
 pub mod render;
 
 pub use d3d::{D3dContext, SwapChain};
 pub use frame::{upload_frame, validate_frame_shape, FrozenTexture};
+pub use input::compose_bgra;
 pub use render::Renderer;
 
 use std::ffi::c_void;
@@ -34,9 +43,11 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, SendTimeoutError, Sender};
 use tracing::{debug, info, warn};
+use visrecall_capture::display_for_point;
 use visrecall_capture::enumerate_displays;
-use visrecall_domain::capture::{CapturedImage, DisplayInfo, ForegroundInfo, RawFrame};
-use visrecall_domain::geometry::PhysicalRect;
+use visrecall_capture::hit_chain_excluding;
+use visrecall_domain::capture::{CapturedImage, DisplayInfo, ForegroundInfo, RawFrame, WindowInfo};
+use visrecall_domain::geometry::{PhysicalPoint, PhysicalRect};
 use visrecall_domain::AppError;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{
@@ -45,30 +56,55 @@ use windows::Win32::Foundation::{
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT};
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
-use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+use windows::Win32::System::Threading::{
+    AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
-    GetForegroundWindow, GetWindowThreadProcessId, IsWindow, LoadCursorW, PeekMessageW,
-    RegisterClassW, SetForegroundWindow, SetWindowPos, ShowWindow, TranslateMessage,
+    GetForegroundWindow, GetWindowThreadProcessId, IsWindow, KillTimer, LoadCursorW, PeekMessageW,
+    RegisterClassW, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, TranslateMessage,
     UnregisterClassW, CS_HREDRAW, CS_VREDRAW, HICON, IDC_ARROW, MSG, PM_REMOVE, SWP_NOACTIVATE,
     SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WM_CLOSE, WM_DISPLAYCHANGE, WM_DPICHANGED,
-    WM_ERASEBKGND, WM_PAINT, WM_QUIT, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
+    WM_QUIT, WM_RBUTTONDOWN, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
+
+use crate::selection::{
+    clamp_to_virtual_screen, hit_test_handle, Modifiers, SelectionState, MIN_SELECTION_SIZE,
+};
+use input::InputEvent;
 
 /// 覆盖层窗口类名（design §7.1）；示例/测试通过 `FindWindowW` 定位覆盖窗口。
 pub const OVERLAY_CLASS_NAME: &str = "VisRecallOverlay";
 const OVERLAY_WINDOW_TITLE: &str = "VisRecall Overlay";
 /// 激活态等待命令的超时：既要及时 pump 窗口消息，又不在空闲时忙等。
 const ACTIVE_POLL_INTERVAL: Duration = Duration::from_millis(8);
-/// 发送事件的最长阻塞时间：pump 循环不能被一个没有读者的事件通道卡死。
+/// 发送「可丢弃」事件（[`OverlayEvent::Cancelled`]）的最长阻塞时间：
+/// pump 循环不能被一个没有读者的事件通道卡死。
 const EVENT_SEND_TIMEOUT: Duration = Duration::from_millis(100);
 
-/// 窗口过程 → 覆盖层线程的「冻结帧需要重绘」标志（线程级，无锁）。
+/// 「已冻结」角标完全可见的时长。
+const BADGE_VISIBLE: Duration = Duration::from_secs(3);
+/// 角标淡出时长（在 `BADGE_VISIBLE` 之后）。
+const BADGE_FADE: Duration = Duration::from_millis(300);
+/// 角标淡出的重绘节拍：约 20fps，只在角标存活期间运行。
+const BADGE_TIMER_INTERVAL_MS: u32 = 50;
+/// 角标计时器 id。
+const BADGE_TIMER_ID: usize = 1;
+/// 「选区过小」提示停留时长。
+const NOTICE_DURATION: Duration = Duration::from_millis(1000);
+/// 选区无效时的提示文字。
+const TOO_SMALL_NOTICE: &str = "选区过小";
+/// 悬停标签里标题/类名/进程名的最大字符数（超出部分截断，避免撑破标签）。
+const LABEL_TITLE_CHARS: usize = 60;
+const LABEL_FIELD_CHARS: usize = 32;
+
+/// 窗口过程 → 覆盖层线程的「需要重绘」标志（线程级，无锁）。
 ///
-/// 由 `WM_PAINT`/`WM_DISPLAYCHANGE`/`WM_DPICHANGED` 置位；覆盖层线程在 pump 完消息后
-/// 用 `swap(false)` 消费一次并对全部活动窗口重新呈现。窗口过程里不做 D3D 呈现，
-/// 避免渲染调用发生在消息分发过程中间。
+/// 由 `WM_PAINT`/`WM_DISPLAYCHANGE`/`WM_DPICHANGED`/`WM_TIMER`（角标淡出）置位；
+/// 覆盖层线程在 pump 完消息后用 `swap(false)` 消费一次并对全部活动窗口重新绘制完整
+/// 场景。窗口过程里不做 D3D 呈现，避免渲染调用发生在消息分发过程中间。
 static REDRAW_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// app-core → 覆盖层线程的指令。
@@ -87,7 +123,11 @@ pub enum OverlayCommand {
 /// 覆盖层线程 → app-core 的事件。
 #[derive(Debug)]
 pub enum OverlayEvent {
-    /// 提交选区后的回读结果（Task 13 才发送）。
+    /// 提交选区后的回读结果：`image` 是选区尺寸的 top-down BGRA8，
+    /// `global_rect` 是选区在虚拟屏幕上的物理像素位置。
+    ///
+    /// 覆盖层线程用**阻塞 send** 投递（[`OverlayThread::send_event_blocking`]），
+    /// 不走 100ms 超时丢弃路径；日志只记录尺寸与矩形，不打印像素数据。
     Committed {
         image: CapturedImage,
         global_rect: PhysicalRect,
@@ -186,6 +226,32 @@ struct OverlayWindow {
     hwnd: HWND,
     renderer: Renderer,
     frozen: Option<FrozenTexture>,
+    /// 所在显示器边界（虚拟屏幕物理像素）；用于全局坐标 → 客户区坐标换算。
+    bounds: PhysicalRect,
+    /// 所在显示器 DPI（控制点尺寸 `8 × dpi / 96`）。
+    dpi: u32,
+}
+
+/// 「选区过小」一类提示：显示到 `until` 后取消会话。
+struct Notice {
+    text: &'static str,
+    until: Instant,
+}
+
+/// 「已冻结」角标：`hwnd` 上挂着 50ms 重绘计时器，到 `until` 后停止。
+struct Badge {
+    hwnd: HWND,
+    until: Instant,
+}
+
+/// 一次重绘共享的全局坐标场景（每个窗口再换算到自己的客户区）。
+struct SceneView {
+    selection: Option<PhysicalRect>,
+    selection_label: Option<String>,
+    hover: Option<PhysicalRect>,
+    hover_label: Option<String>,
+    notice: Option<String>,
+    badge_alpha: f32,
 }
 
 /// 覆盖层线程独占的状态；D3D/D2D 资源只在这里创建和使用。
@@ -200,6 +266,16 @@ struct OverlayThread {
     events: Sender<OverlayEvent>,
     /// 本次捕获前的前台窗口，取消时用于恢复焦点。
     foreground: Option<ForegroundInfo>,
+    /// 本次捕获的显示器列表（提交裁剪、DPI 与命中测试）。
+    displays: Vec<DisplayInfo>,
+    /// 所有覆盖窗口共享的选区状态机。
+    selection: SelectionState,
+    /// 指针下的外部窗口链（Z 序根→子）：吸附候选、滚轮切换与悬停标签。
+    hover_chain: Vec<WindowInfo>,
+    /// 待显示的提示；到期后取消会话。
+    notice: Option<Notice>,
+    /// 「已冻结」角标的显示/淡出状态；`None` 表示角标已结束或会话未激活。
+    badge: Option<Badge>,
     /// 是否有可见的覆盖层；决定命令循环的等待策略。
     active: bool,
     /// 必须最后 drop：清理窗口/纹理之后再 `CoUninitialize`。
@@ -227,6 +303,11 @@ impl OverlayThread {
             device,
             events,
             foreground: None,
+            displays: Vec::new(),
+            selection: SelectionState::new(),
+            hover_chain: Vec::new(),
+            notice: None,
+            badge: None,
             active: false,
             _com: com,
         };
@@ -240,15 +321,8 @@ impl OverlayThread {
                 warn!(display = %display_id, "skipping display with empty bounds");
                 continue;
             }
-            let window = create_overlay_window(
-                &overlay.device,
-                hinstance,
-                display_id,
-                bounds.x,
-                bounds.y,
-                bounds.width,
-                bounds.height,
-            )?;
+            let window =
+                create_overlay_window(&overlay.device, hinstance, display_id, bounds, display.dpi)?;
             overlay.windows.push(window);
         }
         if overlay.windows.is_empty() {
@@ -268,13 +342,18 @@ impl OverlayThread {
 
     fn run(&mut self, commands: &Receiver<OverlayCommand>) {
         loop {
-            let command = if self.active {
-                // 激活时既有窗口消息（WM_PAINT 重绘、WM_QUIT）又有命令要处理：先 pump，
-                // 再短超时收命令。
+            if self.active {
+                // 激活时既有窗口消息（输入、WM_PAINT 重绘、WM_QUIT）又有命令要处理：
+                // 先 pump 并处理本轮输入，再短超时收命令。
                 if self.pump_messages() {
                     info!("overlay thread quitting: WM_QUIT received");
                     break;
                 }
+                self.process_input();
+                self.tick();
+            }
+
+            let command = if self.active {
                 match commands.recv_timeout(ACTIVE_POLL_INTERVAL) {
                     Ok(command) => command,
                     Err(RecvTimeoutError::Timeout) => continue,
@@ -287,23 +366,26 @@ impl OverlayThread {
                     Err(_) => break,
                 }
             };
-
-            match command {
-                OverlayCommand::Show {
-                    frames,
-                    displays,
-                    foreground,
-                } => {
-                    if let Err(err) = self.show(frames, displays, foreground) {
-                        warn!(error = %err, "frozen overlay show failed; cancelling");
-                        self.hide_all();
-                        self.send_event(OverlayEvent::Cancelled);
-                    }
-                }
-                OverlayCommand::Cancel => self.cancel(),
-            }
+            self.handle_command(command);
         }
         debug!("overlay command loop exited; overlay thread stopping");
+    }
+
+    fn handle_command(&mut self, command: OverlayCommand) {
+        match command {
+            OverlayCommand::Show {
+                frames,
+                displays,
+                foreground,
+            } => {
+                if let Err(err) = self.show(frames, displays, foreground) {
+                    warn!(error = %err, "frozen overlay show failed; cancelling");
+                    self.hide_all();
+                    self.send_event(OverlayEvent::Cancelled);
+                }
+            }
+            OverlayCommand::Cancel => self.cancel(),
+        }
     }
 
     /// 上传冻结帧、显示窗口并完成首帧 `Present`。
@@ -323,6 +405,13 @@ impl OverlayThread {
             self.send_event(OverlayEvent::Cancelled);
         }
         self.foreground = Some(foreground);
+        // 新会话：重置选区/候选/提示，角标从头计时；丢弃上个会话残留的输入事件
+        // （否则一条陈旧的 `Commit` 会在新会话里立即触发「选区过小」）。
+        self.selection = SelectionState::new();
+        self.hover_chain.clear();
+        self.notice = None;
+        self.displays = displays.clone();
+        let _ = input::take();
         for window in &mut self.windows {
             window.frozen = None;
         }
@@ -344,13 +433,9 @@ impl OverlayThread {
                     ))
                 })?;
             let bounds = display.bounds;
-            let index = self.ensure_window(
-                &frame.display_id,
-                bounds.x,
-                bounds.y,
-                frame.width,
-                frame.height,
-            )?;
+            let dpi = display.dpi;
+            let index =
+                self.ensure_window(&frame.display_id, bounds, dpi, frame.width, frame.height)?;
             info!(
                 display = %frame.display_id,
                 window_width = frame.width,
@@ -380,13 +465,29 @@ impl OverlayThread {
             }
         }
 
+        let focus = self.focus_target(primary_id.as_deref());
+        let view = SceneView {
+            selection: None,
+            selection_label: None,
+            hover: None,
+            hover_label: None,
+            notice: None,
+            // 首帧的角标完全不透明；淡出由 `BADGE_*` 计时器驱动。
+            badge_alpha: 1.0,
+        };
+
         let mut first_present_ms = None;
-        for window in &mut self.windows {
+        for index in 0..self.windows.len() {
+            if self.windows[index].frozen.is_none() {
+                continue;
+            }
+            let scene = self.build_scene(index, &view);
+            let window = &mut self.windows[index];
             let Some(frozen) = window.frozen.as_ref() else {
                 continue;
             };
             debug!(display = %window.display_id, "drawing frozen frame");
-            window.renderer.draw_frozen(frozen)?;
+            window.renderer.draw_scene(frozen, &scene)?;
             debug!(display = %window.display_id, "presenting frozen frame");
             window.renderer.present()?;
             if first_present_ms.is_none() {
@@ -407,8 +508,11 @@ impl OverlayThread {
         }
 
         self.active = true;
-        match self.focus_target(primary_id.as_deref()) {
-            Some(hwnd) => focus_window(hwnd),
+        match focus {
+            Some(hwnd) => {
+                focus_window(hwnd);
+                self.start_badge_timer(hwnd);
+            }
             None => warn!("no overlay window has a frozen frame; focus unchanged"),
         }
 
@@ -429,10 +533,26 @@ impl OverlayThread {
     /// 必须幂等（Task 14 的编排按此语义实现）。
     fn cancel(&mut self) {
         if self.active {
+            self.selection.cancel();
+            self.hover_chain.clear();
+            self.notice = None;
             self.hide_all();
             info!("frozen overlay cancelled");
         } else {
             debug!("cancel received with no active overlay; acknowledging with Cancelled");
+        }
+        self.send_event(OverlayEvent::Cancelled);
+    }
+
+    /// 用户取消（`Esc`/右键）：结束会话并回报一次 [`OverlayEvent::Cancelled`]。
+    fn cancel_session(&mut self) {
+        self.selection.cancel();
+        self.hover_chain.clear();
+        self.notice = None;
+        let was_active = self.active;
+        self.hide_all();
+        if was_active {
+            info!("overlay session cancelled by user");
         }
         self.send_event(OverlayEvent::Cancelled);
     }
@@ -443,6 +563,8 @@ impl OverlayThread {
     /// 接受；若先 `SW_HIDE`，前台窗口会变成空/其他进程窗口，只能退化为
     /// `AttachThreadInput` 兜底（更容易失败，日志里也会多一条 warn）。
     fn hide_all(&mut self) {
+        // 会话结束时立刻停掉角标计时器，避免隐藏后继续 20fps 重绘。
+        self.stop_badge_timer();
         if self.active {
             if let Some(foreground) = self.foreground.as_ref() {
                 restore_foreground(foreground);
@@ -458,11 +580,46 @@ impl OverlayThread {
         self.active = false;
     }
 
+    /// 启动「已冻结」角标的 50ms 重绘计时器，并记录淡出结束时刻。
+    fn start_badge_timer(&mut self, hwnd: HWND) {
+        // SAFETY: hwnd 由本线程创建；`TIMERPROC` 传 `None` 表示 WM_TIMER 进本线程队列。
+        let timer = unsafe { SetTimer(Some(hwnd), BADGE_TIMER_ID, BADGE_TIMER_INTERVAL_MS, None) };
+        if timer == 0 {
+            warn!("SetTimer failed; frozen badge will not animate");
+        }
+        self.badge = Some(Badge {
+            hwnd,
+            until: Instant::now() + BADGE_VISIBLE + BADGE_FADE,
+        });
+    }
+
+    /// 停掉角标计时器（幂等）。
+    fn stop_badge_timer(&mut self) {
+        if let Some(badge) = self.badge.take() {
+            // SAFETY: hwnd 由本线程创建；计时器由本线程在同一窗口上设置。
+            let _ = unsafe { KillTimer(Some(badge.hwnd), BADGE_TIMER_ID) };
+        }
+    }
+
+    /// 角标当前不透明度：前 [`BADGE_VISIBLE`] 完全可见，随后 [`BADGE_FADE`] 内淡出到 0。
+    fn badge_alpha(&self, now: Instant) -> f32 {
+        let Some(badge) = self.badge.as_ref() else {
+            return 0.0;
+        };
+        let fade_start = badge.until - BADGE_FADE;
+        if now <= fade_start {
+            return 1.0;
+        }
+        let remaining = badge.until.saturating_duration_since(now).as_secs_f32();
+        (remaining / BADGE_FADE.as_secs_f32()).clamp(0.0, 1.0)
+    }
+
     /// 发送覆盖层事件；通道阻塞超过 [`EVENT_SEND_TIMEOUT`] 就丢弃并 warn。
     ///
     /// 绝不阻塞 pump：事件通道的读者（app-core）可能正忙或已经退出，覆盖层线程不能
     /// 因此卡在 `send` 上，连窗口消息都处理不了。Task 14 会使用无界通道，正常情况下
-    /// 不会触发超时分支。
+    /// 不会触发超时分支。携带图像的 [`OverlayEvent::Committed`] 必须走
+    /// [`OverlayThread::send_event_blocking`]，不能被超时丢弃。
     fn send_event(&self, event: OverlayEvent) {
         match self.events.send_timeout(event, EVENT_SEND_TIMEOUT) {
             Ok(()) => {}
@@ -475,30 +632,378 @@ impl OverlayThread {
         }
     }
 
-    /// 对所有活动窗口重新绘制并呈现当前冻结帧（`WM_PAINT`/显示变化触发）。
+    /// 阻塞发送事件，确保不丢（通道断开时立即返回错误，不会永久阻塞）。
+    ///
+    /// 只用于 [`OverlayEvent::Committed`]：它携带整张选区图像，丢弃等于用户白白框选。
+    /// 日志只记录尺寸这类元信息，**不打印** `bgra`。
+    fn send_event_blocking(&self, event: OverlayEvent) {
+        match &event {
+            OverlayEvent::Committed {
+                image, global_rect, ..
+            } => debug!(
+                width = image.width,
+                height = image.height,
+                global_rect = ?global_rect,
+                "sending committed overlay event"
+            ),
+            OverlayEvent::Cancelled => {}
+        }
+        if self.events.send(event).is_err() {
+            warn!("overlay event channel closed; committed result dropped");
+        }
+    }
+
+    /// 对所有活动窗口重新绘制并呈现完整场景（输入、`WM_PAINT`、角标计时器触发）。
     ///
     /// 只在有冻结纹理的窗口上工作；单个窗口失败只 warn，不影响其他显示器。
     fn redraw_active_windows(&mut self) {
         if !self.active {
             return;
         }
+        let now = Instant::now();
+        let selection = (!self.selection.rect.is_empty()).then_some(self.selection.rect);
+        let hover = self.selection.hovered_rect();
+        let view = SceneView {
+            selection,
+            selection_label: selection.map(|rect| format!("{}×{}", rect.width, rect.height)),
+            hover,
+            hover_label: hover.map(|rect| self.hover_label(rect)),
+            notice: self.notice.as_ref().map(|notice| notice.text.to_string()),
+            badge_alpha: self.badge_alpha(now),
+        };
+
         let mut redrawn = 0usize;
-        for window in &mut self.windows {
+        for index in 0..self.windows.len() {
+            if self.windows[index].frozen.is_none() {
+                continue;
+            }
+            let scene = self.build_scene(index, &view);
+            let window = &mut self.windows[index];
             let Some(frozen) = window.frozen.as_ref() else {
                 continue;
             };
-            if let Err(err) = window.renderer.draw_frozen(frozen) {
-                warn!(display = %window.display_id, error = %err, "redrawing frozen frame failed");
+            if let Err(err) = window.renderer.draw_scene(frozen, &scene) {
+                warn!(display = %window.display_id, error = %err, "redrawing overlay scene failed");
                 continue;
             }
             if let Err(err) = window.renderer.present() {
-                warn!(display = %window.display_id, error = %err, "presenting redrawn frozen frame failed");
+                warn!(display = %window.display_id, error = %err, "presenting redrawn overlay scene failed");
                 continue;
             }
             redrawn += 1;
         }
-        if redrawn > 0 {
-            info!(windows = redrawn, "frozen frames redrawn after WM_PAINT");
+        if redrawn == 0 {
+            debug!("no active window to redraw");
+        }
+    }
+
+    /// 把全局坐标的场景换算成某个窗口的客户区场景。
+    ///
+    /// 与窗口不相交的元素置 `None`（该窗口本来也画不出来）；`dpi` 用于控制点尺寸。
+    fn build_scene(&self, index: usize, view: &SceneView) -> render::Scene {
+        let window = &self.windows[index];
+        let origin = window.bounds;
+        let (width, height) = window.renderer.size();
+        let window_rect = PhysicalRect::new(0, 0, width, height);
+        let local = |rect: PhysicalRect| -> Option<PhysicalRect> {
+            PhysicalRect::new(
+                rect.x - origin.x,
+                rect.y - origin.y,
+                rect.width,
+                rect.height,
+            )
+            .intersect(&window_rect)
+        };
+
+        let selection = view.selection.and_then(local);
+        let hover = view.hover.and_then(local);
+        render::Scene {
+            selection,
+            selection_label: selection.and(view.selection_label.clone()),
+            hover,
+            hover_label: hover.and(view.hover_label.clone()),
+            notice: view.notice.clone(),
+            badge_alpha: view.badge_alpha,
+            dpi: window.dpi,
+        }
+    }
+
+    /// 悬停标签文字：窗口标题 / 类名 · 进程名 · 宽×高（超长字段截断）。
+    fn hover_label(&self, rect: PhysicalRect) -> String {
+        let size = format!("{}×{}", rect.width, rect.height);
+        let Some(window) = self.hover_chain.iter().find(|w| w.bounds == rect) else {
+            return size;
+        };
+        let title = if window.title.trim().is_empty() {
+            "桌面/显示器".to_string()
+        } else {
+            truncate(&window.title, LABEL_TITLE_CHARS)
+        };
+        let class = truncate(&window.class_name, LABEL_FIELD_CHARS);
+        let process = truncate(&window.process_name, LABEL_FIELD_CHARS);
+        if class.is_empty() && process.is_empty() {
+            format!("{title}\n{size}")
+        } else {
+            format!("{title}\n{class} · {process} · {size}")
+        }
+    }
+
+    /// 处理本轮 pump 收集到的全部输入事件（提交/取消后停止处理剩余事件）。
+    fn process_input(&mut self) {
+        for event in input::take() {
+            if !self.active {
+                break;
+            }
+            self.handle_input(event);
+        }
+    }
+
+    fn handle_input(&mut self, event: InputEvent) {
+        match event {
+            InputEvent::MouseDown { point } => self.on_mouse_down(point),
+            InputEvent::MouseMove { point, modifiers } => self.on_mouse_move(point, modifiers),
+            InputEvent::MouseUp => {
+                self.selection.on_mouse_up();
+                self.redraw_active_windows();
+            }
+            InputEvent::Nudge { key, shift } => {
+                let candidates = self.candidates();
+                self.selection.on_key(key, shift, &candidates);
+                self.redraw_active_windows();
+            }
+            InputEvent::Commit => self.commit_selection(),
+            InputEvent::Cancel => self.cancel_session(),
+            InputEvent::Wheel {
+                point,
+                modifiers,
+                delta,
+            } => self.on_wheel(point, modifiers, delta),
+        }
+    }
+
+    /// 鼠标按下：起点必须落在某台显示器内，否则忽略；命中已有选区的控制点/内部则
+    /// 进入调整/移动，否则从空白处开始框选。
+    fn on_mouse_down(&mut self, point: PhysicalPoint) {
+        let Some(dpi) = display_for_point(&self.displays, point).map(|display| display.dpi) else {
+            debug!(
+                x = point.x,
+                y = point.y,
+                "mouse down outside every display; ignored"
+            );
+            return;
+        };
+        let handle = hit_test_handle(self.selection.rect, point, dpi);
+        self.selection.on_mouse_down(point, handle);
+        debug!(
+            x = point.x,
+            y = point.y,
+            handle = ?handle,
+            "selection mouse down"
+        );
+        self.redraw_active_windows();
+    }
+
+    /// 鼠标移动：全局坐标；用 `hit_chain_excluding` 取外部窗口链（排除覆盖层自身），
+    /// 交给状态机更新选区/悬停高亮。
+    fn on_mouse_move(&mut self, point: PhysicalPoint, modifiers: Modifiers) {
+        let previous = self.hover_chain.last().map(|window| window.hwnd);
+        self.hover_chain = self.hit_chain_at(point);
+        let current = self.hover_chain.last().map(|window| window.hwnd);
+        if current != previous {
+            // 悬停目标变化时记一条 info：手工验证「覆盖层自身的窗口已被排除」。
+            match self.hover_chain.first() {
+                Some(root) => info!(
+                    hwnd = root.hwnd,
+                    class = %root.class_name,
+                    title = %truncate(&root.title, 40),
+                    depth = self.hover_chain.len(),
+                    "hover window changed"
+                ),
+                None => info!("hover window cleared (no external window under pointer)"),
+            }
+        }
+        let candidates = self.candidates();
+        self.selection.on_mouse_move(point, modifiers, &candidates);
+        self.redraw_active_windows();
+    }
+
+    /// 滚轮：在指针下的候选窗口链中切换高亮（`hover_rect`），不改变用户选区。
+    fn on_wheel(&mut self, point: PhysicalPoint, modifiers: Modifiers, delta: i32) {
+        self.hover_chain = self.hit_chain_at(point);
+        let candidates = self.candidates();
+        if candidates.is_empty() {
+            return;
+        }
+        // 先把当前候选链交给状态机（`Idle | HoverWindow` 下只更新 `hover_rect`），
+        // 再按滚轮增量循环；`Dragging | Adjusting` 期间 `on_wheel` 自行忽略。
+        self.selection.on_mouse_move(point, modifiers, &candidates);
+        self.selection.on_wheel(delta);
+        debug!(
+            delta,
+            hover = ?self.selection.hovered_rect(),
+            "wheel switched hovered window"
+        );
+        self.redraw_active_windows();
+    }
+
+    fn hit_chain_at(&self, point: PhysicalPoint) -> Vec<WindowInfo> {
+        // SAFETY: 纯查询，无指针参数。
+        let pid = unsafe { GetCurrentProcessId() };
+        match hit_chain_excluding(point, pid) {
+            Ok(chain) => chain,
+            Err(err) => {
+                debug!(x = point.x, y = point.y, error = %err, "hit chain unavailable");
+                Vec::new()
+            }
+        }
+    }
+
+    fn candidates(&self) -> Vec<PhysicalRect> {
+        self.hover_chain
+            .iter()
+            .map(|window| window.bounds)
+            .collect()
+    }
+
+    /// 提交选区：`commit()` 失败或裁剪后仍小于 [`MIN_SELECTION_SIZE`] 时显示「选区过小」
+    /// 提示，约 [`NOTICE_DURATION`] 后取消；成功则回读冻结帧并阻塞发送 `Committed`。
+    fn commit_selection(&mut self) {
+        let Some(rect) = self.selection.commit() else {
+            debug!("commit rejected: selection below minimum size");
+            self.show_notice(TOO_SMALL_NOTICE);
+            return;
+        };
+        let rect = clamp_to_virtual_screen(rect, &self.displays);
+        if rect.width < MIN_SELECTION_SIZE || rect.height < MIN_SELECTION_SIZE {
+            debug!(
+                width = rect.width,
+                height = rect.height,
+                "commit rejected: clamped selection below minimum size"
+            );
+            self.selection.cancel();
+            self.show_notice(TOO_SMALL_NOTICE);
+            return;
+        }
+
+        match self.read_selection(rect) {
+            Ok(image) => {
+                info!(
+                    width = image.width,
+                    height = image.height,
+                    x = rect.x,
+                    y = rect.y,
+                    "selection readback complete"
+                );
+                let foreground = self.foreground.clone().unwrap_or_default();
+                // 先隐藏窗口并把焦点还给来源窗口，再交付结果（app-core 可能立刻落盘）。
+                self.hide_all();
+                self.send_event_blocking(OverlayEvent::Committed {
+                    image,
+                    global_rect: rect,
+                    foreground,
+                });
+            }
+            Err(err) => {
+                warn!(
+                    x = rect.x,
+                    y = rect.y,
+                    width = rect.width,
+                    height = rect.height,
+                    error = %err,
+                    "selection readback failed; cancelling"
+                );
+                self.hide_all();
+                self.send_event(OverlayEvent::Cancelled);
+            }
+        }
+    }
+
+    /// 显示一条提示并立即重绘；到期后由 [`OverlayThread::tick`] 取消会话。
+    fn show_notice(&mut self, text: &'static str) {
+        self.notice = Some(Notice {
+            text,
+            until: Instant::now() + NOTICE_DURATION,
+        });
+        self.redraw_active_windows();
+    }
+
+    /// 逐显示器回读全局选区并拼合成全局尺寸的 BGRA 图。
+    ///
+    /// 每台显示器：`global_rect ∩ 冻结纹理范围` → staging 回读 → 以
+    /// `(选区内偏移, 纹理内偏移)` 拼进目标缓冲；不相交的显示器不贡献像素。
+    fn read_selection(&self, rect: PhysicalRect) -> Result<CapturedImage, AppError> {
+        let mut regions: Vec<(u32, u32, u32, u32, Vec<u8>)> = Vec::new();
+        for display in &self.displays {
+            let Some(window) = self
+                .windows
+                .iter()
+                .find(|window| window.display_id == display.id)
+            else {
+                continue;
+            };
+            let Some(frozen) = window.frozen.as_ref() else {
+                continue;
+            };
+            // 纹理左上角与显示器左上角对齐；纹理比显示器小（分辨率切换瞬间）时按纹理裁剪。
+            let texture = PhysicalRect::new(
+                display.bounds.x,
+                display.bounds.y,
+                frozen.width,
+                frozen.height,
+            );
+            let Some((dst_x, dst_y, src_x, src_y, width, height)) =
+                input::region_offsets(rect, texture)
+            else {
+                continue;
+            };
+            let data =
+                self.device
+                    .read_back_region(&frozen.texture, src_x, src_y, width, height)?;
+            regions.push((dst_x, dst_y, width, height, data));
+        }
+
+        if regions.is_empty() {
+            return Err(AppError::CaptureFailed(
+                "selection does not overlap any frozen display".into(),
+            ));
+        }
+        let bgra = input::compose_bgra(rect.width, rect.height, &regions);
+        // SAFETY 无关：这里只做长度自检，避免把半截图像交给上层。
+        if bgra.len() != rect.width as usize * rect.height as usize * 4 {
+            return Err(AppError::Internal(format!(
+                "composed image size mismatch: {} bytes for {}x{}",
+                bgra.len(),
+                rect.width,
+                rect.height
+            )));
+        }
+        Ok(CapturedImage {
+            width: rect.width,
+            height: rect.height,
+            bgra,
+        })
+    }
+
+    /// 每个命令循环周期的收尾工作：提示到期 → 取消会话；角标淡出结束 → 停计时器。
+    fn tick(&mut self) {
+        if !self.active {
+            return;
+        }
+        let now = Instant::now();
+        if self
+            .notice
+            .as_ref()
+            .is_some_and(|notice| now >= notice.until)
+        {
+            self.notice = None;
+            info!("selection too small notice expired; cancelling session");
+            self.cancel_session();
+            return;
+        }
+        if self.badge.as_ref().is_some_and(|badge| now >= badge.until) {
+            self.stop_badge_timer();
+            // 再重绘一次，擦掉最后的角标（此时 `badge_alpha` 已为 0）。
+            REDRAW_REQUESTED.store(true, Ordering::Release);
         }
     }
 
@@ -506,8 +1011,8 @@ impl OverlayThread {
     fn ensure_window(
         &mut self,
         display_id: &str,
-        x: i32,
-        y: i32,
+        bounds: PhysicalRect,
+        dpi: u32,
         width: u32,
         height: u32,
     ) -> Result<usize, AppError> {
@@ -525,14 +1030,17 @@ impl OverlayThread {
                     SetWindowPos(
                         hwnd,
                         None,
-                        x,
-                        y,
+                        bounds.x,
+                        bounds.y,
                         window_width,
                         window_height,
                         SWP_NOACTIVATE | SWP_NOZORDER,
                     )
                 }
                 .map_err(|err| AppError::Internal(format!("SetWindowPos failed: {err}")))?;
+                // 全局坐标 → 客户区坐标依赖最新边界与 DPI。
+                self.windows[index].bounds = bounds;
+                self.windows[index].dpi = dpi;
                 return Ok(index);
             }
             info!(
@@ -542,15 +1050,7 @@ impl OverlayThread {
             self.remove_window(index);
         }
 
-        let window = create_overlay_window(
-            &self.device,
-            self.hinstance,
-            display_id,
-            x,
-            y,
-            width,
-            height,
-        )?;
+        let window = create_overlay_window(&self.device, self.hinstance, display_id, bounds, dpi)?;
         self.windows.push(window);
         Ok(self.windows.len() - 1)
     }
@@ -709,18 +1209,16 @@ fn unregister_overlay_class(hinstance: HINSTANCE) {
 
 /// 创建一个隐藏的置顶弹出窗口，并为它建立交换链与渲染器。
 ///
-/// 位置/尺寸都是物理像素；`width × height` 是窗口客户区（`WS_POPUP` 无边框）。
+/// `bounds` 是所在显示器的物理像素边界（窗口位置 = `bounds.x/y`，尺寸 = `bounds`）；
 /// 窗口创建后保持隐藏，`show` 时再 `SW_SHOW`，避免预创建阶段闪烁。
 fn create_overlay_window(
     device: &D3dContext,
     hinstance: HINSTANCE,
     display_id: &str,
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
+    bounds: PhysicalRect,
+    dpi: u32,
 ) -> Result<OverlayWindow, AppError> {
-    let (window_width, window_height) = window_size(width, height)?;
+    let (window_width, window_height) = window_size(bounds.width, bounds.height)?;
     let class_name = wide(OVERLAY_CLASS_NAME);
     let title = wide(OVERLAY_WINDOW_TITLE);
     // 不用 WS_EX_NOACTIVATE：覆盖层需要键盘焦点（design §7.1）。
@@ -732,8 +1230,8 @@ fn create_overlay_window(
             PCWSTR(class_name.as_ptr()),
             PCWSTR(title.as_ptr()),
             WS_POPUP,
-            x,
-            y,
+            bounds.x,
+            bounds.y,
             window_width,
             window_height,
             None,
@@ -745,7 +1243,7 @@ fn create_overlay_window(
     .map_err(|err| AppError::Internal(format!("CreateWindowExW failed: {err}")))?;
 
     let renderer = match device
-        .create_swap_chain(hwnd, width, height)
+        .create_swap_chain(hwnd, bounds.width, bounds.height)
         .and_then(|swap| Renderer::new(device, swap))
     {
         Ok(renderer) => renderer,
@@ -756,12 +1254,21 @@ fn create_overlay_window(
         }
     };
 
-    debug!(display = %display_id, x, y, width, height, "hidden overlay window created");
+    debug!(
+        display = %display_id,
+        x = bounds.x,
+        y = bounds.y,
+        width = bounds.width,
+        height = bounds.height,
+        "hidden overlay window created"
+    );
     Ok(OverlayWindow {
         display_id: display_id.to_string(),
         hwnd,
         renderer,
         frozen: None,
+        bounds,
+        dpi,
     })
 }
 
@@ -867,11 +1374,15 @@ fn attached_set_foreground(hwnd: HWND) -> bool {
     }
 }
 
-/// 覆盖层窗口过程：绘制类消息只置位重绘标志，取消与输入由覆盖层线程的命令驱动。
+/// 覆盖层窗口过程：绘制类消息只置位重绘标志，输入消息翻译成 [`InputEvent`] 入队。
+///
+/// 这里**不碰**覆盖层线程的可变状态（`SelectionState` 等）：所有输入都交给
+/// [`input::push`]，覆盖层线程 pump 完消息后统一处理。鼠标捕获在按下/抬起时就地
+/// 设置（窗口属于覆盖层线程，`SetCapture` 在这里调用是正确的）。
 unsafe extern "system" fn overlay_wnd_proc(
     hwnd: HWND,
     msg: u32,
-    _wparam: WPARAM,
+    wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
@@ -887,24 +1398,85 @@ unsafe extern "system" fn overlay_wnd_proc(
             REDRAW_REQUESTED.store(true, Ordering::Release);
             LRESULT(0)
         }
+        WM_MOUSEMOVE => {
+            if let Some(point) = input::cursor_point() {
+                input::push(InputEvent::MouseMove {
+                    point,
+                    modifiers: input::current_modifiers(),
+                });
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONDOWN => {
+            // SAFETY: 窗口属于本线程；捕获后鼠标消息持续送到本窗口，跨显示器拖拽也成立。
+            unsafe { SetCapture(hwnd) };
+            if let Some(point) = input::cursor_point() {
+                input::push(InputEvent::MouseDown { point });
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            // SAFETY: 与按下时的 `SetCapture` 成对；未捕获时返回失败但无副作用。
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+            input::push(InputEvent::MouseUp);
+            LRESULT(0)
+        }
+        WM_RBUTTONDOWN => {
+            input::push(InputEvent::Cancel);
+            LRESULT(0)
+        }
+        WM_KEYDOWN => {
+            let shift = input::current_modifiers().shift;
+            if let Some(event) = input::event_for_key(wparam.0 as u16, shift) {
+                input::push(event);
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEWHEEL => {
+            if let Some(point) = input::cursor_point() {
+                input::push(InputEvent::Wheel {
+                    point,
+                    modifiers: input::current_modifiers(),
+                    delta: input::wheel_delta(wparam.0),
+                });
+            }
+            LRESULT(0)
+        }
+        // 角标淡出节拍：只请求重绘，是否继续由覆盖层线程按截止时间决定。
+        WM_TIMER => {
+            REDRAW_REQUESTED.store(true, Ordering::Release);
+            LRESULT(0)
+        }
         // 分辨率/DPI 变化后交换链内容需要重绘（几何重建由下一次 `show`/`ensure_window`
         // 负责）；先置位标志，再交给默认处理。
         WM_DISPLAYCHANGE | WM_DPICHANGED => {
             REDRAW_REQUESTED.store(true, Ordering::Release);
             // SAFETY: 默认处理；参数原样转发。
-            unsafe { DefWindowProcW(hwnd, msg, _wparam, lparam) }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         // 背景由 D3D 负责，禁止 GDI 擦除造成闪烁。
         WM_ERASEBKGND => LRESULT(1),
-        // 阶段 01 的取消由 `OverlayCommand::Cancel` 驱动（Task 13 接入 Esc）；
-        // 忽略 WM_CLOSE/Alt+F4，避免窗口在管理结构之外被销毁。
+        // 取消由 `Esc`/右键（输入事件）驱动；忽略 WM_CLOSE/Alt+F4，避免窗口在管理结构
+        // 之外被销毁。
         WM_CLOSE => LRESULT(0),
         // SAFETY: 默认处理；参数原样转发。
-        _ => unsafe { DefWindowProcW(hwnd, msg, _wparam, lparam) },
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
 
 /// UTF-16（NUL 结尾）缓冲区。
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// 按字符数截断（超出时补 `…`），避免超长标题撑破覆盖层标签。
+fn truncate(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let mut out: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        out.push('…');
+    }
+    out
 }

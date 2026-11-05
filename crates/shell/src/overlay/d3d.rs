@@ -27,8 +27,9 @@ use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL_11_0,
 };
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-    D3D11_SDK_VERSION,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_BOX,
+    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE,
+    D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, DWRITE_FACTORY_TYPE_SHARED,
@@ -194,6 +195,100 @@ impl D3dContext {
 
     pub fn dwrite_factory(&self) -> &IDWriteFactory {
         &self.dwrite_factory
+    }
+
+    /// 从 `source` 回读一块区域，返回紧排（每行 `width * 4` 字节）的 top-down BGRA8。
+    ///
+    /// 流程（design §7.2）：创建与区域同尺寸的 `D3D11_USAGE_STAGING` 纹理 →
+    /// `CopySubresourceRegion`（源纹理 → staging）→ `Map(D3D11_MAP_READ)` →
+    /// 按 `RowPitch` 逐行复制 → `Unmap`。staging 纹理在函数返回时释放。
+    ///
+    /// 调用方负责保证 `x + width`/`y + height` 不超过源纹理尺寸；参数非法返回
+    /// [`AppError::InvalidInput`]，`Map` 失败返回 [`AppError::Internal`]（不 panic）。
+    pub fn read_back_region(
+        &self,
+        source: &ID3D11Texture2D,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>, AppError> {
+        if width == 0 || height == 0 {
+            return Err(AppError::InvalidInput(format!(
+                "readback region must be non-zero, got {width}x{height}"
+            )));
+        }
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_STAGING,
+            BindFlags: 0,
+            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+            MiscFlags: 0,
+        };
+        let mut staging: Option<ID3D11Texture2D> = None;
+        // SAFETY: `desc` 是栈上有效结构；输出指针指向本函数内的 `Option`。
+        unsafe { self.device.CreateTexture2D(&desc, None, Some(&mut staging)) }
+            .map_err(|err| failed("ID3D11Device::CreateTexture2D(staging)", err))?;
+        let staging = staging
+            .ok_or_else(|| AppError::Internal("staging CreateTexture2D returned none".into()))?;
+
+        let Some(right) = x.checked_add(width) else {
+            return Err(AppError::InvalidInput(
+                "readback x + width overflows".into(),
+            ));
+        };
+        let Some(bottom) = y.checked_add(height) else {
+            return Err(AppError::InvalidInput(
+                "readback y + height overflows".into(),
+            ));
+        };
+        let region = D3D11_BOX {
+            left: x,
+            top: y,
+            front: 0,
+            right,
+            bottom,
+            back: 1,
+        };
+        // SAFETY: 两个纹理都有效；`region` 是栈上有效结构，坐标由调用方保证在源纹理内。
+        unsafe {
+            self.context
+                .CopySubresourceRegion(&staging, 0, 0, 0, 0, source, 0, Some(&region));
+        }
+
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        // SAFETY: `mapped` 指向栈上有效结构；staging 纹理以 `CPU_ACCESS_READ` 创建。
+        unsafe {
+            self.context
+                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+        }
+        .map_err(|err| failed("ID3D11DeviceContext::Map(staging)", err))?;
+
+        let row_bytes = width as usize * 4;
+        let mut out = vec![0u8; row_bytes * height as usize];
+        // SAFETY: `pData` 指向 staging 纹理的映射区，至少 `RowPitch * height` 字节可读；
+        // 逐行按 `RowPitch` 步进，只读取 `row_bytes` 字节，不越界。复制完成后立即 `Unmap`。
+        unsafe {
+            let src = mapped.pData.cast::<u8>();
+            for row in 0..height as usize {
+                let src_row = src.add(row * mapped.RowPitch as usize);
+                std::ptr::copy_nonoverlapping(
+                    src_row,
+                    out.as_mut_ptr().add(row * row_bytes),
+                    row_bytes,
+                );
+            }
+            self.context.Unmap(&staging, 0);
+        }
+        Ok(out)
     }
 }
 

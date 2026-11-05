@@ -14,7 +14,7 @@ use visrecall_domain::capture::ForegroundInfo;
 use visrecall_domain::error::AppError;
 use visrecall_domain::geometry::{PhysicalPoint, PhysicalRect};
 use windows::core::{BOOL, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, POINT, RECT, TRUE};
+use windows::Win32::Foundation::{CloseHandle, FALSE, HANDLE, HWND, LPARAM, POINT, RECT, TRUE};
 use windows::Win32::Graphics::Dwm::{
     DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
 };
@@ -50,6 +50,15 @@ pub trait WindowProbe: Send + Sync {
     fn enumerate(&self) -> Result<Vec<WindowInfo>, AppError>;
     /// 从根到子的窗口链，`point` 为虚拟屏幕物理像素。
     fn hit_chain(&self, point: PhysicalPoint) -> Result<Vec<WindowInfo>, AppError>;
+    /// 同 [`WindowProbe::hit_chain`]，但跳过 `excluded_pid` 拥有的窗口。
+    ///
+    /// 覆盖层可见时 `WindowFromPoint` 会命中覆盖层自身，交互高亮必须走这条路径
+    /// （design §7.1）。
+    fn hit_chain_excluding(
+        &self,
+        point: PhysicalPoint,
+        excluded_pid: u32,
+    ) -> Result<Vec<WindowInfo>, AppError>;
 }
 
 /// 基于 Win32 的 [`WindowProbe`]；无状态，可跨线程共享。
@@ -73,6 +82,14 @@ impl WindowProbe for Win32WindowProbe {
 
     fn hit_chain(&self, point: PhysicalPoint) -> Result<Vec<WindowInfo>, AppError> {
         hit_chain(point)
+    }
+
+    fn hit_chain_excluding(
+        &self,
+        point: PhysicalPoint,
+        excluded_pid: u32,
+    ) -> Result<Vec<WindowInfo>, AppError> {
+        hit_chain_excluding(point, excluded_pid)
     }
 }
 
@@ -142,6 +159,8 @@ pub fn foreground_info() -> Result<ForegroundInfo, AppError> {
 /// `RealChildWindowFromPoint`（先把屏幕坐标换算成父窗口客户区坐标），最多
 /// [`MAX_CHAIN_DEPTH`] 层。命中桌面类（`Progman`/`WorkerW`/`Shell_TrayWnd`）时链上该
 /// 节点改写为该点所在显示器的整屏矩形。
+///
+/// 覆盖层可见时这条路径会命中覆盖层自身，交互高亮请改用 [`hit_chain_excluding`]。
 pub fn hit_chain(point: PhysicalPoint) -> Result<Vec<WindowInfo>, AppError> {
     let screen_point = POINT {
         x: point.x,
@@ -155,16 +174,125 @@ pub fn hit_chain(point: PhysicalPoint) -> Result<Vec<WindowInfo>, AppError> {
             point.x, point.y
         )));
     }
+    Ok(chain_from(hit, point))
+}
 
+/// 命中链，但跳过 `excluded_pid` 拥有的窗口（design §4/§7.1）。
+///
+/// 覆盖层可见时 `WindowFromPoint` 会命中覆盖层自身，因此这里改走 `EnumWindows` 的
+/// Z 序：从最顶层往下找第一个**包含 `point`** 且满足候选规则的顶层窗口
+/// （非 `excluded_pid`、可见、非最小化、非工具窗口、非 DWM 隐身、`bounds` 非空），
+/// 再对它构建根→子的子窗口链。候选集合由纯函数 [`is_hit_candidate`] 判定。
+///
+/// 没有任何外部窗口命中（例如指针落在桌面上）时回退为该点所在显示器的整屏矩形；
+/// 显示器信息也取不到时返回 [`AppError::CaptureFailed`]。
+pub fn hit_chain_excluding(
+    point: PhysicalPoint,
+    excluded_pid: u32,
+) -> Result<Vec<WindowInfo>, AppError> {
+    let mut search = ExternalSearch {
+        point,
+        excluded_pid,
+        found: None,
+    };
+    // SAFETY: `search` 在调用期间位于栈上且不被移动，指针只作为 `LPARAM` 传给同步
+    // 执行的 `EnumWindows` 回调；回调不保存该指针。
+    let data = LPARAM(addr_of_mut!(search) as isize);
+    // 已找到目标时回调返回 FALSE，`EnumWindows` 因此返回 Err（last error 可能为 0）；
+    // 这只表示「枚举提前结束」，结果以 `search.found` 为准。
+    let _ = unsafe { EnumWindows(Some(enum_external_window_proc), data) };
+
+    match search.found {
+        Some(hwnd) => Ok(chain_from(hwnd, point)),
+        None => {
+            let bounds = monitor_bounds(point).ok_or_else(|| {
+                AppError::CaptureFailed(format!(
+                    "no external window or monitor at ({}, {})",
+                    point.x, point.y
+                ))
+            })?;
+            debug!(
+                x = point.x,
+                y = point.y,
+                "no external window hit; falling back to display bounds"
+            );
+            Ok(vec![WindowInfo {
+                bounds,
+                ..WindowInfo::default()
+            }])
+        }
+    }
+}
+
+/// [`hit_chain_excluding`] 传给 `EnumWindows` 回调的上下文。
+///
+/// `found` 是写入槽：命中后回调把句柄写进去并返回 `FALSE` 结束枚举。
+struct ExternalSearch {
+    point: PhysicalPoint,
+    excluded_pid: u32,
+    found: Option<HWND>,
+}
+
+/// `EnumWindows` 回调：按 Z 序找第一个可命中的外部顶层窗口。
+///
+/// 先做廉价检查（可见性、最小化、PID、工具窗口、隐身），再取 DWM 边界做包含测试，
+/// 命中即写入 `found` 并返回 `FALSE` 停止枚举。回调内不得 panic。
+unsafe extern "system" fn enum_external_window_proc(hwnd: HWND, data: LPARAM) -> BOOL {
+    // SAFETY: `data` 由 `hit_chain_excluding` 传入，指向枚举期间存活的 `ExternalSearch`。
+    let search = unsafe { &mut *(data.0 as *mut ExternalSearch) };
+
+    if !unsafe { IsWindowVisible(hwnd) }.as_bool() || unsafe { IsIconic(hwnd) }.as_bool() {
+        return TRUE;
+    }
+    let mut pid = 0u32;
+    // SAFETY: 输出指针指向栈上有效 `u32`。
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    let bounds = window_bounds(hwnd);
+    let candidate = is_hit_candidate(
+        search.excluded_pid,
+        pid,
+        is_tool_window(hwnd),
+        is_cloaked(hwnd),
+        bounds,
+        search.point,
+    );
+    if !candidate {
+        return TRUE;
+    }
+    search.found = Some(hwnd);
+    FALSE
+}
+
+/// 顶层窗口是否可作为命中目标（可见性/最小化由调用方另行判断）。
+///
+/// 规则：不是 `excluded_pid` 的窗口、非工具窗口、未被 DWM 隐身、`bounds` 非空且包含
+/// `point`。与 [`enumerate_windows`] 的候选规则对齐，额外增加排除自身进程与包含测试。
+fn is_hit_candidate(
+    excluded_pid: u32,
+    pid: u32,
+    tool_window: bool,
+    cloaked: bool,
+    bounds: PhysicalRect,
+    point: PhysicalPoint,
+) -> bool {
+    pid != 0 && pid != excluded_pid && !tool_window && !cloaked && bounds.contains(point)
+}
+
+/// 从 `start`（会被提升到顶层窗口）逐层构建根→子的命中链。
+fn chain_from(start: HWND, point: PhysicalPoint) -> Vec<WindowInfo> {
+    let screen_point = POINT {
+        x: point.x,
+        y: point.y,
+    };
     let mut chain: Vec<WindowInfo> = Vec::new();
-    let mut current = root_window(hit);
+    let mut current = root_window(start);
     for depth in 0..MAX_CHAIN_DEPTH {
         let info = window_info(current);
 
         if is_desktop_class(&info.class_name) {
             // 桌面本体/壁纸宿主/任务栏没有可吸附的窗口边界，用所在显示器整屏代替。
             chain.push(desktop_entry(info, point));
-            return Ok(chain);
+            return chain;
         }
 
         chain.push(info);
@@ -172,7 +300,7 @@ pub fn hit_chain(point: PhysicalPoint) -> Result<Vec<WindowInfo>, AppError> {
         let child = child_at(current, screen_point);
         if child.is_invalid() || child == current {
             debug!(depth, "hit chain ended");
-            return Ok(chain);
+            return chain;
         }
         current = child;
     }
@@ -181,7 +309,7 @@ pub fn hit_chain(point: PhysicalPoint) -> Result<Vec<WindowInfo>, AppError> {
         max_depth = MAX_CHAIN_DEPTH,
         "hit chain depth limit reached; chain truncated"
     );
-    Ok(chain)
+    chain
 }
 
 /// 纯函数：从枚举结果里挑出可吸附的候选窗口。
@@ -516,5 +644,35 @@ mod tests {
             bottom: 5,
         };
         assert!(physical_rect(&inverted).is_empty());
+    }
+
+    #[test]
+    fn hit_candidate_skips_own_process_tool_cloaked_and_empty() {
+        let point = PhysicalPoint { x: 10, y: 10 };
+        let inside = PhysicalRect::new(0, 0, 100, 100);
+        assert!(is_hit_candidate(42, 7, false, false, inside, point));
+        // 本进程（覆盖层自身）永不命中。
+        assert!(!is_hit_candidate(42, 42, false, false, inside, point));
+        // PID 读不到（0）也不命中。
+        assert!(!is_hit_candidate(42, 0, false, false, inside, point));
+        assert!(!is_hit_candidate(42, 7, true, false, inside, point));
+        assert!(!is_hit_candidate(42, 7, false, true, inside, point));
+        assert!(!is_hit_candidate(
+            42,
+            7,
+            false,
+            false,
+            PhysicalRect::default(),
+            point
+        ));
+        // 点在窗口外（半开区间：右/下边界不算命中）。
+        assert!(!is_hit_candidate(
+            42,
+            7,
+            false,
+            false,
+            inside,
+            PhysicalPoint { x: 100, y: 10 }
+        ));
     }
 }

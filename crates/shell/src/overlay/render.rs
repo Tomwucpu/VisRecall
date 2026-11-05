@@ -13,6 +13,7 @@
 use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 
+use visrecall_domain::geometry::PhysicalRect;
 use visrecall_domain::AppError;
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct2D::Common::{
@@ -27,7 +28,8 @@ use windows::Win32::Graphics::Direct2D::{
 };
 use windows::Win32::Graphics::DirectWrite::{
     IDWriteTextFormat, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-    DWRITE_FONT_WEIGHT_BOLD, DWRITE_MEASURING_MODE_NATURAL,
+    DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_NATURAL,
+    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::IDXGISurface;
 
@@ -39,6 +41,8 @@ const FONT_FAMILY: &str = "Microsoft YaHei UI";
 const LOCALE: &str = "zh-CN";
 /// 96 DPI 下 1 DIP = 1 物理像素，字号直接用物理像素。
 const FONT_SIZE_PX: f32 = 52.0;
+/// 覆盖层交互信息（尺寸标签/窗口标签/角标/提示）的字号。
+const OVERLAY_FONT_SIZE_PX: f32 = 18.0;
 
 const BACKGROUND: D2D1_COLOR_F = D2D1_COLOR_F {
     r: 0.055,
@@ -65,6 +69,77 @@ const BLACK: D2D1_COLOR_F = D2D1_COLOR_F {
     b: 0.0,
     a: 1.0,
 };
+/// 选区外压暗：黑色约 50% alpha（design §7.2）。
+const DIM_COLOR: D2D1_COLOR_F = D2D1_COLOR_F {
+    r: 0.0,
+    g: 0.0,
+    b: 0.0,
+    a: 0.5,
+};
+/// 选区边框：近白色实线。
+const BORDER_COLOR: D2D1_COLOR_F = D2D1_COLOR_F {
+    r: 1.0,
+    g: 1.0,
+    b: 1.0,
+    a: 0.95,
+};
+/// 控制点描边。
+const HANDLE_OUTLINE: D2D1_COLOR_F = D2D1_COLOR_F {
+    r: 0.08,
+    g: 0.08,
+    b: 0.11,
+    a: 0.9,
+};
+/// 悬停窗口高亮：与选区分色的青色。
+const HOVER_COLOR: D2D1_COLOR_F = D2D1_COLOR_F {
+    r: 0.24,
+    g: 0.86,
+    b: 0.72,
+    a: 1.0,
+};
+/// 文字底板（尺寸标签、窗口标签）。
+const LABEL_BG: D2D1_COLOR_F = D2D1_COLOR_F {
+    r: 0.0,
+    g: 0.0,
+    b: 0.0,
+    a: 0.62,
+};
+/// 「已冻结」角标底板。
+const BADGE_BG: D2D1_COLOR_F = D2D1_COLOR_F {
+    r: 0.0,
+    g: 0.0,
+    b: 0.0,
+    a: 0.55,
+};
+/// 「选区过小」一类提示的底板。
+const NOTICE_BG: D2D1_COLOR_F = D2D1_COLOR_F {
+    r: 0.6,
+    g: 0.16,
+    b: 0.16,
+    a: 0.92,
+};
+
+/// 一帧覆盖层场景；所有矩形都是**本窗口客户区**坐标（物理像素）。
+///
+/// 调用方（覆盖层线程）已经把全局坐标减去本窗口所在显示器的 `bounds.x/y`，并裁掉
+/// 与窗口不相交的部分（`None`）。渲染器只负责画，不做坐标换算与 DPI 缩放。
+#[derive(Clone, Debug, Default)]
+pub struct Scene {
+    /// 用户选区边框/控制点/尺寸标签的数据源；`None` 表示没有选区。
+    pub selection: Option<PhysicalRect>,
+    /// 选区实时尺寸标签（`W×H`，物理像素）。
+    pub selection_label: Option<String>,
+    /// 悬停窗口高亮矩形。
+    pub hover: Option<PhysicalRect>,
+    /// 悬停窗口标签（标题/类名/进程/尺寸，调用方已截断）。
+    pub hover_label: Option<String>,
+    /// 「选区过小」一类提示文字。
+    pub notice: Option<String>,
+    /// 「已冻结」角标不透明度；`<= 0` 不画。
+    pub badge_alpha: f32,
+    /// 本窗口所在显示器 DPI，控制点尺寸 = `8 × dpi / 96`。
+    pub dpi: u32,
+}
 
 /// 一个窗口的 D2D 渲染器：持有交换链、D2D 上下文与复用资源。
 ///
@@ -74,8 +149,18 @@ pub struct Renderer {
     context: ID2D1DeviceContext,
     target: ID2D1RenderTarget,
     text_format: IDWriteTextFormat,
+    overlay_format: IDWriteTextFormat,
+    center_format: IDWriteTextFormat,
     text_brush: ID2D1Brush,
     accent_brush: ID2D1Brush,
+    dim_brush: ID2D1SolidColorBrush,
+    border_brush: ID2D1SolidColorBrush,
+    handle_outline_brush: ID2D1SolidColorBrush,
+    hover_brush: ID2D1SolidColorBrush,
+    label_bg_brush: ID2D1SolidColorBrush,
+    badge_bg_brush: ID2D1SolidColorBrush,
+    badge_text_brush: ID2D1SolidColorBrush,
+    notice_bg_brush: ID2D1SolidColorBrush,
     frame_index: u64,
     /// 显式禁止 `Send`（交换链已 `!Send`，这里再写一次以固定不变量）。
     _not_send: PhantomData<*const ()>,
@@ -107,32 +192,54 @@ impl Renderer {
             target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
         }
 
-        let font_family = wide(FONT_FAMILY);
-        let locale = wide(LOCALE);
-        // SAFETY: 两个字符串都以 NUL 结尾且在调用期间存活。
-        let text_format = unsafe {
-            device.dwrite_factory().CreateTextFormat(
-                windows::core::PCWSTR(font_family.as_ptr()),
-                None,
-                DWRITE_FONT_WEIGHT_BOLD,
-                DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_STRETCH_NORMAL,
-                FONT_SIZE_PX,
-                windows::core::PCWSTR(locale.as_ptr()),
-            )
-        }
-        .map_err(|err| failed("IDWriteFactory::CreateTextFormat", err))?;
+        let text_format =
+            create_text_format(device, FONT_SIZE_PX, DWRITE_FONT_WEIGHT_BOLD, false, false)?;
+        // 覆盖层信息文字：常规字重、不换行（超出文本框被 CLIP 截断）。
+        let overlay_format = create_text_format(
+            device,
+            OVERLAY_FONT_SIZE_PX,
+            DWRITE_FONT_WEIGHT_NORMAL,
+            false,
+            true,
+        )?;
+        // 居中文字（角标/提示）。
+        let center_format = create_text_format(
+            device,
+            OVERLAY_FONT_SIZE_PX,
+            DWRITE_FONT_WEIGHT_NORMAL,
+            true,
+            true,
+        )?;
 
         let text_brush: ID2D1Brush = create_brush(&target, &TEXT_COLOR)?;
         let accent_brush: ID2D1Brush = create_brush(&target, &ACCENT_COLOR)?;
+        // 画刷先全部按 `target` 创建，再把 `target` 移进结构体。
+        let dim_brush = create_solid_brush(&target, &DIM_COLOR)?;
+        let border_brush = create_solid_brush(&target, &BORDER_COLOR)?;
+        let handle_outline_brush = create_solid_brush(&target, &HANDLE_OUTLINE)?;
+        let hover_brush = create_solid_brush(&target, &HOVER_COLOR)?;
+        let label_bg_brush = create_solid_brush(&target, &LABEL_BG)?;
+        let badge_bg_brush = create_solid_brush(&target, &BADGE_BG)?;
+        let badge_text_brush = create_solid_brush(&target, &TEXT_COLOR)?;
+        let notice_bg_brush = create_solid_brush(&target, &NOTICE_BG)?;
 
         Ok(Renderer {
             swap,
             context,
             target,
             text_format,
+            overlay_format,
+            center_format,
             text_brush,
             accent_brush,
+            dim_brush,
+            border_brush,
+            handle_outline_brush,
+            hover_brush,
+            label_bg_brush,
+            badge_bg_brush,
+            badge_text_brush,
+            notice_bg_brush,
             frame_index: 0,
             _not_send: PhantomData,
         })
@@ -269,6 +376,237 @@ impl Renderer {
         Ok(())
     }
 
+    /// 绘制冻结帧 + 覆盖层交互场景（design §7.2）。
+    ///
+    /// 顺序：冻结帧铺满 → 选区外压暗（黑色 50%）→ 悬停窗口高亮 → 选区边框/控制点/
+    /// 尺寸标签 → 「已冻结」角标（按 `badge_alpha` 淡出）→ 提示文字。所有矩形都在
+    /// `scene` 里以本窗口客户区坐标给出；与窗口不相交的部分由 D2D 裁剪或调用方过滤。
+    pub fn draw_scene(&mut self, frozen: &FrozenTexture, scene: &Scene) -> Result<(), AppError> {
+        let (target_width, target_height) = self.size();
+        if (frozen.width, frozen.height) != (target_width, target_height) {
+            return Err(AppError::Internal(format!(
+                "frozen texture {}x{} does not match swap chain {}x{}",
+                frozen.width, frozen.height, target_width, target_height
+            )));
+        }
+
+        // `cast` 只做 QueryInterface：DXGI surface 是 D3D11 纹理的视图。
+        let surface: IDXGISurface = frozen
+            .texture
+            .cast()
+            .map_err(|err| failed("ID3D11Texture2D -> IDXGISurface", err))?;
+        let props = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: BACK_BUFFER_FORMAT,
+                alphaMode: D2D1_ALPHA_MODE_IGNORE,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+            colorContext: ManuallyDrop::new(None),
+        };
+        // SAFETY: surface 由 `frozen` 持有、在本函数内存活；属性是栈上有效指针。
+        let frozen_bitmap: ID2D1Bitmap1 = unsafe {
+            self.context
+                .CreateBitmapFromDxgiSurface(&surface, Some(&props))
+        }
+        .map_err(|err| failed("CreateBitmapFromDxgiSurface(frozen)", err))?;
+
+        // 后备缓冲 bitmap 必须活到 `EndDraw`。
+        let _back_buffer = self.bind_back_buffer()?;
+        let window = PhysicalRect::new(0, 0, target_width, target_height);
+        let dest = D2D_RECT_F {
+            left: 0.0,
+            top: 0.0,
+            right: frozen.width as f32,
+            bottom: frozen.height as f32,
+        };
+        let width = target_width as f32;
+        let height = target_height as f32;
+
+        // 选区：压暗区域按与窗口的交集裁剪，边框/控制点用原始坐标（越界部分被 D2D 裁剪）。
+        let dim = scene.selection.and_then(|sel| sel.intersect(&window));
+        // 没有选区（或选区为空）时压暗整屏；选区完全在别的显示器上时不压暗本窗口。
+        let dim_full = scene.selection.is_none();
+
+        // SAFETY: 全部绘制调用都发生在 BeginDraw/EndDraw 之间；所有 D2D 结构都是栈上
+        // 有效值，brush/text format 由 `self` 持有并在调用期间存活。
+        unsafe {
+            self.target.BeginDraw();
+            self.target.Clear(Some(&BLACK));
+            // `ID2D1DeviceContext::DrawBitmap` 的 windows-rs 绑定返回 `()`；
+            // 失败通过随后的 `EndDraw` 上报（D2D 在下次绘制时返回 HRESULT）。
+            self.context.DrawBitmap(
+                &frozen_bitmap,
+                Some(&dest),
+                1.0,
+                D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+                None,
+                None,
+            );
+
+            // 选区外压暗：没有选区时压暗整屏；有选区时压暗四条边带。
+            match dim {
+                Some(sel) => {
+                    let (l, t) = (sel.x as f32, sel.y as f32);
+                    let (r, b) = (sel.right() as f32, sel.bottom() as f32);
+                    for band in [
+                        D2D_RECT_F {
+                            left: 0.0,
+                            top: 0.0,
+                            right: width,
+                            bottom: t,
+                        },
+                        D2D_RECT_F {
+                            left: 0.0,
+                            top: b,
+                            right: width,
+                            bottom: height,
+                        },
+                        D2D_RECT_F {
+                            left: 0.0,
+                            top: t,
+                            right: l,
+                            bottom: b,
+                        },
+                        D2D_RECT_F {
+                            left: r,
+                            top: t,
+                            right: width,
+                            bottom: b,
+                        },
+                    ] {
+                        if band.right > band.left && band.bottom > band.top {
+                            self.target.FillRectangle(&band, &self.dim_brush);
+                        }
+                    }
+                }
+                None if dim_full => {
+                    let all = D2D_RECT_F {
+                        left: 0.0,
+                        top: 0.0,
+                        right: width,
+                        bottom: height,
+                    };
+                    self.target.FillRectangle(&all, &self.dim_brush);
+                }
+                None => {}
+            }
+
+            // 悬停窗口：青色边框 + 左上角标签。
+            if let Some(hover) = scene.hover {
+                let rect = to_d2d(hover);
+                self.target
+                    .DrawRectangle(&rect, &self.hover_brush, 2.0, None);
+                if let Some(label) = scene.hover_label.as_deref() {
+                    let (left, top) = label_origin(hover, 420.0, 50.0, width, height);
+                    let bg = D2D_RECT_F {
+                        left,
+                        top,
+                        right: left + 420.0,
+                        bottom: top + 50.0,
+                    };
+                    self.target.FillRectangle(&bg, &self.label_bg_brush);
+                    let text = utf16(label);
+                    self.target.DrawText(
+                        &text,
+                        &self.overlay_format,
+                        &bg,
+                        &self.hover_brush,
+                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                }
+            }
+
+            // 选区：2px 实线边框 + 八个控制点 + 实时尺寸标签。
+            if let Some(selection) = scene.selection {
+                let rect = to_d2d(selection);
+                self.target
+                    .DrawRectangle(&rect, &self.border_brush, 2.0, None);
+                draw_handles(
+                    &self.target,
+                    selection,
+                    scene.dpi,
+                    &self.border_brush,
+                    &self.handle_outline_brush,
+                );
+                if let Some(label) = scene.selection_label.as_deref() {
+                    let (left, top) = size_label_origin(selection, width, height);
+                    let bg = D2D_RECT_F {
+                        left,
+                        top,
+                        right: left + 150.0,
+                        bottom: top + 26.0,
+                    };
+                    self.target.FillRectangle(&bg, &self.label_bg_brush);
+                    let text = utf16(label);
+                    self.target.DrawText(
+                        &text,
+                        &self.overlay_format,
+                        &bg,
+                        &self.text_brush,
+                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                }
+            }
+
+            // 左上角「已冻结」角标：按 `badge_alpha` 淡出。
+            if scene.badge_alpha > 0.0 {
+                let alpha = scene.badge_alpha.clamp(0.0, 1.0);
+                self.badge_bg_brush.SetOpacity(alpha * BADGE_BG.a);
+                self.badge_text_brush.SetOpacity(alpha);
+                let bg = D2D_RECT_F {
+                    left: 16.0,
+                    top: 16.0,
+                    right: 116.0,
+                    bottom: 50.0,
+                };
+                self.target.FillRectangle(&bg, &self.badge_bg_brush);
+                let text = utf16("已冻结");
+                self.target.DrawText(
+                    &text,
+                    &self.center_format,
+                    &bg,
+                    &self.badge_text_brush,
+                    D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                );
+                // 复位不透明度，避免影响后续帧的其他画刷使用者。
+                self.badge_bg_brush.SetOpacity(BADGE_BG.a);
+                self.badge_text_brush.SetOpacity(1.0);
+            }
+
+            // 提示（如「选区过小」）：屏幕中央。
+            if let Some(notice) = scene.notice.as_deref() {
+                let bg = D2D_RECT_F {
+                    left: width / 2.0 - 130.0,
+                    top: height / 2.0 - 30.0,
+                    right: width / 2.0 + 130.0,
+                    bottom: height / 2.0 + 30.0,
+                };
+                self.target.FillRectangle(&bg, &self.notice_bg_brush);
+                let text = utf16(notice);
+                self.target.DrawText(
+                    &text,
+                    &self.center_format,
+                    &bg,
+                    &self.text_brush,
+                    D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                );
+            }
+
+            self.target
+                .EndDraw(None, None)
+                .map_err(|err| failed("ID2D1RenderTarget::EndDraw", err))?;
+        }
+
+        self.frame_index += 1;
+        Ok(())
+    }
+
     /// 交换链（窗口客户区）尺寸，物理像素。
     pub fn size(&self) -> (u32, u32) {
         (self.swap.width(), self.swap.height())
@@ -327,6 +665,148 @@ fn create_brush(target: &ID2D1RenderTarget, color: &D2D1_COLOR_F) -> Result<ID2D
     brush
         .cast()
         .map_err(|err| failed("ID2D1SolidColorBrush -> ID2D1Brush", err))
+}
+
+/// 创建实心画刷；返回具体类型（需要 `SetOpacity` 时使用）。
+fn create_solid_brush(
+    target: &ID2D1RenderTarget,
+    color: &D2D1_COLOR_F,
+) -> Result<ID2D1SolidColorBrush, AppError> {
+    // SAFETY: 颜色是栈上有效指针，无画刷属性。
+    unsafe { target.CreateSolidColorBrush(color, None) }
+        .map_err(|err| failed("CreateSolidColorBrush", err))
+}
+
+/// 创建文字格式：可选居中、关闭换行。
+fn create_text_format(
+    device: &D3dContext,
+    size: f32,
+    weight: windows::Win32::Graphics::DirectWrite::DWRITE_FONT_WEIGHT,
+    centered: bool,
+    no_wrap: bool,
+) -> Result<IDWriteTextFormat, AppError> {
+    let font_family = wide(FONT_FAMILY);
+    let locale = wide(LOCALE);
+    // SAFETY: 两个字符串都以 NUL 结尾且在调用期间存活。
+    let format = unsafe {
+        device.dwrite_factory().CreateTextFormat(
+            windows::core::PCWSTR(font_family.as_ptr()),
+            None,
+            weight,
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            size,
+            windows::core::PCWSTR(locale.as_ptr()),
+        )
+    }
+    .map_err(|err| failed("IDWriteFactory::CreateTextFormat", err))?;
+
+    // SAFETY: 纯状态设置；失败只影响排版观感，不影响绘制流程。
+    unsafe {
+        if no_wrap {
+            let _ = format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        }
+        if centered {
+            let _ = format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            let _ = format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
+    }
+    Ok(format)
+}
+
+/// domain 矩形 → D2D 矩形。
+fn to_d2d(rect: PhysicalRect) -> D2D_RECT_F {
+    D2D_RECT_F {
+        left: rect.x as f32,
+        top: rect.y as f32,
+        right: rect.right() as f32,
+        bottom: rect.bottom() as f32,
+    }
+}
+
+/// 画八个控制点：白填充 + 深色描边，边长 `8 × dpi / 96`（至少 8px）。
+///
+/// 只在 `BeginDraw`/`EndDraw` 之间调用；`target`/`brush` 由 [`Renderer`] 持有。
+fn draw_handles(
+    target: &ID2D1RenderTarget,
+    selection: PhysicalRect,
+    dpi: u32,
+    fill: &ID2D1SolidColorBrush,
+    outline: &ID2D1SolidColorBrush,
+) {
+    let size = ((8 * dpi.max(96) as u64) / 96).max(4) as f32;
+    let half = size / 2.0;
+    let x0 = selection.x as f32;
+    let y0 = selection.y as f32;
+    let x1 = selection.right() as f32;
+    let y1 = selection.bottom() as f32;
+    let mx = (x0 + x1) / 2.0;
+    let my = (y0 + y1) / 2.0;
+    let points = [
+        (x0, y0),
+        (mx, y0),
+        (x1, y0),
+        (x1, my),
+        (x1, y1),
+        (mx, y1),
+        (x0, y1),
+        (x0, my),
+    ];
+    // SAFETY: 调用方保证处于 BeginDraw/EndDraw 之间；这里只构造栈上矩形并调用 D2D。
+    unsafe {
+        for (cx, cy) in points {
+            let rect = D2D_RECT_F {
+                left: cx - half,
+                top: cy - half,
+                right: cx + half,
+                bottom: cy + half,
+            };
+            target.FillRectangle(&rect, fill);
+            target.DrawRectangle(&rect, outline, 1.0, None);
+        }
+    }
+}
+
+/// 选区尺寸标签的左上角：优先放在选区上沿之外，空间不足时放到选区内侧。
+fn size_label_origin(selection: PhysicalRect, window_w: f32, window_h: f32) -> (f32, f32) {
+    let label_w = 150.0;
+    let label_h = 26.0;
+    let left = (selection.x as f32).clamp(0.0, (window_w - label_w).max(0.0));
+    let above = selection.y as f32 - label_h - 6.0;
+    let top = if above >= 0.0 {
+        above
+    } else {
+        (selection.y as f32 + 6.0).min((window_h - label_h).max(0.0))
+    };
+    (left, top)
+}
+
+/// 通用标签位置：先试上方，再试下方，最后夹在窗口内。
+fn label_origin(
+    rect: PhysicalRect,
+    label_w: f32,
+    label_h: f32,
+    window_w: f32,
+    window_h: f32,
+) -> (f32, f32) {
+    let left = (rect.x as f32).clamp(0.0, (window_w - label_w).max(0.0));
+    let above = rect.y as f32 - label_h - 6.0;
+    let top = if above >= 0.0 {
+        above
+    } else {
+        let below = rect.bottom() as f32 + 6.0;
+        if below + label_h <= window_h {
+            below
+        } else {
+            (window_h - label_h).max(0.0)
+        }
+    };
+    (left, top)
+}
+
+/// 绘制用 UTF-16（不带 NUL；`DrawText` 按切片长度取字符）。
+fn utf16(text: &str) -> Vec<u16> {
+    text.encode_utf16().collect()
 }
 
 /// UTF-16（NUL 结尾）缓冲区，供 Win32/DWrite 直接取指针。

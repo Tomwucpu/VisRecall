@@ -421,6 +421,57 @@ fn click_without_hover_leaves_selection_empty() {
 }
 
 #[test]
+fn zero_height_drag_is_not_treated_as_click() {
+    // 悬停窗口覆盖整片区域；用户水平拖动 40px（高度为 0）后抬起。
+    let candidates = [r(0, 0, 400, 400)];
+    let mut s = SelectionState::new();
+    s.on_mouse_move(p(50, 50), Modifiers::default(), &candidates);
+    assert_eq!(s.hovered_rect(), Some(candidates[0]));
+
+    s.on_mouse_down(p(50, 50), None);
+    s.on_mouse_move(p(90, 50), Modifiers::default(), &candidates);
+    assert_eq!(s.rect, r(50, 50, 40, 0));
+    s.on_mouse_up();
+
+    // 零高拖拽不得采用悬停窗口边界，提交时按过小处理。
+    assert_eq!(s.rect, r(50, 50, 40, 0));
+    assert_eq!(s.commit(), None);
+    assert_eq!(s.phase, SelectionPhase::Cancelled);
+}
+
+#[test]
+fn drag_returning_to_anchor_is_not_a_click() {
+    let candidates = [r(0, 0, 400, 400)];
+    let mut s = SelectionState::new();
+    s.on_mouse_move(p(50, 50), Modifiers::default(), &candidates);
+    s.on_mouse_down(p(50, 50), None);
+    // 拖出去再拖回起点：面积仍是 0，但已经发生过位移。
+    s.on_mouse_move(p(120, 90), Modifiers::default(), &candidates);
+    s.on_mouse_move(p(50, 50), Modifiers::default(), &candidates);
+    s.on_mouse_up();
+    assert!(s.rect.is_empty());
+    assert_eq!(s.commit(), None);
+}
+
+#[test]
+fn drag_then_click_adopts_hover_again() {
+    // 上一次拖拽的 dragged 标记不能在新的按下后残留。
+    let candidates = [r(0, 0, 400, 400)];
+    let mut s = SelectionState::new();
+    s.on_mouse_down(p(50, 50), None);
+    s.on_mouse_move(p(120, 90), Modifiers::default(), &candidates);
+    s.on_mouse_up();
+    assert_eq!(s.rect, r(50, 50, 70, 40));
+
+    // HoverWindow 下移动只更新悬停高亮，随后“按下→抬起无位移”采用窗口边界。
+    s.on_mouse_move(p(200, 200), Modifiers::default(), &candidates);
+    assert_eq!(s.hovered_rect(), Some(candidates[0]));
+    s.on_mouse_down(p(200, 200), None);
+    s.on_mouse_up();
+    assert_eq!(s.rect, candidates[0]);
+}
+
+#[test]
 fn wheel_cycles_hover_rect() {
     let candidates = [r(0, 0, 100, 100), r(200, 0, 100, 100), r(400, 0, 100, 100)];
     let mut s = SelectionState::new();

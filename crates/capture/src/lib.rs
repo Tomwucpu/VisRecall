@@ -13,8 +13,8 @@ pub use display::{
 pub use grab_gdi::GdiFrameGrabber;
 pub use trait_defs::{FrameGrabber, RawFrame};
 pub use window::{
-    enumerate_windows, filter_candidates, foreground_info, hit_chain, is_desktop_class,
-    Win32WindowProbe, WindowInfo, WindowProbe,
+    enumerate_windows, filter_candidates, foreground_info, hit_chain, hit_chain_excluding,
+    is_desktop_class, Win32WindowProbe, WindowInfo, WindowProbe,
 };
 
 pub fn version() -> &'static str {
