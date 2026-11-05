@@ -359,6 +359,8 @@ struct SceneView {
     hover_label_owner: Option<usize>,
     notice: Option<String>,
     badge_alpha: f32,
+    /// 所有显示器边界的并集（虚拟屏范围）；控制点贴虚拟屏右/下外沿时判归属用。
+    virtual_bounds: PhysicalRect,
 }
 
 /// 覆盖层线程独占的状态；D3D/D2D 资源只在这里创建和使用。
@@ -582,6 +584,7 @@ impl OverlayThread {
         }
 
         let focus = self.focus_target(primary_id.as_deref());
+        let bounds: Vec<PhysicalRect> = self.windows.iter().map(|window| window.bounds).collect();
         let view = SceneView {
             selection: None,
             selection_label: None,
@@ -592,6 +595,7 @@ impl OverlayThread {
             notice: None,
             // 首帧的角标完全不透明；淡出由 `BADGE_*` 计时器驱动。
             badge_alpha: 1.0,
+            virtual_bounds: union_bounds(&bounds),
         };
 
         let mut first_present_ms = None;
@@ -840,6 +844,7 @@ impl OverlayThread {
             hover_label_owner: hover.and_then(|rect| label_owner_top_left(rect, &bounds)),
             notice: self.notice.as_ref().map(|notice| notice.text.to_string()),
             badge_alpha: self.badge_alpha(now),
+            virtual_bounds: union_bounds(&bounds),
         };
 
         let cursor = input::cursor_point();
@@ -878,7 +883,9 @@ impl OverlayThread {
     ///
     /// 与窗口不相交的元素置 `None`（该窗口本来也画不出来）；`dpi` 用于控制点尺寸。
     /// 选区矩形**不**与窗口求交：越界部分交给 D2D 裁剪，这样跨屏选区不会在屏间缝隙
-    /// 多画一条边框。控制点与标签只在该元素的归属窗口上出现（跨屏不重复绘制）。
+    /// 多画一条边框。控制点与标签只在该元素的归属窗口上出现（跨屏不重复绘制）；
+    /// 控制点归属需要虚拟屏范围（[`SceneView::virtual_bounds`]）来判断「贴屏幕右/下
+    /// 外沿的控制点该归谁」。
     fn build_scene(&self, index: usize, view: &SceneView) -> render::Scene {
         let window = &self.windows[index];
         let origin = window.bounds;
@@ -899,7 +906,7 @@ impl OverlayThread {
         let hover = view.hover.and_then(local);
         let handles = view
             .selection
-            .map(|rect| render::handles_for_window(rect, origin))
+            .map(|rect| render::handles_for_window(rect, origin, view.virtual_bounds))
             .unwrap_or_default();
         render::Scene {
             selection,
@@ -952,6 +959,15 @@ impl OverlayThread {
     }
 
     fn handle_input(&mut self, event: InputEvent) {
+        // 提示期内按下/滚轮/`Enter` 统一在这里吞掉：`Enter` 必须一起忽略，否则
+        // `commit_selection` 的失败分支会重新计时，连按就会无限续期提示。
+        if notice_swallows(self.notice.is_some(), &event) {
+            debug!(
+                event = input_event_name(&event),
+                "input ignored while the selection notice is showing"
+            );
+            return;
+        }
         match event {
             InputEvent::MouseDown { point } => self.on_mouse_down(point),
             InputEvent::MouseMove { point, modifiers } => {
@@ -986,17 +1002,10 @@ impl OverlayThread {
     /// 鼠标按下：起点必须落在某台显示器内，否则忽略；命中已有选区的控制点/内部则
     /// 进入调整/移动，否则从空白处开始框选。
     ///
-    /// `SetCapture` 放在「起点在某台显示器内」之后：点在显示器之外时不必占着捕获
-    /// （否则下一次按键/点击会先落到覆盖层线程，容易表现为界面卡死）。
+    /// 提示期内的按下已由 [`notice_swallows`] 在 [`OverlayThread::handle_input`] 吞掉，
+    /// 这里不必再判 `notice`。`SetCapture` 放在「起点在某台显示器内」之后：点在显示器
+    /// 之外时不必占着捕获（否则下一次按键/点击会先落到覆盖层线程，容易表现为界面卡死）。
     fn on_mouse_down(&mut self, point: PhysicalPoint) {
-        if self.notice.is_some() {
-            debug!(
-                x = point.x,
-                y = point.y,
-                "mouse down ignored while the selection notice is showing"
-            );
-            return;
-        }
         let Some(target_display) = display_for_point(&self.displays, point) else {
             debug!(
                 x = point.x,
@@ -1066,12 +1075,9 @@ impl OverlayThread {
     }
 
     /// 滚轮：在指针下的候选窗口链中切换高亮（`hover_rect`），不改变用户选区。
+    ///
+    /// 提示期内的滚轮已由 [`notice_swallows`] 在 [`OverlayThread::handle_input`] 吞掉。
     fn on_wheel(&mut self, point: PhysicalPoint, modifiers: Modifiers, delta: i32) {
-        if self.notice.is_some() {
-            // 提示显示期间忽略滚轮，避免用户以为可以再试却在 1s 后被静默取消。
-            debug!(delta, "wheel ignored while the selection notice is showing");
-            return;
-        }
         self.last_hit_scan = Some(Instant::now());
         self.perf.record_hit_scan();
         self.hover_chain = self.hit_chain_at(point);
@@ -1288,7 +1294,7 @@ impl OverlayThread {
         if self
             .notice
             .as_ref()
-            .is_some_and(|notice| now >= notice.until)
+            .is_some_and(|notice| notice_expired(notice, now))
         {
             self.notice = None;
             info!("selection too small notice expired; cancelling session");
@@ -1407,6 +1413,49 @@ impl OverlayThread {
             self.redraw_active_windows();
         }
         false
+    }
+}
+
+/// 虚拟屏范围：所有显示器边界的并集；空列表返回零矩形。
+fn union_bounds(bounds: &[PhysicalRect]) -> PhysicalRect {
+    bounds
+        .iter()
+        .fold(PhysicalRect::default(), |acc, rect| acc.union(rect))
+}
+
+/// 「选区过小」提示期的输入门控：返回 `true` 表示该事件被提示吞掉。
+///
+/// 提示显示的 1s 内，按下、滚轮与 `Enter` 提交都被忽略：用户在提示期间重试不会产生
+/// 新选区或新提交；`Enter` 若被放过，`commit_selection` 的失败分支会再次
+/// [`OverlayThread::show_notice`]，连按就会不停续期，会话永远不会结束。
+/// `Esc`/右键取消不受影响；提示到期后仍由 [`OverlayThread::tick`] 取消会话。
+fn notice_swallows(notice_active: bool, event: &InputEvent) -> bool {
+    notice_active
+        && matches!(
+            event,
+            InputEvent::MouseDown { .. } | InputEvent::Wheel { .. } | InputEvent::Commit
+        )
+}
+
+/// 提示是否到期（[`OverlayThread::tick`] 据此取消会话）。
+///
+/// 到期时刻只由 `Notice.until` 决定；提示期内的输入被 [`notice_swallows`] 吞掉，
+/// 因此连按 `Enter` 不会重置 `until`，会话一定会在首次显示后 1s 结束。
+fn notice_expired(notice: &Notice, now: Instant) -> bool {
+    now >= notice.until
+}
+
+/// 输入事件种类名（日志用；不打印坐标或图像数据）。
+fn input_event_name(event: &InputEvent) -> &'static str {
+    match event {
+        InputEvent::MouseDown { .. } => "MouseDown",
+        InputEvent::MouseMove { .. } => "MouseMove",
+        InputEvent::MouseUp => "MouseUp",
+        InputEvent::CaptureLost => "CaptureLost",
+        InputEvent::Nudge { .. } => "Nudge",
+        InputEvent::Commit => "Commit",
+        InputEvent::Cancel => "Cancel",
+        InputEvent::Wheel { .. } => "Wheel",
     }
 }
 
@@ -1916,5 +1965,82 @@ mod tests {
         stats.record_input(Duration::from_micros(2500));
         assert_eq!(stats.input_samples, 1);
         assert!((ms(stats.input_max) - 2.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn union_bounds_covers_all_displays() {
+        // 空列表 → 零矩形（`build_scene` 在没有窗口时也不会 panic）。
+        assert_eq!(union_bounds(&[]), PhysicalRect::default());
+
+        // 负坐标副屏 + 主屏：并集覆盖整个虚拟屏。
+        let secondary = PhysicalRect::new(-2560, 0, 2560, 1440);
+        let primary = PhysicalRect::new(0, 0, 2560, 1440);
+        assert_eq!(
+            union_bounds(&[secondary, primary]),
+            PhysicalRect::new(-2560, 0, 5120, 1440)
+        );
+
+        // 竖直错位：下沿取最靠下的显示器。
+        let lower = PhysicalRect::new(-2560, 1440, 2560, 1440);
+        assert_eq!(
+            union_bounds(&[primary, lower]),
+            PhysicalRect::new(-2560, 0, 5120, 2880)
+        );
+    }
+
+    #[test]
+    fn notice_swallows_mouse_and_commit_but_not_escape() {
+        let point = PhysicalPoint { x: 10, y: 20 };
+        let modifiers = Modifiers::default();
+        let mouse_down = InputEvent::MouseDown { point };
+        let wheel = InputEvent::Wheel {
+            point,
+            modifiers,
+            delta: 120,
+        };
+
+        // 提示期内：按下、滚轮与 `Enter` 都被吞掉。`Enter` 不进入 `commit_selection`，
+        // 因此不会再次 `show_notice`、也不会把提示计时续期。
+        assert!(notice_swallows(true, &mouse_down));
+        assert!(notice_swallows(true, &wheel));
+        assert!(notice_swallows(true, &InputEvent::Commit));
+
+        // `Esc`/右键取消、抬起、移动、微调照常处理。
+        assert!(!notice_swallows(true, &InputEvent::Cancel));
+        assert!(!notice_swallows(true, &InputEvent::MouseUp));
+        assert!(!notice_swallows(
+            true,
+            &InputEvent::MouseMove { point, modifiers }
+        ));
+        assert!(!notice_swallows(
+            true,
+            &InputEvent::Nudge {
+                key: crate::selection::Key::Left,
+                shift: false
+            }
+        ));
+        assert!(!notice_swallows(true, &InputEvent::CaptureLost));
+
+        // 没有提示时什么都不吞。
+        assert!(!notice_swallows(false, &mouse_down));
+        assert!(!notice_swallows(false, &wheel));
+        assert!(!notice_swallows(false, &InputEvent::Commit));
+    }
+
+    #[test]
+    fn notice_deadline_is_not_extended_by_ignored_input() {
+        let start = Instant::now();
+        let notice = Notice {
+            text: TOO_SMALL_NOTICE,
+            until: start + NOTICE_DURATION,
+        };
+        // 提示期内的 `Enter` 被门控吞掉（不会重新 `show_notice`），截止时刻保持不变。
+        let before = notice.until;
+        assert!(notice_swallows(true, &InputEvent::Commit));
+        assert_eq!(notice.until, before);
+        // 到期判定只看 `until`：<1s 未到期，≥1s 到期。
+        assert!(!notice_expired(&notice, start));
+        assert!(!notice_expired(&notice, before - Duration::from_millis(1)));
+        assert!(notice_expired(&notice, before));
     }
 }
