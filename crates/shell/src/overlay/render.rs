@@ -151,22 +151,22 @@ pub struct Scene {
 
 /// 八个控制点中归属 `window_bounds` 的那些，中心换算成窗口本地坐标。
 ///
-/// `selection`、`window_bounds` 与 `virtual_bounds`（所有显示器边界的并集）都是
-/// **全局**虚拟屏幕物理像素；返回的点可以直接画在本窗口客户区（客户区左上角 =
-/// 显示器 `bounds` 左上角）。归属规则见 [`owned_center`]：
+/// `selection`、`window_bounds` 与 `displays`（所有显示器的 bounds）都是**全局**虚拟
+/// 屏幕物理像素；返回的点可以直接画在本窗口客户区（客户区左上角 = 显示器 `bounds`
+/// 左上角）。归属规则见 [`owned_center`]：
 ///
 /// - 中心落在窗口内（半开区间）→ 归该窗口；
-/// - 中心恰好落在**虚拟屏外沿**的 `right`/`bottom` → 归右/下边与虚拟屏外沿重合的
-///   那个窗口（中心夹到该窗口最后一个像素）。选区被吸附到屏幕右/下边沿时控制点
-///   中心正好等于 `right()`/`bottom()`，半开区间会把它排除在外，不修就会出现
-///   「贴边一侧的控制点一个都不画」。
+/// - 中心恰好落在**显示器临空边**（窗口的 `right`/`bottom`，且外侧 1px 处没有任何
+///   其他显示器覆盖）→ 归该窗口（中心夹到该窗口最后一个像素）。选区被吸附到较矮
+///   副屏下沿、较窄副屏右沿或虚拟屏外沿时，控制点中心正好等于 `right()`/`bottom()`，
+///   半开区间会把它排除在外，不修就会出现「贴边一侧的控制点一个都不画」。
 ///
-/// 内部屏缝（两屏之间的分界线）仍走半开区间：分界线上的中心归右/下那个窗口，
-/// 左侧窗口不再重复画，因此每个控制点全局只被一个窗口绘制。空选区没有控制点。
+/// 内部屏缝（外侧还有别的显示器）仍走半开区间：分界线上的中心归右/下那个窗口，
+/// 左侧/上方窗口不再重复画，因此每个控制点全局只被一个窗口绘制。空选区没有控制点。
 pub fn handles_for_window(
     selection: PhysicalRect,
     window_bounds: PhysicalRect,
-    virtual_bounds: PhysicalRect,
+    displays: &[PhysicalRect],
 ) -> Vec<(Handle, PhysicalPoint)> {
     if selection.is_empty() {
         return Vec::new();
@@ -174,7 +174,7 @@ pub fn handles_for_window(
     handle_centers(selection)
         .into_iter()
         .filter_map(|(handle, point)| {
-            owned_center(point, window_bounds, virtual_bounds).map(|local| (handle, local))
+            owned_center(point, window_bounds, displays).map(|local| (handle, local))
         })
         .collect()
 }
@@ -182,34 +182,59 @@ pub fn handles_for_window(
 /// 控制点中心归属判定：返回本窗口本地坐标，`None` 表示不归本窗口。
 ///
 /// 1. 中心在窗口内（半开区间 `[x, right) × [y, bottom)`）→ 归本窗口；
-/// 2. 只有中心恰好等于虚拟屏外沿的 `right`/`bottom`，且本窗口的右/下边与虚拟屏外沿
-///    重合时才接收：把该维夹到窗口最后一个像素（`right - 1` / `bottom - 1`），另一维
-///    仍按半开区间判定，夹完后必须落在窗口内。
+/// 2. 否则只容忍中心恰好落在窗口（本身就是一台显示器）的 `right`/`bottom` 边界上：
+///    该边界**外侧 1px** 处（右边界取 `(right, y)`，下边界取 `(x, bottom)`）没有任何
+///    其他显示器覆盖时，这条边就是显示器的临空边，把该维夹到窗口最后一个像素
+///    （`right - 1` / `bottom - 1`）后归属本窗口。角点的两维分别判定，只有临空的那一维
+///    才夹取。
 ///
-/// 第 2 条不会把远处窗口的点拉进来（只容忍虚拟屏外沿 1 像素的溢出），也不会让内部
-/// 屏缝上的点被两侧同时认领（屏缝不在虚拟屏外沿上，只走第 1 条）。
+/// 内部屏缝外侧还有其他显示器覆盖，不满足第 2 条，仍只归包含该点的右/下窗口。夹取后
+/// 重新用半开 `contains` 校验，因此远处（屏间空隙/其他显示器）窗口不会被拉进来，每个
+/// 控制点全局仍只被一个窗口绘制。
 fn owned_center(
     center: PhysicalPoint,
     window_bounds: PhysicalRect,
-    virtual_bounds: PhysicalRect,
+    displays: &[PhysicalRect],
 ) -> Option<PhysicalPoint> {
     if window_bounds.contains(center) {
         return Some(local_point(center, window_bounds));
     }
-    let on_outer_right =
-        center.x == virtual_bounds.right() && window_bounds.right() == virtual_bounds.right();
-    let on_outer_bottom =
-        center.y == virtual_bounds.bottom() && window_bounds.bottom() == virtual_bounds.bottom();
-    if !on_outer_right && !on_outer_bottom {
+    // 只有窗口本身就是一台显示器时，窗口的右/下边才可能是显示器边界。
+    if !displays.contains(&window_bounds) {
+        return None;
+    }
+    let on_right = center.x == window_bounds.right();
+    let on_bottom = center.y == window_bounds.bottom();
+    if !on_right && !on_bottom {
+        return None;
+    }
+    // 外侧 1px 处被其他显示器覆盖 → 内部屏缝，控制点仍归右/下那个窗口。
+    let exposed_right = on_right
+        && !covered_by_display(
+            displays,
+            PhysicalPoint {
+                x: window_bounds.right(),
+                y: center.y,
+            },
+        );
+    let exposed_bottom = on_bottom
+        && !covered_by_display(
+            displays,
+            PhysicalPoint {
+                x: center.x,
+                y: window_bounds.bottom(),
+            },
+        );
+    if !exposed_right && !exposed_bottom {
         return None;
     }
     let clamped = PhysicalPoint {
-        x: if on_outer_right {
+        x: if exposed_right {
             window_bounds.right().saturating_sub(1)
         } else {
             center.x
         },
-        y: if on_outer_bottom {
+        y: if exposed_bottom {
             window_bounds.bottom().saturating_sub(1)
         } else {
             center.y
@@ -218,6 +243,11 @@ fn owned_center(
     window_bounds
         .contains(clamped)
         .then(|| local_point(clamped, window_bounds))
+}
+
+/// 半开区间判定：`point` 是否落在任意一台显示器内。
+fn covered_by_display(displays: &[PhysicalRect], point: PhysicalPoint) -> bool {
+    displays.iter().any(|bounds| bounds.contains(point))
 }
 
 /// 全局坐标 → 窗口本地坐标（窗口客户区左上角 = 显示器 `bounds` 左上角）。
@@ -953,7 +983,7 @@ mod tests {
     fn handles_for_single_screen_are_all_local() {
         let selection = PhysicalRect::new(100, 50, 400, 300);
         let window = PhysicalRect::new(0, 0, 2560, 1440);
-        let handles = handles_for_window(selection, window, window);
+        let handles = handles_for_window(selection, window, &[window]);
         assert_eq!(handle_list(&handles).len(), 8);
         // 全局坐标减去窗口原点：单屏原点 (0,0) 时本地坐标与全局相同。
         assert_eq!(
@@ -974,11 +1004,11 @@ mod tests {
     fn cross_screen_handles_split_between_windows() {
         let left = PhysicalRect::new(0, 0, 2560, 1440);
         let right = PhysicalRect::new(2560, 0, 2560, 1440);
-        let virtual_bounds = PhysicalRect::new(0, 0, 5120, 1440);
+        let displays = [left, right];
         // 选区横跨两台显示器：x 2400..2800，y 100..300。
         let selection = PhysicalRect::new(2400, 100, 400, 200);
 
-        let left_handles = handles_for_window(selection, left, virtual_bounds);
+        let left_handles = handles_for_window(selection, left, &displays);
         assert_eq!(
             handle_list(&left_handles),
             vec![Handle::NorthWest, Handle::SouthWest, Handle::West]
@@ -988,7 +1018,7 @@ mod tests {
             PhysicalPoint { x: 2400, y: 200 }
         );
 
-        let right_handles = handles_for_window(selection, right, virtual_bounds);
+        let right_handles = handles_for_window(selection, right, &displays);
         assert_eq!(
             handle_list(&right_handles),
             vec![
@@ -1017,9 +1047,10 @@ mod tests {
     fn handles_handle_negative_origin_and_offscreen_selection() {
         // 副屏在主屏左侧：原点 x = -2560。
         let negative = PhysicalRect::new(-2560, 0, 2560, 1440);
-        let virtual_bounds = PhysicalRect::new(-2560, 0, 5120, 1440);
+        let elsewhere = PhysicalRect::new(0, 0, 2560, 1440);
+        let displays = [negative, elsewhere];
         let selection = PhysicalRect::new(-300, 10, 200, 100);
-        let handles = handles_for_window(selection, negative, virtual_bounds);
+        let handles = handles_for_window(selection, negative, &displays);
         assert_eq!(handles.len(), 8);
         assert_eq!(
             find(&handles, Handle::NorthWest),
@@ -1027,24 +1058,20 @@ mod tests {
         );
 
         // 选区完全不在本显示器内（虚拟屏幕的屏间空隙）时没有任何控制点。
-        let elsewhere = PhysicalRect::new(0, 0, 2560, 1440);
-        assert!(handles_for_window(selection, elsewhere, virtual_bounds).is_empty());
+        assert!(handles_for_window(selection, elsewhere, &displays).is_empty());
         // 空选区同理。
-        assert!(handles_for_window(PhysicalRect::default(), negative, virtual_bounds).is_empty());
+        assert!(handles_for_window(PhysicalRect::default(), negative, &displays).is_empty());
     }
 
     #[test]
     fn handle_on_seam_belongs_to_right_window_only() {
         let left = PhysicalRect::new(0, 0, 2560, 1440);
         let right = PhysicalRect::new(2560, 0, 2560, 1440);
-        let virtual_bounds = PhysicalRect::new(0, 0, 5120, 1440);
+        let displays = [left, right];
         // 左边界正好压在分界线上（半开区间 → 归属右屏）。
         let selection = PhysicalRect::new(2560, 100, 100, 100);
-        assert!(handles_for_window(selection, left, virtual_bounds).is_empty());
-        assert_eq!(
-            handles_for_window(selection, right, virtual_bounds).len(),
-            8
-        );
+        assert!(handles_for_window(selection, left, &displays).is_empty());
+        assert_eq!(handles_for_window(selection, right, &displays).len(), 8);
     }
 
     #[test]
@@ -1053,7 +1080,7 @@ mod tests {
         let screen = PhysicalRect::new(0, 0, 2560, 1440);
         let selection = PhysicalRect::new(2160, 100, 400, 200);
         assert_eq!(selection.right(), screen.right());
-        let handles = handles_for_window(selection, screen, screen);
+        let handles = handles_for_window(selection, screen, &[screen]);
         // 贴右边缘的一列控制点必须画出来（回归：半开 contains 曾把它们全部过滤掉）。
         assert_eq!(handles.len(), 8);
         // 中心夹到窗口最后一个像素：全局 2559 → 本地 2559。
@@ -1080,7 +1107,7 @@ mod tests {
             (selection.right(), selection.bottom()),
             (screen.right(), screen.bottom())
         );
-        let handles = handles_for_window(selection, screen, screen);
+        let handles = handles_for_window(selection, screen, &[screen]);
         assert_eq!(handles.len(), 8);
         assert_eq!(
             find(&handles, Handle::South),
@@ -1101,12 +1128,12 @@ mod tests {
         // 主屏 (0,0)，副屏在主屏**下方左侧**（负 x + 正 y）：虚拟屏 right/bottom 都由副屏决定。
         let primary = PhysicalRect::new(0, 0, 2560, 1440);
         let secondary = PhysicalRect::new(-2560, 1440, 2560, 1440);
-        let virtual_bounds = PhysicalRect::new(-2560, 0, 5120, 2880);
-        // 副屏上的选区贴住虚拟屏下沿。
+        let displays = [primary, secondary];
+        // 副屏上的选区贴住虚拟屏下沿（副屏下沿临空）。
         let selection = PhysicalRect::new(-2000, 2580, 400, 300);
-        assert_eq!(selection.bottom(), virtual_bounds.bottom());
+        assert_eq!(selection.bottom(), secondary.bottom());
 
-        let secondary_handles = handles_for_window(selection, secondary, virtual_bounds);
+        let secondary_handles = handles_for_window(selection, secondary, &displays);
         assert_eq!(secondary_handles.len(), 8);
         // 副屏原点 (-2560, 1440)：全局 (-1600, 2879) → 本地 (960, 1439)。
         assert_eq!(
@@ -1119,11 +1146,11 @@ mod tests {
         );
 
         // 主屏下边不是虚拟屏下沿，且 y 范围不含这些点：一个控制点也不归主屏。
-        assert!(handles_for_window(selection, primary, virtual_bounds).is_empty());
+        assert!(handles_for_window(selection, primary, &displays).is_empty());
 
         // 选区贴虚拟屏左沿（负坐标）时，左列控制点仍归副屏且本地 x = 0。
         let flush_left = PhysicalRect::new(-2560, 1500, 200, 100);
-        let left_handles = handles_for_window(flush_left, secondary, virtual_bounds);
+        let left_handles = handles_for_window(flush_left, secondary, &displays);
         assert_eq!(left_handles.len(), 8);
         assert_eq!(
             find(&left_handles, Handle::West),
@@ -1136,12 +1163,12 @@ mod tests {
         // 横向双屏：选区右边界正好压在内部屏缝上。
         let left = PhysicalRect::new(0, 0, 2560, 1440);
         let right = PhysicalRect::new(2560, 0, 2560, 1440);
-        let virtual_bounds = PhysicalRect::new(0, 0, 5120, 1440);
+        let displays = [left, right];
         let selection = PhysicalRect::new(2400, 100, 160, 200);
         assert_eq!(selection.right(), left.right());
 
-        let left_handles = handles_for_window(selection, left, virtual_bounds);
-        let right_handles = handles_for_window(selection, right, virtual_bounds);
+        let left_handles = handles_for_window(selection, left, &displays);
+        let right_handles = handles_for_window(selection, right, &displays);
         // 屏缝上的三个控制点（NE/SE/E）只归右屏；左屏只剩不在屏缝上的五个。
         assert_eq!(
             handle_list(&left_handles),
@@ -1162,11 +1189,11 @@ mod tests {
         // 竖直双屏：水平屏缝同理，分界行只归下方的窗口。
         let top = PhysicalRect::new(0, 0, 2560, 1440);
         let bottom = PhysicalRect::new(0, 1440, 2560, 1440);
-        let stacked = PhysicalRect::new(0, 0, 2560, 2880);
+        let displays = [top, bottom];
         let selection = PhysicalRect::new(100, 1340, 200, 100);
         assert_eq!(selection.bottom(), top.bottom());
-        let top_handles = handles_for_window(selection, top, stacked);
-        let bottom_handles = handles_for_window(selection, bottom, stacked);
+        let top_handles = handles_for_window(selection, top, &displays);
+        let bottom_handles = handles_for_window(selection, bottom, &displays);
         assert_eq!(
             handle_list(&top_handles),
             vec![
@@ -1190,15 +1217,190 @@ mod tests {
         // 的窗口即使几何上在另一维对齐也不能接收。
         let left = PhysicalRect::new(0, 0, 2560, 1440);
         let right = PhysicalRect::new(2560, 0, 2560, 1440);
-        let virtual_bounds = PhysicalRect::new(0, 0, 5120, 1440);
+        let displays = [left, right];
         let selection = PhysicalRect::new(4720, 100, 400, 200);
-        assert_eq!(selection.right(), virtual_bounds.right());
+        assert_eq!(selection.right(), right.right());
 
+        assert_eq!(handles_for_window(selection, right, &displays).len(), 8);
+        assert!(handles_for_window(selection, left, &displays).is_empty());
+    }
+
+    #[test]
+    fn exposed_bottom_edge_of_shorter_display_owns_handles() {
+        // 主屏 2560×1440 + 右侧较矮副屏 2560×720：副屏下沿外侧没有其他显示器覆盖
+        //（主屏的 y 范围虽包含 720，但 x 范围不覆盖副屏所在列）→ 临空边。
+        let primary = PhysicalRect::new(0, 0, 2560, 1440);
+        let secondary = PhysicalRect::new(2560, 0, 2560, 720);
+        let displays = [primary, secondary];
+        let selection = PhysicalRect::new(2800, 520, 400, 200);
+        assert_eq!(selection.bottom(), secondary.bottom());
+
+        let handles = handles_for_window(selection, secondary, &displays);
+        assert_eq!(handles.len(), 8);
+        // 下沿中心夹到副屏最后一个像素：全局 y = 719 → 本地 719。
         assert_eq!(
-            handles_for_window(selection, right, virtual_bounds).len(),
-            8
+            find(&handles, Handle::SouthWest),
+            PhysicalPoint { x: 240, y: 719 }
         );
-        assert!(handles_for_window(selection, left, virtual_bounds).is_empty());
+        assert_eq!(
+            find(&handles, Handle::South),
+            PhysicalPoint { x: 440, y: 719 }
+        );
+        assert_eq!(
+            find(&handles, Handle::SouthEast),
+            PhysicalPoint { x: 640, y: 719 }
+        );
+
+        // 主屏在 x 上完全不含该选区：一个控制点也不归它（不重复绘制）。
+        assert!(handles_for_window(selection, primary, &displays).is_empty());
+    }
+
+    #[test]
+    fn exposed_right_edge_of_narrower_display_owns_handles() {
+        // 主屏 2560×1440 + 右侧较窄副屏 1280×1440：副屏右沿临空。
+        let primary = PhysicalRect::new(0, 0, 2560, 1440);
+        let secondary = PhysicalRect::new(2560, 0, 1280, 1440);
+        let displays = [primary, secondary];
+        let selection = PhysicalRect::new(3440, 100, 400, 200);
+        assert_eq!(selection.right(), secondary.right());
+
+        let handles = handles_for_window(selection, secondary, &displays);
+        assert_eq!(handles.len(), 8);
+        // 右沿中心夹到副屏最后一个像素：全局 x = 3839 → 本地 1279。
+        assert_eq!(
+            find(&handles, Handle::NorthEast),
+            PhysicalPoint { x: 1279, y: 100 }
+        );
+        assert_eq!(
+            find(&handles, Handle::East),
+            PhysicalPoint { x: 1279, y: 200 }
+        );
+        assert_eq!(
+            find(&handles, Handle::SouthEast),
+            PhysicalPoint { x: 1279, y: 300 }
+        );
+
+        assert!(handles_for_window(selection, primary, &displays).is_empty());
+    }
+
+    #[test]
+    fn interior_seam_is_not_claimed_by_both_windows() {
+        // 屏缝两侧高度不同：分界线外侧有其他显示器覆盖，仍只归右/下窗口。
+        let primary = PhysicalRect::new(0, 0, 2560, 1440);
+        let shorter = PhysicalRect::new(2560, 0, 2560, 720);
+        let displays = [primary, shorter];
+        let selection = PhysicalRect::new(2400, 100, 160, 200);
+        assert_eq!(selection.right(), primary.right());
+
+        let left_handles = handles_for_window(selection, primary, &displays);
+        let right_handles = handles_for_window(selection, shorter, &displays);
+        assert_eq!(
+            handle_list(&left_handles),
+            vec![
+                Handle::NorthWest,
+                Handle::SouthWest,
+                Handle::North,
+                Handle::South,
+                Handle::West
+            ]
+        );
+        assert_eq!(
+            handle_list(&right_handles),
+            vec![Handle::NorthEast, Handle::SouthEast, Handle::East]
+        );
+        assert_eq!(left_handles.len() + right_handles.len(), 8);
+
+        // 横向屏缝、下方显示器较窄：分界行只归下方窗口。
+        let upper = PhysicalRect::new(0, 0, 2560, 720);
+        let lower = PhysicalRect::new(0, 720, 1280, 720);
+        let displays = [upper, lower];
+        let selection = PhysicalRect::new(100, 620, 200, 100);
+        assert_eq!(selection.bottom(), upper.bottom());
+
+        let upper_handles = handles_for_window(selection, upper, &displays);
+        let lower_handles = handles_for_window(selection, lower, &displays);
+        assert_eq!(
+            handle_list(&upper_handles),
+            vec![
+                Handle::NorthWest,
+                Handle::NorthEast,
+                Handle::North,
+                Handle::East,
+                Handle::West
+            ]
+        );
+        assert_eq!(
+            handle_list(&lower_handles),
+            vec![Handle::SouthEast, Handle::SouthWest, Handle::South]
+        );
+        assert_eq!(upper_handles.len() + lower_handles.len(), 8);
+    }
+
+    #[test]
+    fn negative_origin_display_exposed_bottom_edge_owns_handles() {
+        // 主屏较矮，副屏在主屏左侧且更高（负 x）：副屏下沿临空。
+        let primary = PhysicalRect::new(0, 0, 2560, 720);
+        let secondary = PhysicalRect::new(-2560, 0, 2560, 1440);
+        let displays = [primary, secondary];
+        let selection = PhysicalRect::new(-2000, 1240, 400, 200);
+        assert_eq!(selection.bottom(), secondary.bottom());
+
+        let handles = handles_for_window(selection, secondary, &displays);
+        assert_eq!(handles.len(), 8);
+        // 副屏原点 (-2560, 0)：全局 (-1600, 1439) → 本地 (960, 1439)。
+        assert_eq!(
+            find(&handles, Handle::SouthEast),
+            PhysicalPoint { x: 960, y: 1439 }
+        );
+        assert_eq!(
+            find(&handles, Handle::South),
+            PhysicalPoint { x: 760, y: 1439 }
+        );
+        assert_eq!(
+            find(&handles, Handle::SouthWest),
+            PhysicalPoint { x: 560, y: 1439 }
+        );
+
+        // 主屏的 y 范围不含该选区：一个控制点也不归它。
+        assert!(handles_for_window(selection, primary, &displays).is_empty());
+    }
+
+    #[test]
+    fn virtual_outer_edges_still_reach_the_last_pixel() {
+        // 主屏 2560×1440 + 右侧较矮副屏 2560×720：虚拟屏右沿在副屏、下沿在主屏。
+        let primary = PhysicalRect::new(0, 0, 2560, 1440);
+        let secondary = PhysicalRect::new(2560, 0, 2560, 720);
+        let displays = [primary, secondary];
+
+        // 贴虚拟屏右沿：右列控制点归副屏，夹到本屏最后一个像素。
+        let right = PhysicalRect::new(4720, 100, 400, 200);
+        assert_eq!(right.right(), secondary.right());
+        let right_handles = handles_for_window(right, secondary, &displays);
+        assert_eq!(right_handles.len(), 8);
+        assert_eq!(
+            find(&right_handles, Handle::East),
+            PhysicalPoint { x: 2559, y: 200 }
+        );
+        assert_eq!(
+            find(&right_handles, Handle::SouthEast),
+            PhysicalPoint { x: 2559, y: 300 }
+        );
+        assert!(handles_for_window(right, primary, &displays).is_empty());
+
+        // 贴虚拟屏下沿：下行控制点归主屏，夹到本屏最后一个像素。
+        let bottom = PhysicalRect::new(2160, 1140, 400, 300);
+        assert_eq!(bottom.bottom(), primary.bottom());
+        let bottom_handles = handles_for_window(bottom, primary, &displays);
+        assert_eq!(bottom_handles.len(), 8);
+        assert_eq!(
+            find(&bottom_handles, Handle::South),
+            PhysicalPoint { x: 2360, y: 1439 }
+        );
+        assert_eq!(
+            find(&bottom_handles, Handle::SouthEast),
+            PhysicalPoint { x: 2559, y: 1439 }
+        );
+        assert!(handles_for_window(bottom, secondary, &displays).is_empty());
     }
 
     #[test]

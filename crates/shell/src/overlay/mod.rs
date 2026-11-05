@@ -359,8 +359,8 @@ struct SceneView {
     hover_label_owner: Option<usize>,
     notice: Option<String>,
     badge_alpha: f32,
-    /// 所有显示器边界的并集（虚拟屏范围）；控制点贴虚拟屏右/下外沿时判归属用。
-    virtual_bounds: PhysicalRect,
+    /// 所有显示器的 bounds；控制点贴显示器临空边（含虚拟屏外沿）时判归属用。
+    display_bounds: Vec<PhysicalRect>,
 }
 
 /// 覆盖层线程独占的状态；D3D/D2D 资源只在这里创建和使用。
@@ -595,7 +595,7 @@ impl OverlayThread {
             notice: None,
             // 首帧的角标完全不透明；淡出由 `BADGE_*` 计时器驱动。
             badge_alpha: 1.0,
-            virtual_bounds: union_bounds(&bounds),
+            display_bounds: bounds,
         };
 
         let mut first_present_ms = None;
@@ -844,7 +844,7 @@ impl OverlayThread {
             hover_label_owner: hover.and_then(|rect| label_owner_top_left(rect, &bounds)),
             notice: self.notice.as_ref().map(|notice| notice.text.to_string()),
             badge_alpha: self.badge_alpha(now),
-            virtual_bounds: union_bounds(&bounds),
+            display_bounds: bounds,
         };
 
         let cursor = input::cursor_point();
@@ -884,8 +884,8 @@ impl OverlayThread {
     /// 与窗口不相交的元素置 `None`（该窗口本来也画不出来）；`dpi` 用于控制点尺寸。
     /// 选区矩形**不**与窗口求交：越界部分交给 D2D 裁剪，这样跨屏选区不会在屏间缝隙
     /// 多画一条边框。控制点与标签只在该元素的归属窗口上出现（跨屏不重复绘制）；
-    /// 控制点归属需要虚拟屏范围（[`SceneView::virtual_bounds`]）来判断「贴屏幕右/下
-    /// 外沿的控制点该归谁」。
+    /// 控制点归属需要全部显示器 bounds（[`SceneView::display_bounds`]）来判断「贴显示器
+    /// 临空边（含虚拟屏外沿）的控制点该归谁」。
     fn build_scene(&self, index: usize, view: &SceneView) -> render::Scene {
         let window = &self.windows[index];
         let origin = window.bounds;
@@ -906,7 +906,7 @@ impl OverlayThread {
         let hover = view.hover.and_then(local);
         let handles = view
             .selection
-            .map(|rect| render::handles_for_window(rect, origin, view.virtual_bounds))
+            .map(|rect| render::handles_for_window(rect, origin, &view.display_bounds))
             .unwrap_or_default();
         render::Scene {
             selection,
@@ -1414,13 +1414,6 @@ impl OverlayThread {
         }
         false
     }
-}
-
-/// 虚拟屏范围：所有显示器边界的并集；空列表返回零矩形。
-fn union_bounds(bounds: &[PhysicalRect]) -> PhysicalRect {
-    bounds
-        .iter()
-        .fold(PhysicalRect::default(), |acc, rect| acc.union(rect))
 }
 
 /// 「选区过小」提示期的输入门控：返回 `true` 表示该事件被提示吞掉。
@@ -1965,27 +1958,6 @@ mod tests {
         stats.record_input(Duration::from_micros(2500));
         assert_eq!(stats.input_samples, 1);
         assert!((ms(stats.input_max) - 2.5).abs() < 1e-9);
-    }
-
-    #[test]
-    fn union_bounds_covers_all_displays() {
-        // 空列表 → 零矩形（`build_scene` 在没有窗口时也不会 panic）。
-        assert_eq!(union_bounds(&[]), PhysicalRect::default());
-
-        // 负坐标副屏 + 主屏：并集覆盖整个虚拟屏。
-        let secondary = PhysicalRect::new(-2560, 0, 2560, 1440);
-        let primary = PhysicalRect::new(0, 0, 2560, 1440);
-        assert_eq!(
-            union_bounds(&[secondary, primary]),
-            PhysicalRect::new(-2560, 0, 5120, 1440)
-        );
-
-        // 竖直错位：下沿取最靠下的显示器。
-        let lower = PhysicalRect::new(-2560, 1440, 2560, 1440);
-        assert_eq!(
-            union_bounds(&[primary, lower]),
-            PhysicalRect::new(-2560, 0, 5120, 2880)
-        );
     }
 
     #[test]
