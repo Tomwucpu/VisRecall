@@ -1163,6 +1163,8 @@ Expected: 每台显示器出现覆盖窗口；文字清晰；无闪烁；关闭�
 
 把结果写入 `verification.md` 的「D3D11 门禁」表。若 2 周内不达标，停止本任务后续，按 `design.md` §7.3 降级并更新 spec。
 
+> 阶段 01 验收（2026-11-05）：本机无 PresentMon，PresentMon 交叉验证已登记为阶段 02 延期；合成 4K 数据见 verification.md。
+
 - [x] **Step 4: 提交**
 
 ```bash
@@ -1630,6 +1632,8 @@ Expected:
 - 微信拖图片 → 图片素材；
 - 拖文件夹/PDF/压缩包 → 拒绝提示；
 - 拖拽中 Esc → 无记录。
+
+> 阶段 01 验收（2026-11-05）：物理 Chrome/Word/资源管理器/微信拖放为 NOT RUN；已用真实 OLE 管线（真实 RegisterDragDrop/IDataObject/DoDragDrop）12 场景 + 13 单测替代，详见 verification.md E.9。
 
 - [x] **Step 5: 提交**
 
