@@ -6,6 +6,7 @@ pub mod app;
 pub mod capture_flow;
 pub mod events;
 pub mod import_flow;
+pub mod thumbnail;
 
 pub use app::AppCore;
 pub use capture_flow::{
@@ -17,6 +18,7 @@ pub use events::{
     ItemUpdatedEvent, NullEventSink, RecordingSink,
 };
 pub use import_flow::ImportFlow;
+pub use thumbnail::{generate_thumbnail, load_thumb_bytes};
 pub use visrecall_domain::AppError;
 pub use visrecall_library::paths::AppPaths;
 pub use visrecall_library::{AppConfig, Library};

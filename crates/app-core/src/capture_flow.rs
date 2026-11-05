@@ -1,6 +1,9 @@
 //! 捕获编排与落盘：快捷键/托盘触发 → 记录来源 → 隐藏自有窗口 → 抓帧 → 覆盖层，
 //! 以及覆盖层提交后的 PNG 编码、临时文件 → `rename` → 入库（design §5、§10.2）。
 //!
+//! 入库并发 `item_created` 之后，缩略图（`thumbs/<id>.png`）派发到独立的
+//! `visrecall-thumb` 线程生成（[`crate::thumbnail`]），捕获循环不等它完成。
+//!
 //! 线程模型（design §3）：本模块的方法在 app-core 的捕获循环线程上同步执行；
 //! 抓帧与窗口探针通过 trait 注入，覆盖层通过 [`OverlayPresenter`]（生产实现为
 //! [`OverlayHandle`]）投递，便于用假实现测试失败分支。
@@ -35,6 +38,7 @@ use visrecall_shell::overlay::OverlayHandle;
 use visrecall_shell::{CaptureTrigger, OverlayEvent};
 
 use crate::events::{AppEvent, CaptureFailedEvent, EventSink, ItemEvent};
+use crate::thumbnail;
 
 /// 开始捕获所需的最低可用空间（design §12：<2GB 拒绝新捕获，保留浏览）。
 pub const MIN_FREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -268,6 +272,8 @@ impl CaptureCoordinator {
                         self.sink.emit(AppEvent::ItemCreated(ItemEvent {
                             id: item.id.clone(),
                         }));
+                        // 缩略图在独立线程生成（design §10.2）：捕获循环不等 PNG 解码/缩放。
+                        self.spawn_thumbnail(item.id);
                         Ok(())
                     }
                     Err(err) => {
@@ -295,6 +301,19 @@ impl CaptureCoordinator {
     pub fn recover_after_panic(&self) {
         self.clear_session();
         self.visibility.show_own_windows();
+    }
+
+    /// 派发缩略图任务（`item_created` 之后调用，前端先拿到素材再收到状态更新）。
+    ///
+    /// 线程起不来只记录日志：素材保持 `parsing`，卡片显示占位（design §12 允许的降级）。
+    fn spawn_thumbnail(&self, item_id: String) {
+        if let Err(err) = thumbnail::spawn_thumbnail(
+            Arc::clone(&self.library),
+            Arc::clone(&self.sink),
+            item_id.clone(),
+        ) {
+            warn!(id = %item_id, error = %err, "failed to spawn the thumbnail worker");
+        }
     }
 
     fn session_is_active(&self) -> bool {
@@ -540,8 +559,20 @@ pub(crate) fn write_bytes_atomic(
     target: &Path,
     bytes: &[u8],
 ) -> Result<(), AppError> {
-    let tmp_dir = root.join("tmp");
-    fs::create_dir_all(&tmp_dir)
+    write_bytes_atomic_in(&root.join("tmp"), tmp_id, target, bytes)
+}
+
+/// 同 [`write_bytes_atomic`]，但临时目录由调用方指定。
+///
+/// 缩略图写在 `thumbs/` 旁边，避免与捕获的 `tmp/` 启动清理策略互相影响；
+/// 临时文件仍在同一卷上，`rename` 保持原子。
+pub(crate) fn write_bytes_atomic_in(
+    tmp_dir: &Path,
+    tmp_id: &str,
+    target: &Path,
+    bytes: &[u8],
+) -> Result<(), AppError> {
+    fs::create_dir_all(tmp_dir)
         .map_err(|err| AppError::Io(format!("create dir {}: {err}", tmp_dir.display())))?;
     let tmp = tmp_dir.join(format!("{tmp_id}.tmp"));
 
@@ -904,17 +935,35 @@ mod tests {
 
         assert_eq!(fixture.visibility.shows(), 1);
         let events = fixture.sink.events();
-        assert_eq!(events.len(), 1);
+        assert!(!events.is_empty());
+        // 缩略图在 `item_created` 之后异步生成：首个事件必须是 item_created。
         assert_eq!(events[0].name(), "item_created");
 
         let library = fixture.coordinator.library.clone();
         let items = library.list_items(None, 10).unwrap();
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].status, ItemStatus::Parsing);
         assert_eq!(items[0].width, Some(2));
         assert_eq!(items[0].height, Some(1));
         assert!(items[0].original_path.starts_with("originals/images/"));
         assert!(Path::new(&items[0].original_path).is_relative());
+
+        // 缩略图线程在 5s 内把素材转 `ready` 并写入 `thumbs/<id>.png`。
+        let id = items[0].id.clone();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let stored = loop {
+            let stored = library.get_item(&id).unwrap().unwrap();
+            if stored.status == ItemStatus::Ready {
+                break stored;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "capture thumbnail was not generated within 5s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        let thumb = format!("thumbs/{id}.png");
+        assert_eq!(stored.thumb_path.as_deref(), Some(thumb.as_str()));
+        assert!(library.root().join(&thumb).exists());
 
         // 会话结束后重复的结束事件被忽略：不再恢复窗口、不再落盘。
         fixture

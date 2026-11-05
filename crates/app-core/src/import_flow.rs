@@ -9,7 +9,8 @@
 //! 统一发 `item_created`。
 //!
 //! 阶段 01 的边界：
-//! - 图片（含 `ImageDib`）保持 `parsing`，缩略图由 Task 17 生成后转 `ready`；
+//! - 图片（含 `ImageDib`）先以 `parsing` 入库；[`ImportFlow::emit_created`] 发完
+//!   `item_created` 后把缩略图派发到后台线程，成功转 `ready`、失败转 `failed`；
 //! - 文本/链接没有缩略图，写入后立即标 `ready`；
 //! - 链接标题抓取是阻塞调用（5s 超时、响应体最多 512KB），失败时标题回退 URL。
 
@@ -31,6 +32,7 @@ use visrecall_library::Library;
 
 use crate::capture_flow::{encode_rgba_png, image_target, write_bytes_atomic};
 use crate::events::{AppEvent, CaptureFailedEvent, EventSink, ItemEvent};
+use crate::thumbnail;
 
 /// 一次拖放最多导入的文件数（P1-R09）。
 pub const MAX_IMPORT_FILES: usize = 20;
@@ -105,11 +107,23 @@ impl ImportFlow {
     }
 
     /// 导入成功后由核心循环调用：为每个新素材发 `item_created`。
+    ///
+    /// 发完 `item_created` 再派发图片缩略图任务（后台线程，`thumbs/<id>.png`），
+    /// 保证前端先拿到素材、后收到 `item_updated`；文本/链接没有缩略图，跳过。
     pub fn emit_created(&self, items: &[Item]) {
         for item in items {
             self.sink.emit(AppEvent::ItemCreated(ItemEvent {
                 id: item.id.clone(),
             }));
+        }
+        for item in items.iter().filter(|item| item.kind == ItemKind::Image) {
+            if let Err(err) = thumbnail::spawn_thumbnail(
+                Arc::clone(&self.library),
+                Arc::clone(&self.sink),
+                item.id.clone(),
+            ) {
+                warn!(id = %item.id, error = %err, "failed to spawn the thumbnail worker");
+            }
         }
     }
 
@@ -881,6 +895,67 @@ mod tests {
             fs::read(&path).unwrap(),
             fs::read(&source).unwrap().as_slice()
         );
+    }
+
+    /// Task 17：图片导入后 `emit_created` 派发缩略图，最终转 `ready` 并带 `thumbs/<id>.png`。
+    #[test]
+    fn imported_image_gets_a_thumbnail_after_item_created() {
+        let fixture = fixture();
+        let source = fixture._dir.path().join("big.png");
+        write_image(&source, 1000, 500);
+
+        let items = fixture
+            .flow
+            .ingest(DropContent::Files(vec![source]))
+            .unwrap();
+        fixture.flow.emit_created(&items);
+        // `item_created` 先于缩略图更新事件发出。
+        assert_eq!(fixture.sink.events()[0].name(), "item_created");
+
+        let id = items[0].id.clone();
+        let thumb = format!("thumbs/{id}.png");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let stored = fixture.library.get_item(&id).unwrap().unwrap();
+            if stored.status == ItemStatus::Ready {
+                assert_eq!(stored.thumb_path.as_deref(), Some(thumb.as_str()));
+                assert!(fixture.library.root().join(&thumb).exists());
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "imported image was not thumbnailed within 5s"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(fixture
+            .sink
+            .events()
+            .iter()
+            .any(|event| event.name() == "item_updated"));
+    }
+
+    /// 文本没有缩略图：`emit_created` 后不产生 `thumbs/` 文件，状态保持 `ready`。
+    #[test]
+    fn imported_text_has_no_thumbnail() {
+        let fixture = fixture();
+        let items = fixture
+            .flow
+            .ingest(DropContent::Text {
+                plain: "没有缩略图".into(),
+                html: None,
+            })
+            .unwrap();
+        fixture.flow.emit_created(&items);
+
+        let stored = fixture.library.get_item(&items[0].id).unwrap().unwrap();
+        assert_eq!(stored.status, ItemStatus::Ready);
+        assert_eq!(stored.thumb_path, None);
+        let thumbs = fs::read_dir(fixture.library.root().join("thumbs"))
+            .unwrap()
+            .count();
+        assert_eq!(thumbs, 0);
+        assert_eq!(fixture.sink.events().len(), 1);
     }
 
     #[test]

@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod ipc;
+mod protocol;
 mod tray;
 mod window_lifecycle;
 
@@ -37,6 +38,9 @@ fn main() {
             window_lifecycle::show_main_window(app);
         }))
         .plugin(tauri_plugin_opener::init())
+        // 缩略图资源协议（design §11.3）：Windows 上实际地址为
+        // `http://visrecall.localhost/thumb/<id>`，只服务 `thumbs/` 下的文件。
+        .register_uri_scheme_protocol(protocol::SCHEME, protocol::handler)
         .invoke_handler(specta_builder.invoke_handler())
         .setup(|app| {
             let sink: Arc<dyn visrecall_app_core::EventSink> =
