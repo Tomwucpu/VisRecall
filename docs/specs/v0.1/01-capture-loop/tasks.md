@@ -1708,10 +1708,12 @@ git commit -m "feat(app): add thumbnails and custom protocol"
 ### Task 18: React 素材列表与事件刷新
 
 **Files:**
-- Modify: `src/app/App.tsx`
+- Modify: `src/app/App.tsx`, `src/main.tsx`, `src/styles/globals.css`
 - Create: `src/features/library/{ItemGrid.tsx,ItemCard.tsx,EmptyState.tsx,useItems.ts}`
 - Create: `src/lib/{queryClient.ts,events.ts,format.ts}`
 - Test: `src/features/library/ItemCard.test.tsx`
+
+> `convertFileSrc` 会把路径中的 `/` 编码为 `%2F`；自定义协议 URL 用 `convertFileSrc("thumb", "visrecall") + "/" + encodeURIComponent(id)` 拼接，避免 `/thumb%2F<id>` 被协议处理器拒绝。
 
 **Interfaces:**
 - Consumes: 生成的 `bindings.ts`、`item_created`/`item_updated`
