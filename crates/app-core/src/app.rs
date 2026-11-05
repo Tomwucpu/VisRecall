@@ -678,7 +678,16 @@ fn spawn_capture_loop(
                                 }
                                 CaptureStep::Continue
                             }
-                            Err(_) => CaptureStep::Exit,
+                            Err(_) => {
+                                // 覆盖层线程已退出（初始化后崩溃/命令通道断开）：先结束会话并
+                                // 恢复自有窗口，再退出捕获循环；否则主窗口会永久隐藏、会话标志
+                                // 也会残留，之后的快捷键全部被重入保护忽略。
+                                tracing::warn!(
+                                    "overlay channel closed; releasing the capture session before exit"
+                                );
+                                coordinator.release_windows();
+                                CaptureStep::Exit
+                            }
                         },
                     }
                 });
@@ -1063,48 +1072,129 @@ mod tests {
         assert!(sink.events().is_empty());
     }
 
+    /// 覆盖层通道断开（覆盖层线程退出）时，捕获循环必须结束会话、恢复自有窗口再退出。
+    ///
+    /// 不释放的话主窗口会永久隐藏、会话标志残留，之后的快捷键全部被重入保护忽略。
+    #[test]
+    fn closed_overlay_channel_releases_windows_before_the_loop_exits() {
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let library = Arc::new(Library::open(dir.path().join("loop-lib")).unwrap());
+        let sink = Arc::new(RecordingSink::default());
+
+        // 覆盖层事件通道立刻断开：等价于覆盖层线程已退出。
+        let (overlay_tx, overlay_rx) = crossbeam_channel::unbounded::<OverlayEvent>();
+        drop(overlay_tx);
+        let (shell_tx, shell_rx) = crossbeam_channel::unbounded::<ShellEvent>();
+
+        let visibility = Arc::new(RecordingVisibility::default());
+        let coordinator = CaptureCoordinator::with_overlay(
+            Arc::clone(&library),
+            Arc::new(NoopGrabber),
+            Arc::new(FakeProbe),
+            Arc::new(NoopOverlay),
+            Arc::clone(&visibility) as Arc<dyn WindowVisibility>,
+            Arc::clone(&sink) as Arc<dyn EventSink>,
+        );
+        let import = Arc::new(ImportFlow::new(
+            Arc::clone(&library),
+            Arc::new(FakeProbe),
+            Arc::clone(&sink) as Arc<dyn EventSink>,
+        ));
+
+        spawn_capture_loop(
+            coordinator,
+            import,
+            shell_rx,
+            overlay_rx,
+            Arc::new(Mutex::new(AppConfig::default())),
+            dir.path().join("config.json"),
+        )
+        .expect("spawn capture loop");
+
+        // 循环必须在通道断开后恢复一次自有窗口并退出。
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while visibility.shown.load(Ordering::SeqCst) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "capture loop did not release the own windows"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            visibility.shown.load(Ordering::SeqCst),
+            1,
+            "release must happen exactly once"
+        );
+        // 退出后不再处理事件：shell 通道保持打开但循环已结束。
+        drop(shell_tx);
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(visibility.shown.load(Ordering::SeqCst), 1);
+    }
+
+    /// 不触碰真实桌面的窗口探针（导入与捕获循环测试共用）。
+    struct FakeProbe;
+    impl visrecall_capture::WindowProbe for FakeProbe {
+        fn foreground(&self) -> Result<visrecall_domain::capture::ForegroundInfo, AppError> {
+            Ok(visrecall_domain::capture::ForegroundInfo {
+                hwnd: 0,
+                pid: 7,
+                process_name: "chrome.exe".into(),
+                display_name: "Chrome".into(),
+                title: "Example page".into(),
+                bounds: visrecall_domain::geometry::PhysicalRect::new(0, 0, 100, 100),
+            })
+        }
+        fn enumerate(&self) -> Result<Vec<visrecall_domain::WindowInfo>, AppError> {
+            Ok(Vec::new())
+        }
+        fn hit_chain(
+            &self,
+            _point: visrecall_domain::PhysicalPoint,
+        ) -> Result<Vec<visrecall_domain::WindowInfo>, AppError> {
+            Ok(Vec::new())
+        }
+        fn hit_chain_excluding(
+            &self,
+            _point: visrecall_domain::PhysicalPoint,
+            _excluded_pid: u32,
+        ) -> Result<Vec<visrecall_domain::WindowInfo>, AppError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// 不会真的抓帧的抓帧器（只用于不触发捕获的路径）。
+    struct NoopGrabber;
+
+    impl visrecall_capture::FrameGrabber for NoopGrabber {
+        fn grab(
+            &self,
+            _displays: &[visrecall_domain::capture::DisplayInfo],
+        ) -> Result<Vec<visrecall_domain::capture::RawFrame>, AppError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// 不会真的显示覆盖层的投递实现。
+    struct NoopOverlay;
+
+    impl crate::capture_flow::OverlayPresenter for NoopOverlay {
+        fn show(
+            &self,
+            _frames: Vec<visrecall_domain::capture::RawFrame>,
+            _displays: Vec<visrecall_domain::capture::DisplayInfo>,
+            _foreground: visrecall_domain::capture::ForegroundInfo,
+        ) -> Result<(), AppError> {
+            Ok(())
+        }
+    }
+
     /// I3：拖放导入在独立工作线程执行——派发立即返回，入库（含 `item_created`）
     /// 由工作线程完成，捕获循环不会被 5s 的 URL 抓取或批量转码占住。
     #[test]
     fn spawn_import_dispatches_to_a_worker_thread() {
         use std::time::{Duration, Instant};
-
-        use visrecall_capture::WindowProbe;
-        use visrecall_domain::capture::ForegroundInfo;
-        use visrecall_domain::geometry::PhysicalRect;
-        use visrecall_domain::WindowInfo;
-
-        /// 不触碰真实桌面的窗口探针。
-        struct FakeProbe;
-
-        impl WindowProbe for FakeProbe {
-            fn foreground(&self) -> Result<ForegroundInfo, AppError> {
-                Ok(ForegroundInfo {
-                    hwnd: 0,
-                    pid: 7,
-                    process_name: "chrome.exe".into(),
-                    display_name: "Chrome".into(),
-                    title: "Example page".into(),
-                    bounds: PhysicalRect::new(0, 0, 100, 100),
-                })
-            }
-            fn enumerate(&self) -> Result<Vec<WindowInfo>, AppError> {
-                Ok(Vec::new())
-            }
-            fn hit_chain(
-                &self,
-                _point: visrecall_domain::PhysicalPoint,
-            ) -> Result<Vec<WindowInfo>, AppError> {
-                Ok(Vec::new())
-            }
-            fn hit_chain_excluding(
-                &self,
-                _point: visrecall_domain::PhysicalPoint,
-                _excluded_pid: u32,
-            ) -> Result<Vec<WindowInfo>, AppError> {
-                Ok(Vec::new())
-            }
-        }
 
         let dir = tempfile::tempdir().unwrap();
         let library = Arc::new(Library::open(dir.path().join("import-lib")).unwrap());

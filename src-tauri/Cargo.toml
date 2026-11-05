@@ -19,6 +19,12 @@ tauri-specta = { version = "=2.0.0-rc.26", features = ["derive", "typescript"] }
 specta = { version = "=2.0.0-rc.26", features = ["derive", "function"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 tracing = { workspace = true }
+# 与 tauri 使用同一份 windows crate（0.62），`ShowWindow(hwnd, SW_SHOWNOACTIVATE)`
+# 才能在 tauri 的 `HWND` 上直接调用（主窗口恢复不能抢焦点）。
+windows = { version = "0.62.2", features = [
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
 tempfile = "3"

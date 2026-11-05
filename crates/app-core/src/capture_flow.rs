@@ -85,6 +85,70 @@ impl OverlayPresenter for OverlayHandle {
 /// 可用空间查询注入点（测试用它模拟磁盘将满）；生产实现是 [`files::free_space_bytes`]。
 pub type FreeSpaceProbe = Arc<dyn Fn(&Path) -> Result<u64, AppError> + Send + Sync>;
 
+/// 显示器枚举注入点（测试用它给出确定的显示器集合）；生产实现是 [`enumerate_displays`]。
+///
+/// 抓帧结果按 `display_id` 与这里返回的显示器配对，因此测试不能依赖真实桌面。
+pub type DisplayProbe = Arc<dyn Fn() -> Result<Vec<DisplayInfo>, AppError> + Send + Sync>;
+
+/// 一次抓帧里可用的帧/显示器配对，以及被丢弃的全黑显示器。
+///
+/// `frames` 与 `displays` 严格一一对应（覆盖层 `show` 的契约：帧按 `display_id` 找显示器）。
+struct FrameSelection {
+    frames: Vec<RawFrame>,
+    displays: Vec<DisplayInfo>,
+    /// 因全黑（疑似 DRM/显示器休眠）被丢弃的显示器 id。
+    blank_displays: Vec<String>,
+}
+
+/// 按 `display_id` 把帧与显示器配对，丢弃全黑帧及其显示器条目（P1-R03、design §5）。
+///
+/// 部分显示器全黑（副屏休眠、DPMS、DRM 窗口独占某块屏）不再让整次捕获失败：
+/// 只丢掉这些屏，其余屏继续显示覆盖层。**只有全部显示器都全黑**时调用方才会
+/// 报 [`AppError::DrmProtected`]。
+///
+/// 丢弃帧时必须同步丢弃对应的显示器条目，否则覆盖层要么拿到没有显示器的帧
+/// （`show` 报错），要么留下没有帧的显示器。保留顺序与输入一致：帧保持抓帧顺序、
+/// 显示器保持枚举顺序；没有对应显示器的帧无法显示，同样丢弃（正常路径不会出现）。
+///
+/// 由于保留**全部**可用屏，主屏/鼠标指针所在屏只要可用就一定保留。
+fn select_usable_frames(frames: Vec<RawFrame>, displays: Vec<DisplayInfo>) -> FrameSelection {
+    let mut kept = Vec::with_capacity(frames.len());
+    let mut blank_displays = Vec::new();
+
+    for frame in frames {
+        if !displays
+            .iter()
+            .any(|display| display.id == frame.display_id)
+        {
+            warn!(
+                display_id = %frame.display_id,
+                "frame has no matching display info; dropped"
+            );
+            continue;
+        }
+        if is_blank_frame(&frame) {
+            warn!(
+                display_id = %frame.display_id,
+                "captured frame is all black; dropping this display (suspected DRM or a sleeping display)"
+            );
+            blank_displays.push(frame.display_id.clone());
+            continue;
+        }
+        kept.push(frame);
+    }
+
+    let displays = displays
+        .into_iter()
+        .filter(|display| kept.iter().any(|frame| frame.display_id == display.id))
+        .collect();
+
+    FrameSelection {
+        frames: kept,
+        displays,
+        blank_displays,
+    }
+}
+
 /// 捕获编排：把一次 `CaptureRequest` 推进到「覆盖层显示冻结帧」，并在覆盖层
 /// 提交后完成落盘与入库。
 pub struct CaptureCoordinator {
@@ -95,6 +159,8 @@ pub struct CaptureCoordinator {
     visibility: Arc<dyn WindowVisibility>,
     sink: Arc<dyn EventSink>,
     free_space: FreeSpaceProbe,
+    /// 显示器枚举；测试注入固定的显示器集合，生产实现是 [`enumerate_displays`]。
+    displays: DisplayProbe,
     /// 是否有会话正在进行（`start` 占位 → 覆盖层结束 / `start` 失败时清除）。
     ///
     /// 捕获循环是单线程的，标志用于挡住「覆盖层还开着时又按快捷键」的重入：
@@ -133,6 +199,7 @@ impl CaptureCoordinator {
             visibility,
             sink,
             free_space: Arc::new(files::free_space_bytes),
+            displays: Arc::new(enumerate_displays),
             session_active: AtomicBool::new(false),
         }
     }
@@ -144,8 +211,15 @@ impl CaptureCoordinator {
         self
     }
 
+    /// 替换显示器枚举（测试专用，避免测试依赖真实显示器）。
+    #[doc(hidden)]
+    pub fn with_display_probe(mut self, probe: DisplayProbe) -> Self {
+        self.displays = probe;
+        self
+    }
+
     /// 开始一次捕获：空间检查 → 前台窗口 → 隐藏自有窗口 + `DwmFlush` → 抓帧 →
-    /// 全黑帧检查 → 覆盖层显示冻结帧。
+    /// 按显示器丢弃全黑帧（只有全部全黑才整次失败）→ 覆盖层显示冻结帧。
     ///
     /// 已有会话进行中时直接忽略（返回 `Ok`）：不隐藏窗口、不抓帧、不重复投递
     /// 覆盖层，避免第二次快捷键把第一个会话的冻结帧/窗口状态搅乱。
@@ -197,7 +271,7 @@ impl CaptureCoordinator {
             warn!(error = %err, "DwmFlush failed; grabbing without waiting for composition");
         }
 
-        let displays = match enumerate_displays() {
+        let displays = match (self.displays)() {
             Ok(displays) if !displays.is_empty() => displays,
             Ok(_) => {
                 let err = AppError::CaptureFailed("no displays available".into());
@@ -223,15 +297,34 @@ impl CaptureCoordinator {
             }
         };
 
-        // 全黑帧通常是 DRM 保护窗口或抓帧失败：丢弃，不显示覆盖层（P1-R03）。
-        if frames.iter().any(is_blank_frame) {
+        // 全黑帧通常是 DRM 保护窗口或显示器休眠：只丢弃这一屏（P1-R03、design §5）。
+        // 只有**全部**显示器都全黑时才整次失败，避免一块副屏休眠就毁掉整次捕获。
+        let selection = select_usable_frames(frames, displays);
+
+        if selection.frames.is_empty() {
             let err = AppError::DrmProtected;
-            warn!("captured frame is all black; suspected DRM protection");
+            warn!(
+                blank = %selection.blank_displays.join(", "),
+                "no usable frames after dropping blank displays; suspected DRM protection"
+            );
             self.abort_session(&err);
             return Err(err);
         }
 
-        if let Err(err) = self.overlay.show(frames, displays, foreground) {
+        if !selection.blank_displays.is_empty() {
+            // 部分屏全黑：提示一次被丢弃的显示器，但会话继续，其余屏幕照常显示覆盖层。
+            let dropped = selection.blank_displays.join(", ");
+            warn!(displays = %dropped, "blank displays dropped from this capture");
+            self.sink.emit(AppEvent::CaptureFailed(CaptureFailedEvent {
+                code: capture_failed_code(&AppError::DrmProtected).to_string(),
+                message: format!("dropped blank displays (suspected DRM): {dropped}"),
+            }));
+        }
+
+        if let Err(err) = self
+            .overlay
+            .show(selection.frames, selection.displays, foreground)
+        {
             warn!(error = %err, "overlay show failed");
             self.abort_session(&err);
             return Err(err);
@@ -294,11 +387,12 @@ impl CaptureCoordinator {
         }
     }
 
-    /// panic 兜底：清除会话标志并恢复自有窗口，避免捕获线程 panic 后窗口永久隐藏。
+    /// 兜底释放：清除会话标志并恢复自有窗口。
     ///
-    /// 由 [`guard_session`] 在捕获循环里调用；`show_own_windows` 幂等，
-    /// 即使 panic 发生在结束路径之后也不会重复显示窗口。
-    pub fn recover_after_panic(&self) {
+    /// 两处调用方共用：捕获线程某一步 panic（[`guard_session`]），以及覆盖层通道断开
+    /// 等**正常退出**路径——不释放的话，主窗口会一直隐藏、会话标志也会残留。
+    /// `show_own_windows` 幂等，即使会话已正常结束也不会重复显示窗口。
+    pub fn release_windows(&self) {
         self.clear_session();
         self.visibility.show_own_windows();
     }
@@ -393,7 +487,7 @@ pub fn guard_session<R>(coordinator: &CaptureCoordinator, work: impl FnOnce() ->
                 panic = %panic_message(payload.as_ref()),
                 "capture step panicked; own windows restored"
             );
-            coordinator.recover_after_panic();
+            coordinator.release_windows();
             None
         }
     }
@@ -618,6 +712,7 @@ fn non_empty(value: String) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
     use visrecall_domain::geometry::PhysicalRect;
     use visrecall_domain::ItemStatus;
@@ -625,11 +720,50 @@ mod tests {
     use super::*;
     use crate::events::RecordingSink;
 
-    /// 抓帧假实现：可配置「失败」与返回的帧内容，并记录调用次数。
+    /// 两台固定的假显示器（主屏 + 副屏）：测试不依赖真实桌面。
+    fn fake_displays() -> Vec<DisplayInfo> {
+        vec![
+            DisplayInfo {
+                id: "display-1".into(),
+                bounds: PhysicalRect::new(0, 0, 1920, 1080),
+                work_area: PhysicalRect::new(0, 0, 1920, 1040),
+                dpi: 96,
+                primary: true,
+            },
+            DisplayInfo {
+                id: "display-2".into(),
+                bounds: PhysicalRect::new(1920, 0, 1280, 1024),
+                work_area: PhysicalRect::new(1920, 0, 1280, 984),
+                dpi: 96,
+                primary: false,
+            },
+        ]
+    }
+
+    /// 1×1 的帧；`blank` 时 BGRA 四个通道全为 0（DRM 保护窗口的典型结果）。
+    fn frame_for(display_id: &str, blank: bool) -> RawFrame {
+        let pixel = if blank {
+            [0, 0, 0, 0]
+        } else {
+            [0x7F, 0x7F, 0x7F, 0xFF]
+        };
+        RawFrame {
+            display_id: display_id.to_string(),
+            width: 1,
+            height: 1,
+            stride: 4,
+            bgra: pixel.to_vec(),
+        }
+    }
+
+    /// 抓帧假实现：按传入的显示器逐台生成帧，可配置「失败」与「哪些显示器全黑」。
     struct FakeGrabber {
         calls: AtomicUsize,
         fail: AtomicBool,
+        /// `true` 时所有显示器都返回全黑帧。
         blank: bool,
+        /// 只让这些 display id 的帧全黑（用于部分屏 DRM/休眠的场景）。
+        blank_ids: Vec<String>,
     }
 
     impl FakeGrabber {
@@ -638,6 +772,17 @@ mod tests {
                 calls: AtomicUsize::new(0),
                 fail: AtomicBool::new(fail),
                 blank,
+                blank_ids: Vec::new(),
+            })
+        }
+
+        /// 只有 `ids` 里的显示器返回全黑帧，其余正常。
+        fn with_blank_ids(fail: bool, ids: &[&str]) -> Arc<Self> {
+            Arc::new(Self {
+                calls: AtomicUsize::new(0),
+                fail: AtomicBool::new(fail),
+                blank: false,
+                blank_ids: ids.iter().map(|id| (*id).to_string()).collect(),
             })
         }
 
@@ -651,24 +796,22 @@ mod tests {
     }
 
     impl FrameGrabber for FakeGrabber {
-        fn grab(&self, _displays: &[DisplayInfo]) -> Result<Vec<RawFrame>, AppError> {
+        fn grab(&self, displays: &[DisplayInfo]) -> Result<Vec<RawFrame>, AppError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if self.fail.load(Ordering::SeqCst) {
                 return Err(AppError::CaptureFailed("fake grab failure".into()));
             }
-            // `is_blank_frame` 要求 BGRA 四个通道全为 0（DRM 保护窗口的典型结果）。
-            let pixel = if self.blank {
-                [0, 0, 0, 0]
-            } else {
-                [0x7F, 0x7F, 0x7F, 0xFF]
-            };
-            Ok(vec![RawFrame {
-                display_id: "fake-display".into(),
-                width: 1,
-                height: 1,
-                stride: 4,
-                bgra: pixel.to_vec(),
-            }])
+            Ok(displays
+                .iter()
+                .map(|display| {
+                    let blank = self.blank
+                        || self
+                            .blank_ids
+                            .iter()
+                            .any(|id| id.as_str() == display.id.as_str());
+                    frame_for(&display.id, blank)
+                })
+                .collect())
         }
     }
 
@@ -707,10 +850,12 @@ mod tests {
         }
     }
 
-    /// 覆盖层假实现：只在成功时记录一次 `show`。
+    /// 覆盖层假实现：只在成功时记录一次 `show`，并保留最近一次的帧/显示器组合。
     struct FakeOverlay {
         shows: AtomicUsize,
         fail: AtomicBool,
+        /// 最近一次成功 `show` 的（帧 display id, 显示器 id），用于校验一一对应契约。
+        last: Mutex<Option<(Vec<String>, Vec<String>)>>,
     }
 
     impl FakeOverlay {
@@ -718,6 +863,7 @@ mod tests {
             Arc::new(Self {
                 shows: AtomicUsize::new(0),
                 fail: AtomicBool::new(fail),
+                last: Mutex::new(None),
             })
         }
 
@@ -728,18 +874,37 @@ mod tests {
         fn shows(&self) -> usize {
             self.shows.load(Ordering::SeqCst)
         }
+
+        /// 最近一次 `show` 收到的（帧 display id, 显示器 id）。
+        fn last_pair(&self) -> Option<(Vec<String>, Vec<String>)> {
+            self.last
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .clone()
+        }
     }
 
     impl OverlayPresenter for FakeOverlay {
         fn show(
             &self,
-            _frames: Vec<RawFrame>,
-            _displays: Vec<DisplayInfo>,
+            frames: Vec<RawFrame>,
+            displays: Vec<DisplayInfo>,
             _foreground: ForegroundInfo,
         ) -> Result<(), AppError> {
             if self.fail.load(Ordering::SeqCst) {
                 return Err(AppError::Internal("fake overlay failure".into()));
             }
+            let pair = (
+                frames
+                    .iter()
+                    .map(|frame| frame.display_id.clone())
+                    .collect(),
+                displays.iter().map(|display| display.id.clone()).collect(),
+            );
+            *self
+                .last
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = Some(pair);
             self.shows.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -794,7 +959,8 @@ mod tests {
             visibility.clone(),
             sink.clone(),
         )
-        .with_free_space_probe(Arc::new(move |_path: &Path| Ok(free)));
+        .with_free_space_probe(Arc::new(move |_path: &Path| Ok(free)))
+        .with_display_probe(Arc::new(|| Ok(fake_displays())));
         Fixture {
             _dir: dir,
             coordinator,
@@ -867,6 +1033,122 @@ mod tests {
         let codes = event_codes(&fixture.sink);
         assert_eq!(codes.len(), 1);
         assert_eq!(codes[0].0, "DRM_PROTECTED");
+    }
+
+    /// I-2：部分显示器全黑（副屏休眠/DPMS）只丢弃该屏，其余屏继续显示覆盖层。
+    #[test]
+    fn partial_blank_display_is_dropped_and_the_overlay_still_shows() {
+        let fixture = fixture(
+            FakeGrabber::with_blank_ids(false, &["display-2"]),
+            FakeOverlay::new(false),
+            MIN_FREE_BYTES,
+        );
+
+        fixture
+            .coordinator
+            .start(CaptureTrigger::Hotkey)
+            .expect("capture continues with the usable display");
+
+        // 帧与显示器一一对应，只保留可用屏（主屏）。
+        let (frame_ids, display_ids) = fixture.overlay.last_pair().expect("overlay shown");
+        assert_eq!(frame_ids, vec!["display-1"]);
+        assert_eq!(display_ids, vec!["display-1"]);
+
+        // 会话仍在进行：窗口保持隐藏，等覆盖层结束再恢复一次。
+        assert_eq!(fixture.visibility.shows(), 0);
+        fixture
+            .coordinator
+            .on_overlay_event(OverlayEvent::Cancelled)
+            .unwrap();
+        assert_eq!(fixture.visibility.shows(), 1);
+
+        // 只提示一次被丢弃的屏。
+        let codes = event_codes(&fixture.sink);
+        assert_eq!(codes.len(), 1, "exactly one DRM notice: {codes:?}");
+        assert_eq!(codes[0].0, "DRM_PROTECTED");
+        assert!(
+            codes[0].1.contains("display-2"),
+            "notice names the dropped display: {}",
+            codes[0].1
+        );
+    }
+
+    /// I-2：主屏全黑、副屏可用时保留副屏（不能因为丢了主屏就整次失败）。
+    #[test]
+    fn blank_primary_display_keeps_the_usable_secondary() {
+        let fixture = fixture(
+            FakeGrabber::with_blank_ids(false, &["display-1"]),
+            FakeOverlay::new(false),
+            MIN_FREE_BYTES,
+        );
+
+        fixture.coordinator.start(CaptureTrigger::Hotkey).unwrap();
+        let (frame_ids, display_ids) = fixture.overlay.last_pair().expect("overlay shown");
+        assert_eq!(frame_ids, vec!["display-2"]);
+        assert_eq!(display_ids, vec!["display-2"]);
+        assert_eq!(event_codes(&fixture.sink)[0].0, "DRM_PROTECTED");
+    }
+
+    /// I-2：全部显示器全黑才整次失败：不发覆盖层、恢复窗口、只报一次 DRM。
+    #[test]
+    fn all_blank_displays_report_drm_without_showing_the_overlay() {
+        let fixture = fixture(
+            FakeGrabber::new(false, true),
+            FakeOverlay::new(false),
+            MIN_FREE_BYTES,
+        );
+
+        let err = fixture
+            .coordinator
+            .start(CaptureTrigger::Hotkey)
+            .unwrap_err();
+        assert!(matches!(err, AppError::DrmProtected));
+        assert_eq!(fixture.overlay.shows(), 0);
+        assert_eq!(fixture.visibility.shows(), 1);
+
+        let codes = event_codes(&fixture.sink);
+        assert_eq!(codes.len(), 1);
+        assert_eq!(codes[0].0, "DRM_PROTECTED");
+
+        // 会话标志已清除：可以立刻重新开始（这一次被下一次抓帧覆盖写入）。
+        fixture
+            .coordinator
+            .start(CaptureTrigger::Hotkey)
+            .unwrap_err();
+        assert_eq!(fixture.grabber.calls(), 2);
+    }
+
+    /// I-2：配对只保留可用屏；丢弃全黑屏时 display 条目同步丢弃、元数据保持原值。
+    #[test]
+    fn select_usable_frames_keeps_pairs_and_drops_blank_displays() {
+        let frames = vec![
+            frame_for("display-2", false),
+            frame_for("display-1", true),
+            // 没有对应显示器的帧无法显示，同样丢弃。
+            frame_for("ghost", false),
+        ];
+        let selection = select_usable_frames(frames, fake_displays());
+
+        assert_eq!(selection.frames.len(), 1);
+        assert_eq!(selection.frames[0].display_id, "display-2");
+        assert_eq!(selection.displays.len(), 1);
+        assert_eq!(selection.displays[0].id, "display-2");
+        assert_eq!(
+            selection.displays[0].bounds,
+            PhysicalRect::new(1920, 0, 1280, 1024),
+            "display metadata must be carried over unchanged"
+        );
+        assert!(!selection.displays[0].primary);
+        assert_eq!(selection.blank_displays, vec!["display-1"]);
+
+        // 全部全黑：没有可用帧/显示器，但仍报告被丢弃的屏。
+        let all_blank = select_usable_frames(
+            vec![frame_for("display-1", true), frame_for("display-2", true)],
+            fake_displays(),
+        );
+        assert!(all_blank.frames.is_empty());
+        assert!(all_blank.displays.is_empty());
+        assert_eq!(all_blank.blank_displays, vec!["display-1", "display-2"]);
     }
 
     #[test]

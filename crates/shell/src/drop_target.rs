@@ -335,7 +335,7 @@ impl IDropTarget_Impl for BallDropTarget_Impl {
         let accepted = result.is_ok();
         match result {
             Ok(content) => {
-                debug!(?content, "drop content captured");
+                debug!(content = %content_summary(&content), "drop content captured");
                 self.send(ShellEvent::Drop(content));
             }
             Err(err) => {
@@ -353,6 +353,41 @@ impl IDropTarget_Impl for BallDropTarget_Impl {
             };
         }
         Ok(())
+    }
+}
+
+/// 拖放载荷的日志摘要：只记录类型/计数/尺寸，**永不**打印文本或像素（P1-R11）。
+///
+/// `Debug` 打印 [`DropContent`] 会把 `Text.plain`、`FilesWithNote.note` 与
+/// `ImageDib.bgra` 全量展开——debug 级别下一张 4K 位图就是几十 MB，拖放回调在
+/// 拖拽源的 STA 线程上执行，会造成明显卡顿。URL 只记长度与主机名，避免把
+/// 可能敏感的查询串写进日志。
+fn content_summary(content: &DropContent) -> String {
+    match content {
+        DropContent::Files(files) => format!("Files(files={})", files.len()),
+        DropContent::FilesWithNote { files, note } => format!(
+            "FilesWithNote(files={}, note_chars={})",
+            files.len(),
+            note.chars().count()
+        ),
+        DropContent::Text { plain, html } => format!(
+            "Text(plain_chars={}, html={})",
+            plain.chars().count(),
+            if html.is_some() { "some" } else { "none" }
+        ),
+        DropContent::Url { url } => match url::Url::parse(url) {
+            Ok(parsed) => format!(
+                "Url(len={}, host={})",
+                url.len(),
+                parsed.host_str().unwrap_or("unknown")
+            ),
+            Err(_) => format!("Url(len={})", url.len()),
+        },
+        DropContent::ImageDib {
+            width,
+            height,
+            bgra,
+        } => format!("ImageDib({width}x{height}, bgra_bytes={})", bgra.len()),
     }
 }
 
@@ -1088,6 +1123,63 @@ mod tests {
         let visual = DropVisual::default();
         assert!(!visual.active);
         assert!(visual.accepted);
+    }
+
+    /// P1-R11：日志摘要只含类型/计数/尺寸，不泄漏文本、备注或像素。
+    #[test]
+    fn content_summary_never_leaks_text_or_pixels() {
+        let files = vec![PathBuf::from("C:\\tmp\\secret.png")];
+        assert_eq!(
+            content_summary(&DropContent::Files(files.clone())),
+            "Files(files=1)"
+        );
+
+        let with_note = DropContent::FilesWithNote {
+            files,
+            note: "机密备注".into(),
+        };
+        assert_eq!(
+            content_summary(&with_note),
+            "FilesWithNote(files=1, note_chars=4)"
+        );
+
+        let text = DropContent::Text {
+            plain: "机密正文".into(),
+            html: Some("<p>机密正文</p>".into()),
+        };
+        assert_eq!(content_summary(&text), "Text(plain_chars=4, html=some)");
+        assert_eq!(
+            content_summary(&DropContent::Text {
+                plain: "x".into(),
+                html: None
+            }),
+            "Text(plain_chars=1, html=none)"
+        );
+
+        // URL 只记长度与主机：查询串（可能是 token）不进日志。
+        let url = DropContent::Url {
+            url: "https://example.com/path?token=secret".into(),
+        };
+        let summary = content_summary(&url);
+        assert!(summary.starts_with("Url(len="), "got {summary}");
+        assert!(summary.contains("host=example.com"), "got {summary}");
+        assert!(
+            !summary.contains("token"),
+            "query must not be logged: {summary}"
+        );
+
+        let image = DropContent::ImageDib {
+            width: 2,
+            height: 1,
+            bgra: vec![1, 2, 3, 4, 5, 6, 7, 8],
+        };
+        assert_eq!(content_summary(&image), "ImageDib(2x1, bgra_bytes=8)");
+
+        // 所有摘要都不应包含正文/备注内容或像素字节。
+        for summary in [content_summary(&text), content_summary(&with_note)] {
+            assert!(!summary.contains("机密"), "content leaked: {summary}");
+        }
+        assert!(!content_summary(&image).contains("255"));
     }
 
     // -----------------------------------------------------------------------

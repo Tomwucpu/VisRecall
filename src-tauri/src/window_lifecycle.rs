@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use tauri::{App, AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use visrecall_app_core::WindowVisibility;
+use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOWNOACTIVATE};
 
 /// 主窗口 label；与 `capabilities/default.json` 的 `windows` 对应。
 pub const MAIN_LABEL: &str = "main";
@@ -186,10 +187,35 @@ fn next_generation() -> u64 {
 /// 避免一次捕获永久卡在「隐藏窗口」上。
 const VISIBILITY_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// 改变主窗口可见性：`visible == false` → `SW_HIDE`，`visible == true` →
+/// `SW_SHOWNOACTIVATE`（显示但不激活）。返回是否成功取到窗口句柄。
+///
+/// 为什么绕过 `WebviewWindow::hide/show`：
+/// - `show()` 内部是 `ShowWindow(SW_SHOW)`，会**激活**主窗口，抢走覆盖层刚还给
+///   来源窗口的焦点——抓帧结束后主窗口即使恢复，也不该成为前台窗口。
+/// - tao 只在「缓存的可见标志发生变化」时才真正调用 `ShowWindow`，因此隐藏与恢复必须
+///   成对使用同一套原生调用；`is_visible()` 读的是 `IsWindowVisible`，不受 tao 缓存影响。
+///
+/// 只在主线程调用（与 `run_on_main` 一致）。
+fn set_window_visible(window: &WebviewWindow, visible: bool) -> bool {
+    let hwnd = match window.hwnd() {
+        Ok(hwnd) => hwnd,
+        Err(err) => {
+            tracing::warn!(error = %err, "cannot read the main window handle");
+            return false;
+        }
+    };
+    // SAFETY: `hwnd` 是本进程主线程上的主窗口句柄；命令只改变可见性，不会销毁窗口。
+    let _ = unsafe { ShowWindow(hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE }) };
+    true
+}
+
 /// 抓帧期间隐藏主窗口的 [`WindowVisibility`] 实现（design §5 步骤 2）。
 ///
 /// - 隐藏时记录「抓帧前主窗口是否可见」，只隐藏可见窗口；抓帧结束后仅当之前可见
 ///   且窗口仍然存在时恢复显示（不重建，重建由 [`show_main_window`] 负责）。
+/// - 隐藏/恢复都用 [`set_window_visible`]（原生 `ShowWindow`）：恢复走
+///   `SW_SHOWNOACTIVATE`，不把焦点从覆盖层刚还给的前台窗口抢走。
 /// - 窗口操作统一投递到主线程并**等待应答**，确保 `DwmFlush`/抓帧开始时窗口已隐藏。
 /// - 只捕获 `AppHandle`，不捕获窗口克隆：事件监听器存放在窗口内部，捕获克隆会形成
 ///   引用环，销毁窗口后 WebView2 进程无法退出。
@@ -216,8 +242,8 @@ impl WindowVisibility for MainWindowVisibility {
             match window.is_visible() {
                 Ok(visible) => {
                     if visible {
-                        if let Err(err) = window.hide() {
-                            tracing::warn!(error = %err, "failed to hide main window for capture");
+                        if !set_window_visible(&window, false) {
+                            tracing::warn!("failed to hide main window for capture");
                             return false;
                         }
                         tracing::info!("main window hidden for capture");
@@ -247,10 +273,11 @@ impl WindowVisibility for MainWindowVisibility {
         let _ = run_on_main(&self.app, |app| {
             match app.get_webview_window(MAIN_LABEL) {
                 Some(window) => {
-                    if let Err(err) = window.show() {
-                        tracing::warn!(error = %err, "failed to restore main window after capture");
+                    // `SW_SHOWNOACTIVATE`：恢复可见但不抢覆盖层刚还给来源窗口的焦点。
+                    if !set_window_visible(&window, true) {
+                        tracing::warn!("failed to restore main window after capture");
                     } else {
-                        tracing::info!("main window restored after capture");
+                        tracing::info!("main window restored after capture (without activation)");
                     }
                 }
                 // 窗口在隐藏期间被销毁（60s 定时销毁）：不重建，用户从托盘打开。

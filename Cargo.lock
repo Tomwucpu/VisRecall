@@ -4787,6 +4787,7 @@ dependencies = [
  "visrecall-app-core",
  "visrecall-capture",
  "visrecall-domain",
+ "windows",
 ]
 
 [[package]]

@@ -17,9 +17,9 @@ use visrecall_domain::error::AppError;
 use windows::core::Error as WinError;
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{
-    BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
-    SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CAPTUREBLT, DIB_RGB_COLORS, HBITMAP, HDC,
-    HGDIOBJ, SRCCOPY,
+    BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GdiFlush, GetDC,
+    ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CAPTUREBLT, DIB_RGB_COLORS,
+    HBITMAP, HDC, HGDIOBJ, SRCCOPY,
 };
 
 use crate::trait_defs::FrameGrabber;
@@ -80,6 +80,17 @@ fn capture_display(screen: HDC, display: &DisplayInfo) -> Result<RawFrame, AppEr
         )
     }
     .map_err(|err| AppError::CaptureFailed(format!("BitBlt for {} failed: {err}", display.id)))?;
+
+    // BitBlt 只是把命令排进 GDI 批处理队列；读取 DIB 像素前先冲刷，避免拿到
+    // 尚未落地的旧内容（尤其多显示器/远程会话下的驱动侧延迟）。失败不影响抓帧本身。
+    // SAFETY: 无参数、无生命周期的同步调用。
+    if !unsafe { GdiFlush() }.as_bool() {
+        let id = display.id.as_str();
+        debug!(
+            display_id = %id,
+            "GdiFlush reported failure; reading DIB bits without a confirmed flush"
+        );
+    }
 
     let frame = RawFrame {
         display_id: display.id.clone(),
