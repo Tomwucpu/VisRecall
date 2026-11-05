@@ -108,8 +108,9 @@ impl ImportFlow {
 
     /// 导入成功后由核心循环调用：为每个新素材发 `item_created`。
     ///
-    /// 发完 `item_created` 再派发图片缩略图任务（后台线程，`thumbs/<id>.png`），
+    /// 发完 `item_created` 再派发图片缩略图任务（有界 worker 队列，`thumbs/<id>.png`），
     /// 保证前端先拿到素材、后收到 `item_updated`；文本/链接没有缩略图，跳过。
+    /// 派发失败上报 `capture_failed { THUMBNAIL_FAILED }`，不让素材静默停在 `parsing`。
     pub fn emit_created(&self, items: &[Item]) {
         for item in items {
             self.sink.emit(AppEvent::ItemCreated(ItemEvent {
@@ -121,8 +122,13 @@ impl ImportFlow {
                 Arc::clone(&self.library),
                 Arc::clone(&self.sink),
                 item.id.clone(),
+                item.original_path.clone(),
             ) {
-                warn!(id = %item.id, error = %err, "failed to spawn the thumbnail worker");
+                warn!(id = %item.id, error = %err, "failed to queue the thumbnail job");
+                self.emit_failed(
+                    thumbnail::THUMBNAIL_FAILED_CODE,
+                    &format!("failed to queue the thumbnail job: {err}"),
+                );
             }
         }
     }

@@ -1,8 +1,8 @@
 //! 捕获编排与落盘：快捷键/托盘触发 → 记录来源 → 隐藏自有窗口 → 抓帧 → 覆盖层，
 //! 以及覆盖层提交后的 PNG 编码、临时文件 → `rename` → 入库（design §5、§10.2）。
 //!
-//! 入库并发 `item_created` 之后，缩略图（`thumbs/<id>.png`）派发到独立的
-//! `visrecall-thumb` 线程生成（[`crate::thumbnail`]），捕获循环不等它完成。
+//! 入库并发 `item_created` 之后，缩略图（`thumbs/<id>.png`）派发到有界缩略图 worker
+//! （[`crate::thumbnail`]，全局队列 + 固定线程数），捕获循环不等它完成。
 //!
 //! 线程模型（design §3）：本模块的方法在 app-core 的捕获循环线程上同步执行；
 //! 抓帧与窗口探针通过 trait 注入，覆盖层通过 [`OverlayPresenter`]（生产实现为
@@ -272,8 +272,8 @@ impl CaptureCoordinator {
                         self.sink.emit(AppEvent::ItemCreated(ItemEvent {
                             id: item.id.clone(),
                         }));
-                        // 缩略图在独立线程生成（design §10.2）：捕获循环不等 PNG 解码/缩放。
-                        self.spawn_thumbnail(item.id);
+                        // 缩略图交给有界 worker（design §10.2）：捕获循环不等 PNG 解码/缩放。
+                        self.spawn_thumbnail(&item);
                         Ok(())
                     }
                     Err(err) => {
@@ -305,14 +305,20 @@ impl CaptureCoordinator {
 
     /// 派发缩略图任务（`item_created` 之后调用，前端先拿到素材再收到状态更新）。
     ///
-    /// 线程起不来只记录日志：素材保持 `parsing`，卡片显示占位（design §12 允许的降级）。
-    fn spawn_thumbnail(&self, item_id: String) {
+    /// 派发失败只影响这一张图：记录 error 并发 `capture_failed { THUMBNAIL_FAILED }`，
+    /// 避免素材永久静默停在 `parsing`。
+    fn spawn_thumbnail(&self, item: &Item) {
         if let Err(err) = thumbnail::spawn_thumbnail(
             Arc::clone(&self.library),
             Arc::clone(&self.sink),
-            item_id.clone(),
+            item.id.clone(),
+            item.original_path.clone(),
         ) {
-            warn!(id = %item_id, error = %err, "failed to spawn the thumbnail worker");
+            error!(id = %item.id, error = %err, "failed to queue the thumbnail job");
+            self.sink.emit(AppEvent::CaptureFailed(CaptureFailedEvent {
+                code: thumbnail::THUMBNAIL_FAILED_CODE.to_string(),
+                message: format!("failed to queue the thumbnail job: {err}"),
+            }));
         }
     }
 

@@ -1,14 +1,15 @@
 //! `visrecall://thumb/<item_id>` 资源协议（design §11.3）。
 //!
-//! 只服务缩略图：按 id 查库里的 `thumb_path`，校验为库内相对路径后再读文件。
+//! 只服务缩略图：按 id 查库里的 `thumb_path`，校验为 `thumbs/` 下的库内相对路径后再读文件。
 //! 不暴露任意文件或绝对路径——路径全部来自数据库，ID 只允许 `[A-Za-z0-9_-]`。
+//! 只接受 `GET`/`HEAD`（其余方法 405）；200 带一年 `immutable` 缓存头，4xx 不带。
 //!
 //! Windows 上 Tauri 把自定义协议映射为 `http://visrecall.localhost/thumb/<id>`，
 //! 处理器看到的 `request.uri().path()` 仍是 `/thumb/<id>`；前端用
 //! `convertFileSrc` 的等价逻辑把 `visrecall://thumb/<id>` 转成该地址（Task 18）。
 
-use tauri::http::header::{HeaderValue, CACHE_CONTROL, CONTENT_TYPE};
-use tauri::http::{Request, Response, StatusCode};
+use tauri::http::header::{HeaderValue, ALLOW, CACHE_CONTROL, CONTENT_TYPE};
+use tauri::http::{Method, Request, Response, StatusCode};
 use tauri::Manager;
 use visrecall_app_core::thumbnail::load_thumb_bytes;
 use visrecall_app_core::{AppCore, AppError, Library};
@@ -18,6 +19,12 @@ pub const SCHEME: &str = "visrecall";
 
 /// 单段路径前缀。
 const THUMB_PREFIX: &str = "thumb";
+
+/// 缩略图内容按素材 id 命名、生成后不再变化：一年的 `immutable` 长缓存。
+const CACHE_IMMUTABLE: &str = "public, max-age=31536000, immutable";
+
+/// 只读方法；其他方法一律 405（协议只提供图片，不接受写入）。
+const ALLOWED_METHODS: &str = "GET, HEAD";
 
 /// 协议处理结果里与 HTTP 状态无关的部分。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,24 +86,32 @@ fn is_valid_item_id(item_id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
-/// Tauri 协议处理器：解析路径 → 查库 → 读缩略图 → 200/400/404。
+/// Tauri 协议处理器：方法/路径校验 → 查库 → 读缩略图 → 200/400/404/405。
 pub fn handler<R: tauri::Runtime>(
     ctx: tauri::UriSchemeContext<'_, R>,
     request: Request<Vec<u8>>,
 ) -> Response<Vec<u8>> {
-    let path = request.uri().path();
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
     match ctx.app_handle().try_state::<AppCore>() {
         Some(core) => match core.library() {
-            Ok(library) => thumb_response(Some(library), path),
+            Ok(library) => thumb_response(Some(library), &method, &path),
             // 库打不开：与「没有缩略图」一致，避免把启动错误细节暴露给页面。
-            Err(_) => thumb_response(None, path),
+            Err(_) => thumb_response(None, &method, &path),
         },
-        None => thumb_response(None, path),
+        None => thumb_response(None, &method, &path),
     }
 }
 
 /// 纯响应构造（`library = None` 表示库不可用），便于测试。
-fn thumb_response(library: Option<&Library>, path: &str) -> Response<Vec<u8>> {
+///
+/// 只有 `GET`/`HEAD` 返回图片；其他方法 405（带 `Allow`）。`HEAD` 与 `GET` 同状态/头，
+/// 但不带正文。错误响应（400/404/405）一律不缓存。
+fn thumb_response(library: Option<&Library>, method: &Method, path: &str) -> Response<Vec<u8>> {
+    if *method != Method::GET && *method != Method::HEAD {
+        return method_not_allowed();
+    }
+
     let item_id = match parse_thumb_request_path(path) {
         Ok(item_id) => item_id,
         Err(err) => return error_response(err),
@@ -107,7 +122,13 @@ fn thumb_response(library: Option<&Library>, path: &str) -> Response<Vec<u8>> {
 
     match load_thumb_bytes(library, item_id) {
         Ok(bytes) => {
-            let mut response = Response::new(bytes);
+            // `HEAD` 只需要头，正文留空。
+            let body = if *method == Method::HEAD {
+                Vec::new()
+            } else {
+                bytes
+            };
+            let mut response = Response::new(body);
             *response.status_mut() = StatusCode::OK;
             response
                 .headers_mut()
@@ -115,12 +136,25 @@ fn thumb_response(library: Option<&Library>, path: &str) -> Response<Vec<u8>> {
             // 缩略图按素材 id 命名、生成后不再变化（design §11.3）。
             response
                 .headers_mut()
-                .insert(CACHE_CONTROL, HeaderValue::from_static("immutable"));
+                .insert(CACHE_CONTROL, HeaderValue::from_static(CACHE_IMMUTABLE));
             response
         }
         Err(AppError::InvalidInput(_)) => error_response(ProtocolError::BadRequest),
         Err(_) => error_response(ProtocolError::NotFound),
     }
+}
+
+fn method_not_allowed() -> Response<Vec<u8>> {
+    let mut response = Response::new(b"method not allowed".to_vec());
+    *response.status_mut() = StatusCode::METHOD_NOT_ALLOWED;
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    response
+        .headers_mut()
+        .insert(ALLOW, HeaderValue::from_static(ALLOWED_METHODS));
+    response
 }
 
 fn error_response(err: ProtocolError) -> Response<Vec<u8>> {
@@ -225,11 +259,58 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (library, id) = library_with_thumb(dir.path());
 
-        let response = thumb_response(Some(&library), &format!("/thumb/{id}"));
+        let response = thumb_response(Some(&library), &Method::GET, &format!("/thumb/{id}"));
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()[CONTENT_TYPE], "image/png");
-        assert_eq!(response.headers()[CACHE_CONTROL], "immutable");
+        assert_eq!(
+            response.headers()[CACHE_CONTROL],
+            "public, max-age=31536000, immutable"
+        );
         assert_eq!(response.body().as_slice(), b"\x89PNG\r\n\x1a\nthumb");
+    }
+
+    /// `HEAD` 与 `GET` 同状态/头，但不带正文。
+    #[test]
+    fn head_returns_headers_without_a_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let (library, id) = library_with_thumb(dir.path());
+
+        let response = thumb_response(Some(&library), &Method::HEAD, &format!("/thumb/{id}"));
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[CONTENT_TYPE], "image/png");
+        assert_eq!(
+            response.headers()[CACHE_CONTROL],
+            "public, max-age=31536000, immutable"
+        );
+        assert!(response.body().is_empty());
+    }
+
+    /// 只读协议：GET/HEAD 之外的任何方法都 405（带 `Allow`、不带缓存头）。
+    #[test]
+    fn rejects_non_read_methods() {
+        let dir = tempfile::tempdir().unwrap();
+        let (library, id) = library_with_thumb(dir.path());
+
+        for method in [
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ] {
+            let response = thumb_response(Some(&library), &method, &format!("/thumb/{id}"));
+            assert_eq!(
+                response.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method {method} must be rejected"
+            );
+            assert_eq!(response.headers()[ALLOW], "GET, HEAD");
+            assert!(
+                !response.headers().contains_key(CACHE_CONTROL),
+                "405 responses must not be cached"
+            );
+            assert_eq!(response.body().as_slice(), b"method not allowed");
+        }
     }
 
     #[test]
@@ -237,14 +318,38 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (library, _id) = library_with_thumb(dir.path());
 
-        let missing = thumb_response(Some(&library), "/thumb/nope");
+        let missing = thumb_response(Some(&library), &Method::GET, "/thumb/nope");
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert!(
+            !missing.headers().contains_key(CACHE_CONTROL),
+            "404 responses must not be cached as immutable"
+        );
 
-        let traversal = thumb_response(Some(&library), "/thumb/../config.json");
+        let traversal = thumb_response(Some(&library), &Method::GET, "/thumb/../config.json");
         assert_eq!(traversal.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            !traversal.headers().contains_key(CACHE_CONTROL),
+            "400 responses must not be cached as immutable"
+        );
 
         // 库不可用：与缺图一致返回 404，不泄露启动错误。
-        let unavailable = thumb_response(None, "/thumb/abc-123");
+        let unavailable = thumb_response(None, &Method::GET, "/thumb/abc-123");
         assert_eq!(unavailable.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// 纵深防御：`thumb_path` 指向 `texts/` 等非缩略图文件时协议返回 400，不读出内容。
+    #[test]
+    fn thumb_paths_outside_thumbs_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let (library, id) = library_with_thumb(dir.path());
+        let text = format!("texts/{id}.txt");
+        fs::write(dir.path().join(&text), b"secret text").unwrap();
+        library
+            .update_status(&id, ItemStatus::Ready, Some(&text))
+            .unwrap();
+
+        let response = thumb_response(Some(&library), &Method::GET, &format!("/thumb/{id}"));
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_ne!(response.body().as_slice(), b"secret text");
     }
 }

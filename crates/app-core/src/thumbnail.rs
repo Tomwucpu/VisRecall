@@ -1,25 +1,30 @@
 //! 缩略图（design §10.2）：长边 480px 的 `thumbs/<id>.png`，捕获/导入提交后异步生成。
 //!
-//! 线程模型：生成放在独立线程（[`spawn_thumbnail`]，线程名 `visrecall-thumb`），
-//! 捕获循环与导入工作线程只负责派发，PNG 解码/缩放不会占住它们。`Library` 的写连接
-//! 本身串行化，多个缩略图线程与命令层互不冲突。
+//! 线程模型（review I1）：一次拖放最多 20 张、每张都要 `image::open` 全量解码，逐张起线程
+//! 会让峰值内存随批量线性增长（20 张 8000px 可到数 GB）。这里改为**有界并发**：全局队列
+//! （[`OnceLock`]）后面固定 [`THUMB_WORKERS`] 个命名 worker 线程，捕获循环与导入线程都只
+//! 负责 [`spawn_thumbnail`] 派发。队列无界不丢任务，同时在跑的解码最多两个。
 //!
 //! 失败语义（design §12）：缩略图失败**不删除原图**，只把素材转 `failed` 并发
-//! `item_updated`，卡片保留占位（重试入口属于阶段 02）。
+//! `item_updated`，卡片保留占位（重试入口属于阶段 02）。worker 内每张图用 `catch_unwind`
+//! 兜住 panic：标 `failed`、记录 error；连状态都写不进去时再发 `capture_failed`，
+//! 不让素材永久静默停在 `parsing`。
 
 use std::fs;
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
+use crossbeam_channel::{Receiver, Sender};
 use image::imageops::FilterType;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use visrecall_domain::item::{ItemKind, ItemStatus};
 use visrecall_domain::AppError;
 use visrecall_library::Library;
 
 use crate::capture_flow::{encode_rgba_png, write_bytes_atomic_in};
-use crate::events::{AppEvent, EventSink, ItemUpdatedEvent};
+use crate::events::{AppEvent, CaptureFailedEvent, EventSink, ItemUpdatedEvent};
 
 /// 缩略图长边上限（design §10.2）。
 pub const THUMB_MAX_EDGE: u32 = 480;
@@ -27,9 +32,26 @@ pub const THUMB_MAX_EDGE: u32 = 480;
 /// 缩略图目录（相对库根）；`Library` 打开时已建好。
 pub const THUMB_DIR: &str = "thumbs";
 
+/// 缩略图 worker 线程数（有界并发上限）。
+///
+/// 捕获一次只有一张；导入一批最多 20 张，两个 worker 让峰值解码内存止步于两张原图，
+/// 同时保留「一张慢慢解码时另一张还能推进」的并行度。
+pub const THUMB_WORKERS: usize = 2;
+
+/// 缩略图失败的稳定错误码（`capture_failed.code`，与 IPC 错误码同一套命名）。
+pub const THUMBNAIL_FAILED_CODE: &str = "THUMBNAIL_FAILED";
+
 /// 素材缩略图的库内相对路径。
 pub fn thumb_relative_path(item_id: &str) -> String {
     format!("{THUMB_DIR}/{item_id}.png")
+}
+
+/// `thumb_path` 是否指向 `thumbs/` 下的文件（纵深防御：库被改坏也不读 `texts/` 等）。
+fn is_thumb_relative(thumb: &str) -> bool {
+    thumb
+        .strip_prefix(THUMB_DIR)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .is_some_and(|name| !name.is_empty() && !name.contains('\\'))
 }
 
 /// 把 `src` 缩到长边 `max_edge` 并保存为 PNG 到 `dst`。
@@ -75,11 +97,18 @@ pub fn generate_thumbnail(src: &Path, dst: &Path, max_edge: u32) -> Result<(), A
 /// 读取素材缩略图的字节（资源协议用）。
 ///
 /// 素材不存在、没有 `thumb_path`、或缩略图文件已丢失都返回 [`AppError::NotFound`]；
-/// `thumb_path` 不是库内相对路径（库被手工改坏）返回 [`AppError::InvalidInput`]，
-/// 从不读取库根目录之外的文件。
+/// `thumb_path` 不在 `thumbs/` 下（库被手工改坏指向 `texts/` 等库内文件）或不是库内
+/// 相对路径，返回 [`AppError::InvalidInput`]，从不读取库根目录之外的文件。
 pub fn load_thumb_bytes(library: &Library, item_id: &str) -> Result<Vec<u8>, AppError> {
     let item = library.get_item(item_id)?.ok_or(AppError::NotFound)?;
     let thumb = item.thumb_path.ok_or(AppError::NotFound)?;
+
+    // 纵深防御：协议只服务缩略图，库里的路径再坏也不能读到其他库内文件。
+    if !is_thumb_relative(&thumb) {
+        return Err(AppError::InvalidInput(format!(
+            "thumb path is not under {THUMB_DIR}/: {thumb}"
+        )));
+    }
 
     let path = library.relative_to_root(&thumb).map_err(|err| match err {
         AppError::InvalidInput(detail) => AppError::InvalidInput(detail),
@@ -93,74 +122,271 @@ pub fn load_thumb_bytes(library: &Library, item_id: &str) -> Result<Vec<u8>, App
     })
 }
 
-/// 异步生成缩略图：派发到独立的 `visrecall-thumb` 线程，立即返回。
+/// 一张缩略图的生成任务：库、事件发送端、素材 id 与库内相对原图路径。
 ///
-/// 调用方（捕获循环/导入工作线程）不等待；完成或失败通过 [`generate_for_item`]
-/// 更新库状态并发 `item_updated`。
+/// 原图路径随任务携带，worker 不必再查一次库（批量导入时省掉 20 次读）。
+struct ThumbnailJob {
+    library: Arc<Library>,
+    sink: Arc<dyn EventSink>,
+    item_id: String,
+    original_path: String,
+}
+
+/// 全局任务队列；首次派发时创建 worker（见 [`queue`]）。
+static QUEUE: OnceLock<Sender<ThumbnailJob>> = OnceLock::new();
+
+/// 取全局队列，必要时先起 [`THUMB_WORKERS`] 个 worker。
+///
+/// 初始化在互斥锁内完成，避免两个线程（捕获循环 + 导入线程）各起一批 worker。
+/// 任一线程起不来就返回错误并**保持队列未初始化**：已起的 worker 因通道断开自行退出，
+/// 下一次派发会重试，不会留下「只有一半 worker 且永远不补」的半成品。
+fn queue() -> Result<&'static Sender<ThumbnailJob>, AppError> {
+    static INIT: Mutex<()> = Mutex::new(());
+
+    let _guard = INIT.lock().unwrap_or_else(|poison| poison.into_inner());
+    if let Some(queue) = QUEUE.get() {
+        return Ok(queue);
+    }
+
+    let (tx, rx) = crossbeam_channel::unbounded();
+    for index in 0..THUMB_WORKERS {
+        let worker_rx = rx.clone();
+        let spawned = thread::Builder::new()
+            .name(format!("visrecall-thumb-{index}"))
+            .spawn(move || worker_loop(worker_rx));
+        if let Err(err) = spawned {
+            // 丢弃 tx/rx：已起的 worker 收到通道断开后退出，队列留待下次重试。
+            return Err(AppError::Internal(format!(
+                "spawn thumbnail worker {index}: {err}"
+            )));
+        }
+    }
+    drop(rx);
+
+    QUEUE
+        .set(tx)
+        .map_err(|_| AppError::Internal("thumbnail queue was already initialized".into()))?;
+    QUEUE
+        .get()
+        .ok_or_else(|| AppError::Internal("thumbnail queue is unavailable".into()))
+}
+
+/// 异步生成缩略图：把任务放进全局队列，立即返回（捕获/导入线程不等待解码）。
+///
+/// 返回 `Err` 表示队列/worker 起不来——调用方必须把它报出去（`capture_failed`），
+/// 否则该素材会静默停在 `parsing`。
 pub fn spawn_thumbnail(
     library: Arc<Library>,
     sink: Arc<dyn EventSink>,
     item_id: String,
+    original_path: String,
 ) -> Result<(), AppError> {
-    thread::Builder::new()
-        .name("visrecall-thumb".into())
-        .spawn(move || generate_for_item(&library, sink.as_ref(), &item_id))
-        .map(|_| ())
-        .map_err(|err| AppError::Internal(format!("spawn thumbnail worker: {err}")))
+    let job = ThumbnailJob {
+        library,
+        sink,
+        item_id,
+        original_path,
+    };
+    queue()?
+        .send(job)
+        .map_err(|_| AppError::Internal("thumbnail queue is closed".into()))
 }
 
-/// 同步生成一张缩略图并写回状态（[`spawn_thumbnail`] 的线程体，测试直接调用）。
+/// worker 线程体：串行取任务，直到队列发送端全部丢弃。
+fn worker_loop(rx: Receiver<ThumbnailJob>) {
+    for job in rx {
+        run_job(&job);
+    }
+}
+
+/// 执行一张缩略图任务，`catch_unwind` 兜住 panic。
 ///
-/// - 成功：`thumbs/<id>.png` + `update_status(Ready, Some(相对路径))` +
-///   `item_updated { fields: ["status", "thumbPath"] }`。
-/// - 失败：`update_status(Failed, None)` + `item_updated { fields: ["status"] }`；
-///   原图保留，卡片显示占位。
-pub fn generate_for_item(library: &Library, sink: &dyn EventSink, item_id: &str) {
-    match build_thumbnail(library, item_id) {
-        Ok(relative) => match library.update_status(item_id, ItemStatus::Ready, Some(&relative)) {
-            Ok(()) => {
-                info!(id = item_id, path = %relative, "thumbnail generated");
-                emit_updated(sink, item_id, &["status", "thumbPath"]);
-            }
-            Err(err) => warn!(id = item_id, error = %err, "failed to store the thumbnail path"),
-        },
-        Err(err) => {
-            warn!(id = item_id, error = %err, "thumbnail generation failed; keeping the original");
-            match library.update_status(item_id, ItemStatus::Failed, None) {
-                Ok(()) => emit_updated(sink, item_id, &["status"]),
-                Err(db_err) => {
-                    warn!(id = item_id, error = %db_err, "failed to mark the item failed")
-                }
-            }
+/// panic（例如某张图触发解码器内部断言）不能让 worker 线程死掉，否则队列会永久少一个
+/// worker；这里记录 error 后尽力把素材标 `failed`，恢复动作本身 panic 也只记录。
+fn run_job(job: &ThumbnailJob) {
+    #[cfg(test)]
+    let _active = ActiveGuard::new();
+
+    let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        run_task(
+            &job.library,
+            job.sink.as_ref(),
+            &job.item_id,
+            &job.original_path,
+        )
+    }));
+
+    if let Err(payload) = outcome {
+        error!(
+            id = %job.item_id,
+            panic = %panic_text(payload.as_ref()),
+            "thumbnail worker panicked; marking the item failed"
+        );
+        let recovered = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            mark_failed(&job.library, job.sink.as_ref(), &job.item_id)
+        }));
+        if recovered.is_err() {
+            error!(
+                id = %job.item_id,
+                "failed to record the panicked thumbnail job; the item may stay parsing"
+            );
         }
     }
 }
 
+/// 同步生成一张缩略图并写回状态（测试与排障直接调用；生产走 [`spawn_thumbnail`]）。
+///
+/// - 成功：`thumbs/<id>.png` + `update_status(Ready, Some(相对路径))` +
+///   `item_updated { fields: ["status", "thumbUrl"] }`。
+/// - 失败：`update_status(Failed, None)` + 同样字段的 `item_updated`；原图保留，卡片显示占位。
+pub fn generate_for_item(library: &Library, sink: &dyn EventSink, item_id: &str) {
+    match library.get_item(item_id) {
+        Ok(Some(item)) if item.kind == ItemKind::Image => {
+            run_task(library, sink, item_id, &item.original_path)
+        }
+        Ok(Some(_)) => warn!(id = item_id, "item is not an image; no thumbnail"),
+        Ok(None) => warn!(id = item_id, "item disappeared before thumbnailing"),
+        Err(err) => {
+            error!(id = item_id, error = %err, "failed to load the item for thumbnailing");
+            emit_failed_event(sink, item_id, &err.to_string());
+        }
+    }
+}
+
+/// 一张图的完整处理：读原图 → 写缩略图 → 写回状态 → 发事件。
+fn run_task(library: &Library, sink: &dyn EventSink, item_id: &str, original_path: &str) {
+    match build_thumbnail(library, item_id, original_path) {
+        Ok(relative) => match library.update_status(item_id, ItemStatus::Ready, Some(&relative)) {
+            Ok(()) => {
+                info!(id = item_id, path = %relative, "thumbnail generated");
+                emit_updated(sink, item_id);
+            }
+            Err(err) => report_status_failure(sink, item_id, "store the thumbnail path", &err),
+        },
+        Err(err) => {
+            warn!(id = item_id, error = %err, "thumbnail generation failed; keeping the original");
+            mark_failed(library, sink, item_id);
+        }
+    }
+}
+
+/// 把素材标 `failed` 并发 `item_updated`（失败不删原图）。
+fn mark_failed(library: &Library, sink: &dyn EventSink, item_id: &str) {
+    match library.update_status(item_id, ItemStatus::Failed, None) {
+        Ok(()) => emit_updated(sink, item_id),
+        Err(err) => report_status_failure(sink, item_id, "mark the item failed", &err),
+    }
+}
+
+/// `update_status` 失败：素材会停在 `parsing`，不能只 warn。
+///
+/// 记录 error + 发 `capture_failed`（用户可见）+ 发 `item_updated`（前端重新拉取当前状态），
+/// 两条事件都不依赖数据库写成功。
+fn report_status_failure(sink: &dyn EventSink, item_id: &str, action: &str, err: &AppError) {
+    error!(
+        id = item_id,
+        error = %err,
+        action,
+        "thumbnail status update failed; the item stays parsing"
+    );
+    emit_failed_event(sink, item_id, &format!("failed to {action}: {err}"));
+    emit_updated(sink, item_id);
+}
+
 /// 读原图 → 写 `thumbs/<id>.png`，返回缩略图的库内相对路径。
-fn build_thumbnail(library: &Library, item_id: &str) -> Result<String, AppError> {
-    let item = library.get_item(item_id)?.ok_or(AppError::NotFound)?;
-    if item.kind != ItemKind::Image || item.original_path.is_empty() {
+fn build_thumbnail(
+    library: &Library,
+    item_id: &str,
+    original_path: &str,
+) -> Result<String, AppError> {
+    if original_path.is_empty() {
         return Err(AppError::InvalidInput(format!(
             "item {item_id} has no image to thumbnail"
         )));
     }
 
-    let source = library.relative_to_root(&item.original_path)?;
+    let source = library.relative_to_root(original_path)?;
     let relative = thumb_relative_path(item_id);
     let target = library.root().join(&relative);
     generate_thumbnail(&source, &target, THUMB_MAX_EDGE)?;
     Ok(relative)
 }
 
-fn emit_updated(sink: &dyn EventSink, item_id: &str, fields: &[&str]) {
+/// 发 `item_updated`；字段名与前端 DTO 一致（`status` / `thumbUrl`）。
+fn emit_updated(sink: &dyn EventSink, item_id: &str) {
     sink.emit(AppEvent::ItemUpdated(ItemUpdatedEvent {
         id: item_id.to_string(),
-        fields: fields.iter().map(|field| (*field).to_string()).collect(),
+        fields: vec!["status".to_string(), "thumbUrl".to_string()],
     }));
+}
+
+/// 发 `capture_failed { THUMBNAIL_FAILED }`：缩略图链路出错且状态写不进去时的兜底可见性。
+fn emit_failed_event(sink: &dyn EventSink, item_id: &str, detail: &str) {
+    sink.emit(AppEvent::CaptureFailed(CaptureFailedEvent {
+        code: THUMBNAIL_FAILED_CODE.to_string(),
+        message: format!("thumbnail for {item_id} failed: {detail}"),
+    }));
+}
+
+/// 从 `catch_unwind` 的载荷里取可读消息（`&str` / `String` / 其他）。
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        message
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.as_str()
+    } else {
+        "non-string panic payload"
+    }
+}
+
+/// 测试用并发观测：记录同时执行 `run_job` 的数量与峰值。
+///
+/// 所有任务共用一个全局队列，因此峰值就是 worker 数——用于锁住「有界并发」这条不变量。
+#[cfg(test)]
+mod test_metrics {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+    static PEAK: AtomicUsize = AtomicUsize::new(0);
+
+    pub(super) fn enter() {
+        let active = ACTIVE.fetch_add(1, Ordering::SeqCst) + 1;
+        PEAK.fetch_max(active, Ordering::SeqCst);
+    }
+
+    pub(super) fn leave() {
+        ACTIVE.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    pub(super) fn peak() -> usize {
+        PEAK.load(Ordering::SeqCst)
+    }
+}
+
+/// `run_job` 期间的活跃计数守卫（panic 展开时也会 `leave`）。
+#[cfg(test)]
+struct ActiveGuard;
+
+#[cfg(test)]
+impl ActiveGuard {
+    fn new() -> Self {
+        test_metrics::enter();
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        test_metrics::leave();
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::ptr;
+    use std::time::{Duration, Instant};
+
     use image::{Rgba, RgbaImage};
     use visrecall_domain::item::NewItem;
 
@@ -235,10 +461,10 @@ mod tests {
         let updates = updated_events(&sink);
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].id, id);
-        assert_eq!(updates[0].fields, vec!["status", "thumbPath"]);
+        assert_eq!(updates[0].fields, vec!["status", "thumbUrl"]);
     }
 
-    /// 缩略图失败（原图丢失）：素材转 `failed`，不发 `thumbPath` 字段。
+    /// 缩略图失败（原图丢失）：素材转 `failed`，仍然只发 `item_updated`。
     #[test]
     fn generate_for_item_marks_failed_when_the_original_is_missing() {
         let dir = tempfile::tempdir().unwrap();
@@ -255,7 +481,7 @@ mod tests {
 
         let updates = updated_events(&sink);
         assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].fields, vec!["status"]);
+        assert_eq!(updates[0].fields, vec!["status", "thumbUrl"]);
     }
 
     /// 小图不放大：长边小于上限时保持原尺寸。
@@ -272,12 +498,9 @@ mod tests {
         assert_eq!((out.width(), out.height()), (40, 20));
     }
 
-    /// `spawn_thumbnail` 派发后线程体完成生成（不阻塞调用方）。
+    /// `spawn_thumbnail` 派发后 worker 完成生成（调用方立即返回）。
     #[test]
     fn spawn_thumbnail_generates_in_the_background() {
-        use std::sync::Arc;
-        use std::time::{Duration, Instant};
-
         let dir = tempfile::tempdir().unwrap();
         let library = Arc::new(Library::open(dir.path().join("library")).unwrap());
         let original = dir.path().join("original.png");
@@ -286,14 +509,15 @@ mod tests {
         let relative = "originals/images/2026/01/item-bg.png";
         insert_image(&library, id, relative);
         place_original(&library, &original, relative);
-
         let sink = Arc::new(RecordingSink::default());
+
         spawn_thumbnail(
             Arc::clone(&library),
             Arc::clone(&sink) as Arc<dyn EventSink>,
             id.to_string(),
+            relative.to_string(),
         )
-        .expect("spawn thumbnail worker");
+        .expect("queue thumbnail job");
 
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -309,5 +533,106 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         assert!(!updated_events(&sink).is_empty());
+    }
+
+    /// 队列只初始化一次：所有派发共用一个发送端（也就共用同一批 worker）。
+    #[test]
+    fn queue_is_initialized_once_and_shared() {
+        let first = queue().expect("initialize queue");
+        let second = queue().expect("reuse queue");
+        assert!(
+            ptr::eq(first, second),
+            "the thumbnail queue must be a single global channel"
+        );
+        // 有界并发的上限由 worker 数量决定（结构性约束）。
+        assert_eq!(THUMB_WORKERS, 2);
+    }
+
+    /// 批量派发仍受 [`THUMB_WORKERS`] 约束：同时执行的绘图不超过 worker 数，且全部完成。
+    #[test]
+    fn concurrent_jobs_never_exceed_the_worker_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = Arc::new(Library::open(dir.path().join("library")).unwrap());
+        let original = dir.path().join("batch.png");
+        write_png(&original, 600, 400);
+        let sink = Arc::new(RecordingSink::default());
+
+        let ids: Vec<String> = (0..8).map(|index| format!("batch-{index}")).collect();
+        for id in &ids {
+            let relative = format!("originals/images/2026/01/{id}.png");
+            insert_image(&library, id, &relative);
+            place_original(&library, &original, &relative);
+            spawn_thumbnail(
+                Arc::clone(&library),
+                Arc::clone(&sink) as Arc<dyn EventSink>,
+                id.clone(),
+                relative,
+            )
+            .expect("queue thumbnail job");
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let ready = ids
+                .iter()
+                .filter(|id| {
+                    library
+                        .get_item(id)
+                        .unwrap()
+                        .is_some_and(|item| item.status == ItemStatus::Ready)
+                })
+                .count();
+            if ready == ids.len() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "only {ready}/{} thumbnails were generated within 30s",
+                ids.len()
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        let peak = test_metrics::peak();
+        assert!(
+            peak <= THUMB_WORKERS,
+            "concurrency peak {peak} exceeded the {} workers",
+            THUMB_WORKERS
+        );
+        assert!(peak >= 1, "workers never ran a job");
+    }
+
+    /// 事件发送端 panic（例如序列化/发送失败）：worker 兜住 panic 并把素材标 `failed`，
+    /// 不会带死线程。
+    #[test]
+    fn panicking_sink_still_marks_the_item_failed() {
+        struct PanickingSink;
+
+        impl EventSink for PanickingSink {
+            fn emit(&self, _event: AppEvent) {
+                panic!("sink exploded");
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let library = Arc::new(Library::open(dir.path().join("library")).unwrap());
+        let original = dir.path().join("original.png");
+        write_png(&original, 100, 50);
+        let id = "item-panic";
+        let relative = "originals/images/2026/01/item-panic.png";
+        insert_image(&library, id, relative);
+        place_original(&library, &original, relative);
+
+        let job = ThumbnailJob {
+            library: Arc::clone(&library),
+            sink: Arc::new(PanickingSink),
+            item_id: id.to_string(),
+            original_path: relative.to_string(),
+        };
+        // `catch_unwind` 会打印 panic 信息；测试只关心兜底结果。
+        run_job(&job);
+
+        let stored = library.get_item(id).unwrap().unwrap();
+        assert_eq!(stored.status, ItemStatus::Failed);
     }
 }

@@ -197,3 +197,47 @@ fn load_thumb_bytes_rejects_paths_outside_the_library() {
         "unexpected error: {err:?}"
     );
 }
+
+/// 纵深防御：`thumb_path` 指向库内的 `texts/` 等非缩略图文件时同样拒绝（不读库内任意文件）。
+#[test]
+fn load_thumb_bytes_rejects_paths_outside_thumbs() {
+    let dir = tempfile::tempdir().unwrap();
+    let library = open_library(dir.path());
+    let item = library
+        .insert_item(NewItem {
+            kind: ItemKind::Image,
+            captured_at: 1,
+            source_app: None,
+            source_title: None,
+            source_url: None,
+            width: None,
+            height: None,
+            char_count: None,
+            original_path: "originals/images/2026/01/a.png".into(),
+            content_hash: "hash".into(),
+        })
+        .unwrap();
+
+    for thumb in [
+        format!("texts/{}.txt", item.id),
+        format!("thumbs\\{}.png", item.id),
+        "thumbs".to_string(),
+        "thumbs/".to_string(),
+        "thumbs-other/a.png".to_string(),
+    ] {
+        let text_target = dir.path().join(&thumb);
+        if let Some(parent) = text_target.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&text_target, b"secret").ok();
+
+        library
+            .update_status(&item.id, ItemStatus::Ready, Some(&thumb))
+            .unwrap();
+        let err = load_thumb_bytes(&library, &item.id).unwrap_err();
+        assert!(
+            matches!(err, AppError::InvalidInput(_)),
+            "thumb {thumb:?} must be rejected, got {err:?}"
+        );
+    }
+}
