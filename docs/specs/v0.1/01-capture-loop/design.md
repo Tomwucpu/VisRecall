@@ -398,7 +398,9 @@ D3D11CreateDevice(BGRA_SUPPORT, 默认适配器, 硬件 -> WARP 回退)
 
 - 冻结帧：`RawFrame.bgra` 通过 `UpdateSubresource` 上传到 `D3D11_USAGE_DEFAULT` 纹理；随后 CPU `Vec<u8>` 释放。
 - 冻结纹理转 D2D bitmap：`ID3D11Texture2D -> IDXGISurface -> CreateBitmapFromDxgiSurface(D2D1_BITMAP_OPTIONS_NONE)`。
-- 回读：提交时为每个相交显示器创建 staging texture，`CopyResource` 后 `Map`，按选区裁剪并拼合。
+- 回读：提交时为每个相交显示器创建 region 大小的 staging texture，`CopySubresourceRegion` 后 `Map`，按 RowPitch 复制并拼合；屏间空隙填 0。
+- 多屏 Present：含鼠标指针的覆盖窗口 `Present(1,0)`，其余窗口 `Present(0,0)`，避免串行等待多个 vblank；重绘由输入/定时器驱动，不做空闲 60fps 常驻。
+- 鼠标捕获：会话结束（提交/取消/失焦/回读失败）显式 `ReleaseCapture`；收到 `WM_CAPTURECHANGED` 时结束当前拖拽，避免捕获泄漏或键盘失效。
 - 颜色空间：阶段 01 按 SDR 处理；HDR 暂不做色调映射。
 
 ### 7.3 门禁与降级
