@@ -651,6 +651,23 @@ pub fn clamp_to_virtual_screen(rect: PhysicalRect, displays: &[DisplayInfo]) -> 
     }
 }
 
+/// 八个手柄的中心（全局虚拟屏幕物理像素；先角点后边中点）。
+///
+/// 渲染层用它把控制点分配到所属显示器（跨屏时每个控制点只画一次，见
+/// `overlay::render::handles_for_window`）；命中测试仍用 `i64` 内部的
+/// [`handle_points`]，两者顺序一致。
+pub fn handle_centers(rect: PhysicalRect) -> [(Handle, PhysicalPoint); 8] {
+    handle_points(rect).map(|(handle, x, y)| {
+        (
+            handle,
+            PhysicalPoint {
+                x: x.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                y: y.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+            },
+        )
+    })
+}
+
 /// 控制点命中半径：96 DPI 下 6px，按 `dpi/96` 缩放，至少 1px。
 fn handle_radius(dpi: u32) -> i64 {
     let scaled = HANDLE_RADIUS_AT_96_DPI * dpi as u64 / 96;

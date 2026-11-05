@@ -265,8 +265,10 @@ unsafe extern "system" fn enum_external_window_proc(hwnd: HWND, data: LPARAM) ->
 
 /// 顶层窗口是否可作为命中目标（可见性/最小化由调用方另行判断）。
 ///
-/// 规则：不是 `excluded_pid` 的窗口、非工具窗口、未被 DWM 隐身、`bounds` 非空且包含
-/// `point`。与 [`enumerate_windows`] 的候选规则对齐，额外增加排除自身进程与包含测试。
+/// 规则（与实现一一对应）：`pid` 非 0（取不到 PID 的窗口跳过）、`pid != excluded_pid`
+/// （排除覆盖层自身）、非工具窗口、未被 DWM 隐身、`bounds` 包含 `point`。
+/// `PhysicalRect::contains` 对空矩形恒为 `false`，因此空 `bounds` 自动被排除，
+/// 不需要额外的非空判断。
 fn is_hit_candidate(
     excluded_pid: u32,
     pid: u32,

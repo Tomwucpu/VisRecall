@@ -272,6 +272,15 @@ impl D3dContext {
         }
         .map_err(|err| failed("ID3D11DeviceContext::Map(staging)", err))?;
 
+        // `Map` 成功但数据指针为空时无法复制：立即 `Unmap` 并报错，绝不带着空指针读。
+        if mapped.pData.is_null() {
+            // SAFETY: 与上面的 `Map` 成对；未解引用 `pData`。
+            unsafe { self.context.Unmap(&staging, 0) };
+            return Err(AppError::Internal(
+                "ID3D11DeviceContext::Map(staging) returned a null data pointer".into(),
+            ));
+        }
+
         let row_bytes = width as usize * 4;
         let mut out = vec![0u8; row_bytes * height as usize];
         // SAFETY: `pData` 指向 staging 纹理的映射区，至少 `RowPitch * height` 字节可读；
@@ -322,8 +331,17 @@ impl SwapChain {
 
     /// `Present(1, 0)`：与 vsync 同步，单帧阻塞到下一个刷新周期。
     pub fn present(&self) -> Result<(), AppError> {
+        self.present_with_vsync(true)
+    }
+
+    /// `Present(SyncInterval, 0)`：`vsync = true` 用 1（等 vblank），`false` 用 0（立即返回）。
+    ///
+    /// 多屏时只有包含鼠标指针的窗口需要等 vblank，其余窗口用 0 立即入队，
+    /// 避免一次重绘串行等待多个刷新周期（design §7.2）。
+    pub fn present_with_vsync(&self, vsync: bool) -> Result<(), AppError> {
+        let interval = u32::from(vsync);
         // SAFETY: 交换链存活；Present 不持有额外指针。
-        unsafe { self.chain.Present(1, DXGI_PRESENT(0)) }
+        unsafe { self.chain.Present(interval, DXGI_PRESENT(0)) }
             .ok()
             .map_err(|err| failed("IDXGISwapChain::Present", err))
     }

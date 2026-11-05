@@ -13,7 +13,7 @@
 use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 
-use visrecall_domain::geometry::PhysicalRect;
+use visrecall_domain::geometry::{PhysicalPoint, PhysicalRect};
 use visrecall_domain::AppError;
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct2D::Common::{
@@ -35,6 +35,7 @@ use windows::Win32::Graphics::Dxgi::IDXGISurface;
 
 use super::d3d::{D3dContext, SwapChain, BACK_BUFFER_FORMAT};
 use super::frame::FrozenTexture;
+use crate::selection::{handle_centers, Handle};
 
 /// 文字使用的字体：中文 Windows 自带，DirectWrite 对缺字仍会回退。
 const FONT_FAMILY: &str = "Microsoft YaHei UI";
@@ -121,17 +122,24 @@ const NOTICE_BG: D2D1_COLOR_F = D2D1_COLOR_F {
 
 /// 一帧覆盖层场景；所有矩形都是**本窗口客户区**坐标（物理像素）。
 ///
-/// 调用方（覆盖层线程）已经把全局坐标减去本窗口所在显示器的 `bounds.x/y`，并裁掉
-/// 与窗口不相交的部分（`None`）。渲染器只负责画，不做坐标换算与 DPI 缩放。
+/// 调用方（覆盖层线程）已经把全局坐标减去本窗口所在显示器的 `bounds.x/y`，
+/// 与窗口完全不相交的元素置 `None`。渲染器只负责画，不做坐标换算与 DPI 缩放。
+///
+/// 跨屏策略（design §7.2）：边框按窗口裁剪后绘制；控制点、尺寸标签、悬停标签
+/// 由调用方用 [`handles_for_window`] / [`point_owner`] 决定**归属某个窗口**，
+/// 因此同一个控制点/标签在所有显示器上只出现一次。
 #[derive(Clone, Debug, Default)]
 pub struct Scene {
-    /// 用户选区边框/控制点/尺寸标签的数据源；`None` 表示没有选区。
+    /// 用户选区（本窗口本地坐标，**未**与窗口求交：越界部分交给 D2D 裁剪，
+    /// 这样跨屏时不会在屏间缝隙画出多余的边框）；`None` 表示选区不可见。
     pub selection: Option<PhysicalRect>,
-    /// 选区实时尺寸标签（`W×H`，物理像素）。
+    /// 选区实时尺寸标签（`W×H`，物理像素）；只在归属窗口上有值。
     pub selection_label: Option<String>,
+    /// 需要在本窗口绘制的控制点（中心为本窗口本地坐标）。
+    pub handles: Vec<(Handle, PhysicalPoint)>,
     /// 悬停窗口高亮矩形。
     pub hover: Option<PhysicalRect>,
-    /// 悬停窗口标签（标题/类名/进程/尺寸，调用方已截断）。
+    /// 悬停窗口标签（标题/类名/进程/尺寸，调用方已截断）；只在归属窗口上有值。
     pub hover_label: Option<String>,
     /// 「选区过小」一类提示文字。
     pub notice: Option<String>,
@@ -139,6 +147,61 @@ pub struct Scene {
     pub badge_alpha: f32,
     /// 本窗口所在显示器 DPI，控制点尺寸 = `8 × dpi / 96`。
     pub dpi: u32,
+}
+
+/// 八个控制点中落在 `window_bounds` 内的那些，中心换算成窗口本地坐标。
+///
+/// `selection` 与 `window_bounds` 都是**全局**虚拟屏幕物理像素；返回的点可以
+/// 直接画在本窗口客户区（客户区左上角 = 显示器 `bounds` 左上角）。
+/// 控制点中心恰好落在两个显示器的分界线上时（半开区间）归属右/下那个窗口，
+/// 因此每个控制点只会被一个窗口绘制。空选区没有控制点。
+pub fn handles_for_window(
+    selection: PhysicalRect,
+    window_bounds: PhysicalRect,
+) -> Vec<(Handle, PhysicalPoint)> {
+    if selection.is_empty() {
+        return Vec::new();
+    }
+    handle_centers(selection)
+        .into_iter()
+        .filter(|(_, point)| window_bounds.contains(*point))
+        .map(|(handle, point)| {
+            (
+                handle,
+                PhysicalPoint {
+                    x: point.x.saturating_sub(window_bounds.x),
+                    y: point.y.saturating_sub(window_bounds.y),
+                },
+            )
+        })
+        .collect()
+}
+
+/// 矩形右下角的最后一个像素（半开区间：`right() - 1`, `bottom() - 1`）。
+pub fn bottom_right(rect: PhysicalRect) -> PhysicalPoint {
+    PhysicalPoint {
+        x: rect.right().saturating_sub(1),
+        y: rect.bottom().saturating_sub(1),
+    }
+}
+
+/// 矩形中心的像素。
+pub fn center(rect: PhysicalRect) -> PhysicalPoint {
+    // 超长边（理论上只有异常输入）饱和到 `i32::MAX`，不做回绕。
+    let half_w = i32::try_from(rect.width / 2).unwrap_or(i32::MAX);
+    let half_h = i32::try_from(rect.height / 2).unwrap_or(i32::MAX);
+    PhysicalPoint {
+        x: rect.x.saturating_add(half_w),
+        y: rect.y.saturating_add(half_h),
+    }
+}
+
+/// `point` 落在哪个窗口边界内（按 `windows` 顺序返回第一个匹配项）。
+///
+/// 用来给「只画一次」的标签挑唯一归属窗口：标签的锚点依次尝试（如右下角 →
+/// 中心），第一个命中的窗口就是归属窗口；都不命中时返回 `None`（不画标签）。
+pub fn point_owner(point: PhysicalPoint, windows: &[PhysicalRect]) -> Option<usize> {
+    windows.iter().position(|bounds| bounds.contains(point))
 }
 
 /// 一个窗口的 D2D 渲染器：持有交换链、D2D 上下文与复用资源。
@@ -380,7 +443,8 @@ impl Renderer {
     ///
     /// 顺序：冻结帧铺满 → 选区外压暗（黑色 50%）→ 悬停窗口高亮 → 选区边框/控制点/
     /// 尺寸标签 → 「已冻结」角标（按 `badge_alpha` 淡出）→ 提示文字。所有矩形都在
-    /// `scene` 里以本窗口客户区坐标给出；与窗口不相交的部分由 D2D 裁剪或调用方过滤。
+    /// `scene` 里以本窗口客户区坐标给出；越界部分由 D2D 裁剪。控制点与标签由调用方
+    /// 按归属窗口分配（跨屏时不会重复绘制）。
     pub fn draw_scene(&mut self, frozen: &FrozenTexture, scene: &Scene) -> Result<(), AppError> {
         let (target_width, target_height) = self.size();
         if (frozen.width, frozen.height) != (target_width, target_height) {
@@ -424,10 +488,9 @@ impl Renderer {
         let width = target_width as f32;
         let height = target_height as f32;
 
-        // 选区：压暗区域按与窗口的交集裁剪，边框/控制点用原始坐标（越界部分被 D2D 裁剪）。
+        // 选区：压暗区域按与窗口的交集裁剪，边框/控制点用未裁剪坐标（越界部分被 D2D 裁剪，
+        // 因此跨屏选区不会在屏间缝隙多画一条边）。
         let dim = scene.selection.and_then(|sel| sel.intersect(&window));
-        // 没有选区（或选区为空）时压暗整屏；选区完全在别的显示器上时不压暗本窗口。
-        let dim_full = scene.selection.is_none();
 
         // SAFETY: 全部绘制调用都发生在 BeginDraw/EndDraw 之间；所有 D2D 结构都是栈上
         // 有效值，brush/text format 由 `self` 持有并在调用期间存活。
@@ -445,7 +508,7 @@ impl Renderer {
                 None,
             );
 
-            // 选区外压暗：没有选区时压暗整屏；有选区时压暗四条边带。
+            // 选区外压暗：没有选区、或选区完全落在其他显示器上时整屏压暗；否则压暗四条边带。
             match dim {
                 Some(sel) => {
                     let (l, t) = (sel.x as f32, sel.y as f32);
@@ -481,7 +544,7 @@ impl Renderer {
                         }
                     }
                 }
-                None if dim_full => {
+                None => {
                     let all = D2D_RECT_F {
                         left: 0.0,
                         top: 0.0,
@@ -490,7 +553,6 @@ impl Renderer {
                     };
                     self.target.FillRectangle(&all, &self.dim_brush);
                 }
-                None => {}
             }
 
             // 悬停窗口：青色边框 + 左上角标签。
@@ -519,14 +581,14 @@ impl Renderer {
                 }
             }
 
-            // 选区：2px 实线边框 + 八个控制点 + 实时尺寸标签。
+            // 选区：2px 实线边框 + 归属本窗口的控制点 + 实时尺寸标签（标签只在归属窗口上）。
             if let Some(selection) = scene.selection {
                 let rect = to_d2d(selection);
                 self.target
                     .DrawRectangle(&rect, &self.border_brush, 2.0, None);
                 draw_handles(
                     &self.target,
-                    selection,
+                    &scene.handles,
                     scene.dpi,
                     &self.border_brush,
                     &self.handle_outline_brush,
@@ -645,9 +707,17 @@ impl Renderer {
 
     /// 解除 D2D target 并 `Present(1, 0)`（vsync）。
     pub fn present(&mut self) -> Result<(), AppError> {
+        self.present_vsync(true)
+    }
+
+    /// 解除 D2D target 并按 `vsync` 选择 `Present(1, 0)` / `Present(0, 0)`。
+    ///
+    /// 多屏重绘时只有包含鼠标指针的窗口传 `true`，其余窗口传 `false` 立即入队，
+    /// 避免逐屏串行等待 vblank（design §7.2）。
+    pub fn present_vsync(&mut self, vsync: bool) -> Result<(), AppError> {
         // SAFETY: 传空 target 只释放对后备缓冲的引用，无额外指针参数。
         unsafe { self.context.SetTarget(None::<&ID2D1Image>) };
-        self.swap.present()
+        self.swap.present_with_vsync(vsync)
     }
 
     /// 已绘制的帧数。
@@ -724,37 +794,25 @@ fn to_d2d(rect: PhysicalRect) -> D2D_RECT_F {
     }
 }
 
-/// 画八个控制点：白填充 + 深色描边，边长 `8 × dpi / 96`（至少 8px）。
+/// 画本窗口归属的控制点：白填充 + 深色描边，边长 `8 × dpi / 96`（至少 4px）。
 ///
+/// `handles` 由调用方用 [`handles_for_window`] 算出（只含落在这个窗口里的点，
+/// 坐标已是窗口本地坐标），因此跨屏选区不会在每个相交显示器重复画出全套控制点。
 /// 只在 `BeginDraw`/`EndDraw` 之间调用；`target`/`brush` 由 [`Renderer`] 持有。
 fn draw_handles(
     target: &ID2D1RenderTarget,
-    selection: PhysicalRect,
+    handles: &[(Handle, PhysicalPoint)],
     dpi: u32,
     fill: &ID2D1SolidColorBrush,
     outline: &ID2D1SolidColorBrush,
 ) {
     let size = ((8 * dpi.max(96) as u64) / 96).max(4) as f32;
     let half = size / 2.0;
-    let x0 = selection.x as f32;
-    let y0 = selection.y as f32;
-    let x1 = selection.right() as f32;
-    let y1 = selection.bottom() as f32;
-    let mx = (x0 + x1) / 2.0;
-    let my = (y0 + y1) / 2.0;
-    let points = [
-        (x0, y0),
-        (mx, y0),
-        (x1, y0),
-        (x1, my),
-        (x1, y1),
-        (mx, y1),
-        (x0, y1),
-        (x0, my),
-    ];
     // SAFETY: 调用方保证处于 BeginDraw/EndDraw 之间；这里只构造栈上矩形并调用 D2D。
     unsafe {
-        for (cx, cy) in points {
+        for (_, point) in handles {
+            let cx = point.x as f32;
+            let cy = point.y as f32;
             let rect = D2D_RECT_F {
                 left: cx - half,
                 top: cy - half,
@@ -816,4 +874,139 @@ fn wide(text: &str) -> Vec<u16> {
 
 fn failed(op: &str, err: impl std::fmt::Display) -> AppError {
     AppError::Internal(format!("{op} failed: {err}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn handle_list(handles: &[(Handle, PhysicalPoint)]) -> Vec<Handle> {
+        handles.iter().map(|(handle, _)| *handle).collect()
+    }
+
+    fn find(handles: &[(Handle, PhysicalPoint)], wanted: Handle) -> PhysicalPoint {
+        handles
+            .iter()
+            .find(|(handle, _)| *handle == wanted)
+            .map(|(_, point)| *point)
+            .expect("handle should be owned by this window")
+    }
+
+    #[test]
+    fn handles_for_single_screen_are_all_local() {
+        let selection = PhysicalRect::new(100, 50, 400, 300);
+        let window = PhysicalRect::new(0, 0, 2560, 1440);
+        let handles = handles_for_window(selection, window);
+        assert_eq!(handle_list(&handles).len(), 8);
+        // 全局坐标减去窗口原点：单屏原点 (0,0) 时本地坐标与全局相同。
+        assert_eq!(
+            find(&handles, Handle::NorthWest),
+            PhysicalPoint { x: 100, y: 50 }
+        );
+        assert_eq!(
+            find(&handles, Handle::SouthEast),
+            PhysicalPoint { x: 500, y: 350 }
+        );
+        assert_eq!(
+            find(&handles, Handle::North),
+            PhysicalPoint { x: 300, y: 50 }
+        );
+    }
+
+    #[test]
+    fn cross_screen_handles_split_between_windows() {
+        let left = PhysicalRect::new(0, 0, 2560, 1440);
+        let right = PhysicalRect::new(2560, 0, 2560, 1440);
+        // 选区横跨两台显示器：x 2400..2800，y 100..300。
+        let selection = PhysicalRect::new(2400, 100, 400, 200);
+
+        let left_handles = handles_for_window(selection, left);
+        assert_eq!(
+            handle_list(&left_handles),
+            vec![Handle::NorthWest, Handle::SouthWest, Handle::West]
+        );
+        assert_eq!(
+            find(&left_handles, Handle::West),
+            PhysicalPoint { x: 2400, y: 200 }
+        );
+
+        let right_handles = handles_for_window(selection, right);
+        assert_eq!(
+            handle_list(&right_handles),
+            vec![
+                Handle::NorthEast,
+                Handle::SouthEast,
+                Handle::North,
+                Handle::East,
+                Handle::South
+            ]
+        );
+        // 右屏原点 x = 2560：North (2600,100) → (40,100)，East (2800,200) → (240,200)。
+        assert_eq!(
+            find(&right_handles, Handle::North),
+            PhysicalPoint { x: 40, y: 100 }
+        );
+        assert_eq!(
+            find(&right_handles, Handle::East),
+            PhysicalPoint { x: 240, y: 200 }
+        );
+
+        // 两台窗口合计正好八个控制点：每个点只被一个窗口绘制。
+        assert_eq!(left_handles.len() + right_handles.len(), 8);
+    }
+
+    #[test]
+    fn handles_handle_negative_origin_and_offscreen_selection() {
+        // 副屏在主屏左侧：原点 x = -2560。
+        let negative = PhysicalRect::new(-2560, 0, 2560, 1440);
+        let selection = PhysicalRect::new(-300, 10, 200, 100);
+        let handles = handles_for_window(selection, negative);
+        assert_eq!(handles.len(), 8);
+        assert_eq!(
+            find(&handles, Handle::NorthWest),
+            PhysicalPoint { x: 2260, y: 10 }
+        );
+
+        // 选区完全不在本显示器内（虚拟屏幕的屏间空隙）时没有任何控制点。
+        let elsewhere = PhysicalRect::new(0, 0, 2560, 1440);
+        assert!(handles_for_window(selection, elsewhere).is_empty());
+        // 空选区同理。
+        assert!(handles_for_window(PhysicalRect::default(), negative).is_empty());
+    }
+
+    #[test]
+    fn handle_on_seam_belongs_to_right_window_only() {
+        let left = PhysicalRect::new(0, 0, 2560, 1440);
+        let right = PhysicalRect::new(2560, 0, 2560, 1440);
+        // 左边界正好压在分界线上（半开区间 → 归属右屏）。
+        let selection = PhysicalRect::new(2560, 100, 100, 100);
+        assert!(handles_for_window(selection, left).is_empty());
+        assert_eq!(handles_for_window(selection, right).len(), 8);
+    }
+
+    #[test]
+    fn label_anchor_points_and_owner() {
+        let left = PhysicalRect::new(0, 0, 2560, 1440);
+        let right = PhysicalRect::new(2560, 0, 2560, 1440);
+        let windows = [left, right];
+        let selection = PhysicalRect::new(2400, 100, 400, 200);
+
+        // 右下角用最后一个像素（半开区间），跨屏时落在右屏。
+        assert_eq!(bottom_right(selection), PhysicalPoint { x: 2799, y: 299 });
+        assert_eq!(center(selection), PhysicalPoint { x: 2600, y: 200 });
+        assert_eq!(point_owner(bottom_right(selection), &windows), Some(1));
+        assert_eq!(point_owner(center(selection), &windows), Some(1));
+
+        // 单屏选区与负坐标。
+        let single = PhysicalRect::new(100, 100, 50, 50);
+        assert_eq!(point_owner(bottom_right(single), &[left]), Some(0));
+        let negative_window = [PhysicalRect::new(-2560, 0, 2560, 1440)];
+        let negative_selection = PhysicalRect::new(-300, 10, 100, 100);
+        assert_eq!(
+            point_owner(bottom_right(negative_selection), &negative_window),
+            Some(0)
+        );
+        // 落在所有窗口之外。
+        assert_eq!(point_owner(PhysicalPoint { x: -1, y: 0 }, &windows), None);
+    }
 }

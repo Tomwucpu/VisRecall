@@ -12,7 +12,8 @@
 //! 选区尺寸的目标缓冲（top-down BGRA8），未覆盖区域填 0（design §6 的屏间空隙限制）。
 //! [`region_offsets`] 负责「全局选区 ∩ 显示器」到「纹理内偏移 / 目标内偏移」的换算。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::time::Instant;
 
 use visrecall_domain::geometry::{PhysicalPoint, PhysicalRect};
 use windows::Win32::Foundation::POINT;
@@ -105,6 +106,8 @@ pub(crate) enum InputEvent {
     },
     /// `WM_LBUTTONUP`。
     MouseUp,
+    /// `WM_CAPTURECHANGED`：本线程失去了鼠标捕获（例如被其他进程抢走）。
+    CaptureLost,
     /// 方向键微调（`Shift` 为 10px）。
     Nudge { key: Key, shift: bool },
     /// `Enter`：提交。
@@ -122,6 +125,9 @@ pub(crate) enum InputEvent {
 thread_local! {
     /// 覆盖层线程的消息队列：窗口过程写、pump 结束后取。
     static QUEUE: RefCell<Vec<InputEvent>> = const { RefCell::new(Vec::new()) };
+    /// 最近一次 `WM_MOUSEMOVE` 入队时刻；覆盖层线程绘制并呈现后用它统计
+    /// `input_to_present_ms`（队列里的 `MouseMove` 已被合并，时刻也随之更新）。
+    static MOUSE_MOVE_AT: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
 /// 入队一条输入事件；连续的 [`InputEvent::MouseMove`] 合并为最新位置。
@@ -129,6 +135,7 @@ pub(crate) fn push(event: InputEvent) {
     QUEUE.with(|queue| {
         let mut queue = queue.borrow_mut();
         if matches!(event, InputEvent::MouseMove { .. }) {
+            MOUSE_MOVE_AT.with(|at| at.set(Some(Instant::now())));
             if let Some(last) = queue.last_mut() {
                 if matches!(last, InputEvent::MouseMove { .. }) {
                     *last = event;
@@ -143,6 +150,16 @@ pub(crate) fn push(event: InputEvent) {
 /// 取走当前排队的所有输入事件（保持入队顺序）。
 pub(crate) fn take() -> Vec<InputEvent> {
     QUEUE.with(|queue| std::mem::take(&mut *queue.borrow_mut()))
+}
+
+/// 取走最近一次 `WM_MOUSEMOVE` 的入队时刻（每个移动事件只消费一次）。
+pub(crate) fn take_mouse_move_at() -> Option<Instant> {
+    MOUSE_MOVE_AT.with(|at| at.take())
+}
+
+/// 丢弃上个会话残留的移动时刻（与 [`take`] 一起在新会话开始时调用）。
+pub(crate) fn clear_mouse_move_at() {
+    MOUSE_MOVE_AT.with(|at| at.set(None));
 }
 
 /// 当前鼠标位置（全局物理像素）；`GetCursorPos` 失败时返回 `None`。
