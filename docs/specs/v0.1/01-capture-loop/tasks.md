@@ -1323,6 +1323,8 @@ git commit -m "feat(shell): add selection state machine"
 **Files:**
 - Create: `crates/shell/src/overlay/input.rs`
 - Modify: `crates/shell/src/overlay/{mod.rs,render.rs}`
+- Modify: `crates/capture/src/window.rs`（新增 `hit_chain_excluding(point, excluded_pid)`，覆盖层可见时排除自身窗口）
+- Modify: `crates/shell/src/selection.rs`（新增 dragged 标记，避免零轴拖拽被当作单击采用 hover）
 - Test: `crates/shell/tests/stitch.rs`
 
 **Interfaces:**

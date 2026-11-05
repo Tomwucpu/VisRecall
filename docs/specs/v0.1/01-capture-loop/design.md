@@ -248,6 +248,7 @@ pub trait WindowProbe: Send + Sync {
     fn foreground(&self) -> Result<ForegroundInfo, AppError>;
     fn enumerate(&self) -> Result<Vec<WindowInfo>, AppError>;
     fn hit_chain(&self, point: PhysicalPoint) -> Result<Vec<WindowInfo>, AppError>;
+    fn hit_chain_excluding(&self, point: PhysicalPoint, excluded_pid: u32) -> Result<Vec<WindowInfo>, AppError>;
 }
 
 pub fn now_millis() -> i64;  // 全部 captured_at/created_at/updated_at 使用 Unix 毫秒
@@ -371,6 +372,7 @@ Hotkey / BallClick / UI
 - 不使用 `WS_EX_NOACTIVATE`，因为覆盖层需要键盘焦点；显示后 `SetForegroundWindow` + `SetFocus`，失败时 `AttachThreadInput` 兜底。
 - 类名 `VisRecallOverlay`，注册一次；窗口过程只处理输入与绘制消息。
 - 所有窗口共享一个 `SelectionState`；鼠标在起始窗口 `SetCapture`，`WM_MOUSEMOVE` 用全局坐标更新并重绘所有覆盖层。
+- 覆盖层可见时，`WindowFromPoint` 会命中覆盖层自身；窗口高亮必须使用 `hit_chain_excluding(point, GetCurrentProcessId())` 从 Z 序顶层向下跳过本进程窗口，再对选中窗口构建子窗口链。
 - 关闭后把焦点还给捕获前的前台窗口。
 
 ### 7.2 D3D11/D2D 管线
