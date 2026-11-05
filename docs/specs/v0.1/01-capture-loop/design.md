@@ -329,7 +329,7 @@ Hotkey / BallClick / UI
        3. DwmFlush()                          等待合成
        4. DisplayProbe::enumerate()           显示器列表（物理像素/DPI）
        5. FrameGrabber::grab(displays)        逐显示器 GDI 抓帧 -> Vec<RawFrame>
-       6. 恢复悬浮球（覆盖层显示后）
+       6. 覆盖层显示期间保持悬浮球隐藏；会话结束（提交/取消）后恢复
        7. OverlayHandle::show(frames, displays, foreground)
   -> Overlay thread
        8. 为每个显示器创建/复用 swap chain 与窗口
