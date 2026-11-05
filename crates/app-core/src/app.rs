@@ -4,7 +4,8 @@
 //! 库打开失败不会 panic：错误保存在 [`AppCore::library`] 里，由命令层转成
 //! `CONFIG_MISSING` 等稳定错误码。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 
@@ -13,6 +14,7 @@ use visrecall_capture::{GdiFrameGrabber, Win32WindowProbe};
 use visrecall_domain::AppError;
 use visrecall_library::paths::AppPaths;
 use visrecall_library::{AppConfig, Library};
+use visrecall_shell::ball::{spawn_ball_thread, BallConfig, BallHandle};
 use visrecall_shell::hotkey::{spawn_hotkey_thread, HotkeyHandle, HotkeySpec};
 use visrecall_shell::overlay::{spawn_overlay_thread, OverlayHandle};
 use visrecall_shell::{OverlayEvent, ShellEvent};
@@ -29,14 +31,21 @@ pub struct AppCore {
     paths: AppPaths,
     /// 库打开失败时保留错误；后续命令据此返回错误码。
     library: Result<Arc<Library>, AppError>,
-    config: Mutex<AppConfig>,
+    /// 配置在 `Mutex` 后共享：捕获循环（悬浮球位置落盘）与命令层都要读写。
+    config: Arc<Mutex<AppConfig>>,
     sink: Arc<dyn EventSink>,
     /// 全局热键线程句柄；`start_hotkey` 之后才有值，drop 时自动注销。
     hotkey: Mutex<Option<HotkeyHandle>>,
     /// 捕获运行时；`start_runtime` 之后才有值，drop 时通知线程退出。
     runtime: Mutex<Option<CaptureRuntime>>,
-    /// 抓帧期间隐藏/恢复自有窗口；测试与无 UI 场景使用 [`NoopWindowVisibility`]。
-    visibility: Arc<dyn WindowVisibility>,
+    /// 主窗口（以及将来其他自有窗口）的隐藏/恢复；注入自 `src-tauri`。
+    main_visibility: Arc<dyn WindowVisibility>,
+    /// 悬浮球线程句柄；`start_runtime` 之后才有值。
+    ///
+    /// 放在 `Arc` 后共享：[`AppVisibility`] 也要在抓帧期间隐藏/恢复球。
+    ball: Arc<Mutex<Option<BallHandle>>>,
+    /// 最近一次生效的悬浮球可见性；与 `config.ball.enabled` 保持一致。
+    ball_enabled: AtomicBool,
 }
 
 /// 捕获运行时的线程句柄与通道。
@@ -67,6 +76,7 @@ impl AppCore {
         visibility: Arc<dyn WindowVisibility>,
     ) -> AppCore {
         let config = AppConfig::load_or_default(&paths.config_file);
+        let ball_enabled = config.ball.enabled;
         let library_path = config.library_path.clone();
         tracing::info!(
             config = %paths.config_file.display(),
@@ -101,11 +111,13 @@ impl AppCore {
         AppCore {
             paths,
             library,
-            config: Mutex::new(config),
+            config: Arc::new(Mutex::new(config)),
             sink,
             hotkey: Mutex::new(None),
             runtime: Mutex::new(None),
-            visibility,
+            main_visibility: visibility,
+            ball: Arc::new(Mutex::new(None)),
+            ball_enabled: AtomicBool::new(ball_enabled),
         }
     }
 
@@ -141,11 +153,14 @@ impl AppCore {
         &self.sink
     }
 
-    /// 启动捕获运行时：预创建覆盖层线程 → 建立 ShellEvent 通道 → 起捕获循环线程。
+    /// 启动捕获运行时：悬浮球线程 → 覆盖层线程 → ShellEvent 通道 → 捕获循环线程。
     ///
     /// 幂等；失败只返回错误（调用方记录日志），不阻止应用继续驻留托盘。
     /// 覆盖层线程在启动时完成 D3D 设备/窗口/交换链预创建，避免首次捕获超过
     /// 150ms 的入口预算（design §3、P1-R12）。
+    ///
+    /// 悬浮球线程即使配置为禁用也启动（窗口保持隐藏）：托盘随时可以打开球，
+    /// 也避免每次切换都重建 COM/GDI+ 线程。
     pub fn start_runtime(&self) -> Result<(), AppError> {
         if self.lock_runtime().is_some() {
             tracing::debug!("capture runtime already started");
@@ -160,6 +175,20 @@ impl AppCore {
             }
         };
 
+        let (shell_tx, shell_rx) = crossbeam_channel::unbounded();
+
+        // 悬浮球：位置从配置恢复；可见性单独下发，线程本身不读配置。
+        let config = self.config();
+        let ball = spawn_ball_thread(
+            BallConfig {
+                size: config.ball.size,
+                positions: config.ball.positions.clone(),
+            },
+            shell_tx.clone(),
+        );
+        *self.lock_ball() = Some(ball);
+        self.apply_ball_visibility(config.ball.enabled);
+
         let (overlay_tx, overlay_rx) = crossbeam_channel::unbounded();
         let overlay = match spawn_overlay_thread(overlay_tx) {
             Ok(overlay) => overlay,
@@ -169,17 +198,27 @@ impl AppCore {
             }
         };
 
+        // 抓帧期间同时隐藏主窗口与悬浮球，保证画面里没有自有 UI。
+        let visibility: Arc<dyn WindowVisibility> = Arc::new(AppVisibility::new(
+            Arc::clone(&self.main_visibility),
+            Arc::clone(&self.ball),
+        ));
         let coordinator = CaptureCoordinator::new(
             library,
             Arc::new(GdiFrameGrabber::new()),
             Arc::new(Win32WindowProbe::new()),
             overlay.clone(),
-            Arc::clone(&self.visibility),
+            visibility,
             Arc::clone(&self.sink),
         );
 
-        let (shell_tx, shell_rx) = crossbeam_channel::unbounded();
-        spawn_capture_loop(coordinator, shell_rx, overlay_rx)?;
+        spawn_capture_loop(
+            coordinator,
+            shell_rx,
+            overlay_rx,
+            Arc::clone(&self.config),
+            self.paths.config_file.clone(),
+        )?;
 
         *self.lock_runtime() = Some(CaptureRuntime {
             shell_tx,
@@ -187,6 +226,51 @@ impl AppCore {
         });
         tracing::info!("capture runtime started");
         Ok(())
+    }
+
+    /// 当前悬浮球是否应当可见（与 `config.ball.enabled` 同步）。
+    pub fn ball_enabled(&self) -> bool {
+        self.ball_enabled.load(Ordering::SeqCst)
+    }
+
+    /// 托盘「显示或隐藏悬浮球」：翻转 `config.ball.enabled` → 落盘 → 切换可见性。
+    ///
+    /// 返回翻转后的状态。写盘失败时保持原状态（不出现「内存已关、重启又开」的错位）。
+    pub fn toggle_ball(&self) -> bool {
+        let enabled = {
+            let mut guard = self.lock_config();
+            let mut next = guard.clone();
+            next.ball.enabled = !guard.ball.enabled;
+            match next.save_atomic(&self.paths.config_file) {
+                Ok(()) => {
+                    let enabled = next.ball.enabled;
+                    tracing::info!(enabled, "floating ball toggled");
+                    *guard = next;
+                    enabled
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "failed to save ball visibility; keeping state");
+                    guard.ball.enabled
+                }
+            }
+        };
+        self.apply_ball_visibility(enabled);
+        enabled
+    }
+
+    /// 把可见性同步到悬浮球线程并记录到 [`AppCore::ball_enabled`]。
+    fn apply_ball_visibility(&self, visible: bool) {
+        self.ball_enabled.store(visible, Ordering::SeqCst);
+        let guard = self.lock_ball();
+        match guard.as_ref() {
+            Some(ball) => ball.set_visible(visible),
+            None => {
+                tracing::debug!(
+                    visible,
+                    "floating ball thread not started; visibility deferred"
+                );
+            }
+        }
     }
 
     /// 启动全局捕获热键（解析配置 → 注册 → 起事件消费线程）。
@@ -258,6 +342,13 @@ impl AppCore {
                                 message: "capture runtime not started".into(),
                             }));
                         }
+                        ShellEvent::BallMoved { display_id, .. } => {
+                            // 运行时未启动时悬浮球也不会创建；事件直接丢弃。
+                            tracing::debug!(
+                                display_id = %display_id,
+                                "ball move ignored; runtime not started"
+                            );
+                        }
                     }
                 }
                 tracing::debug!("shell event channel closed");
@@ -278,7 +369,8 @@ impl AppCore {
     /// 应用设置补丁：先写盘再更新内存，避免写失败后内存与磁盘不一致。
     ///
     /// 阶段 01 不支持快捷键热重载：`capture_hotkey` 与当前值不同时整体拒绝
-    /// （不保存任何字段，保留旧值）。
+    /// （不保存任何字段，保留旧值）。`ball_enabled` 会立即同步到悬浮球线程；
+    /// `ball_size` 的变更需要重启才能生效（阶段 01 不重建窗口）。
     pub fn update_settings(
         &self,
         ball_enabled: Option<bool>,
@@ -301,8 +393,24 @@ impl AppCore {
             next.ball.size = size;
         }
 
+        let changed_visibility = ball_enabled.is_some() && next.ball.enabled != guard.ball.enabled;
+        let changed_size = next.ball.size != guard.ball.size;
+
         next.save_atomic(&self.paths.config_file)?;
         *guard = next.clone();
+        // 先释放配置锁再碰悬浮球线程，避免两把锁的持有顺序与捕获循环相反。
+        drop(guard);
+
+        if changed_visibility {
+            self.apply_ball_visibility(next.ball.enabled);
+        }
+        if changed_size {
+            tracing::warn!(
+                size = next.ball.size,
+                "floating ball size change requires a restart (phase 01 does not rebuild it)"
+            );
+        }
+
         tracing::info!(config = %self.paths.config_file.display(), "settings saved");
         Ok(next)
     }
@@ -310,6 +418,12 @@ impl AppCore {
     fn lock_config(&self) -> MutexGuard<'_, AppConfig> {
         // 持锁期间没有会 panic 的操作；被毒化时也继续使用，避免启动后永久不可用。
         self.config
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    fn lock_ball(&self) -> MutexGuard<'_, Option<BallHandle>> {
+        self.ball
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
     }
@@ -327,6 +441,81 @@ impl AppCore {
     }
 }
 
+/// 抓帧期间隐藏/恢复「自有窗口」的组合实现：主窗口 + 悬浮球。
+///
+/// 主窗口沿用注入的实现（`src-tauri` 的主窗口可见性实现）；悬浮球
+/// 只在抓帧前可见时才隐藏，抓帧结束后恢复原状（球被禁用时不误开）。隐藏悬浮球
+/// 走 `SendMessageW`，返回时窗口已经不可见，因此 `DwmFlush`/抓帧不会包含它。
+struct AppVisibility {
+    main: Arc<dyn WindowVisibility>,
+    ball: Arc<Mutex<Option<BallHandle>>>,
+    /// 抓帧前悬浮球是否可见；`show_own_windows` 只恢复这个状态。
+    ball_was_visible: AtomicBool,
+}
+
+impl AppVisibility {
+    fn new(main: Arc<dyn WindowVisibility>, ball: Arc<Mutex<Option<BallHandle>>>) -> Self {
+        Self {
+            main,
+            ball,
+            ball_was_visible: AtomicBool::new(false),
+        }
+    }
+
+    fn lock_ball(&self) -> MutexGuard<'_, Option<BallHandle>> {
+        self.ball
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+}
+
+impl WindowVisibility for AppVisibility {
+    fn hide_own_windows(&self) {
+        // 先藏球（立即返回），再藏主窗口（可能要等主线程应答）。
+        {
+            let guard = self.lock_ball();
+            if let Some(ball) = guard.as_ref() {
+                if ball.is_visible() {
+                    ball.set_visible(false);
+                    if !ball.is_visible() {
+                        self.ball_was_visible.store(true, Ordering::SeqCst);
+                    }
+                }
+            }
+        }
+        self.main.hide_own_windows();
+    }
+
+    fn show_own_windows(&self) {
+        if self.ball_was_visible.swap(false, Ordering::SeqCst) {
+            let guard = self.lock_ball();
+            if let Some(ball) = guard.as_ref() {
+                ball.set_visible(true);
+            }
+        }
+        self.main.show_own_windows();
+    }
+}
+
+/// 记录悬浮球拖动后的位置（归一化中心坐标）并原子落盘。
+///
+/// 悬浮球线程只发 [`ShellEvent::BallMoved`]，配置写在这里完成（design §9.1）。
+/// 写盘失败只记录日志，不能让捕获循环退出或丢事件。
+fn store_ball_position(
+    config: &Mutex<AppConfig>,
+    config_file: &Path,
+    display_id: &str,
+    nx: f32,
+    ny: f32,
+) -> Result<(), AppError> {
+    let mut guard = config.lock().unwrap_or_else(|poison| poison.into_inner());
+    let mut next = guard.clone();
+    next.ball.positions.insert(display_id.to_string(), (nx, ny));
+    next.save_atomic(config_file)?;
+    *guard = next;
+    Ok(())
+}
+
 /// 捕获循环单步结果：`Continue` 继续等事件，`Exit` 两个通道都断开（正常退出）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CaptureStep {
@@ -334,7 +523,7 @@ enum CaptureStep {
     Exit,
 }
 
-/// 捕获循环线程：串行处理快捷键触发与覆盖层结果。
+/// 捕获循环线程：串行处理快捷键/悬浮球触发、悬浮球位置与覆盖层结果。
 ///
 /// 抓帧与落盘都是同步 IO/CPU 工作，放在专用线程（design §3 的 capture worker），
 /// 不占主线程；两个通道都断开（`AppCore` 释放）时退出。
@@ -345,6 +534,8 @@ fn spawn_capture_loop(
     coordinator: CaptureCoordinator,
     shell: Receiver<ShellEvent>,
     overlay: Receiver<OverlayEvent>,
+    config: Arc<Mutex<AppConfig>>,
+    config_file: PathBuf,
 ) -> Result<(), AppError> {
     let spawned = thread::Builder::new()
         .name("visrecall-capture-loop".into())
@@ -357,6 +548,28 @@ fn spawn_capture_loop(
                                 tracing::info!(?trigger, "capture requested");
                                 if let Err(err) = coordinator.start(trigger) {
                                     tracing::warn!(error = %err, "capture start failed");
+                                }
+                                CaptureStep::Continue
+                            }
+                            Ok(ShellEvent::BallMoved { display_id, nx, ny }) => {
+                                tracing::info!(
+                                    display_id = %display_id,
+                                    nx,
+                                    ny,
+                                    "floating ball position reported"
+                                );
+                                if let Err(err) = store_ball_position(
+                                    &config,
+                                    &config_file,
+                                    &display_id,
+                                    nx,
+                                    ny,
+                                ) {
+                                    tracing::warn!(
+                                        display_id = %display_id,
+                                        error = %err,
+                                        "failed to persist the floating ball position"
+                                    );
                                 }
                                 CaptureStep::Continue
                             }
@@ -538,6 +751,77 @@ mod tests {
             .update_settings(Some(true), Some(56), Some(hotkey))
             .unwrap();
         assert_eq!(updated.ball.size, 56);
+    }
+
+    /// Task 15：`update_settings` 的 ball_enabled 立即可见（没有悬浮球线程时只更新状态）。
+    #[test]
+    fn update_settings_syncs_ball_visibility_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, _sink) = open(dir.path());
+        assert!(core.ball_enabled());
+
+        core.update_settings(Some(false), None, None).unwrap();
+        assert!(!core.ball_enabled());
+        assert!(!core.config().ball.enabled);
+
+        core.update_settings(Some(true), None, None).unwrap();
+        assert!(core.ball_enabled());
+    }
+
+    /// Task 15：托盘切换悬浮球 = 翻转配置 + 落盘；没有线程时不 panic。
+    #[test]
+    fn toggle_ball_persists_the_new_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, _sink) = open(dir.path());
+        assert!(core.ball_enabled());
+
+        assert!(!core.toggle_ball());
+        assert!(!core.ball_enabled());
+        let reloaded = AppConfig::load_or_default(&core.paths().config_file);
+        assert!(!reloaded.ball.enabled);
+
+        assert!(core.toggle_ball());
+        assert!(core.ball_enabled());
+        let reloaded = AppConfig::load_or_default(&core.paths().config_file);
+        assert!(reloaded.ball.enabled);
+    }
+
+    /// Task 15：悬浮球拖动事件写回 `config.ball.positions` 并原子落盘。
+    #[test]
+    fn ball_move_updates_positions_and_saves_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, _sink) = open(dir.path());
+
+        store_ball_position(
+            &core.config,
+            &core.paths().config_file,
+            "\\\\.\\DISPLAY1",
+            0.25,
+            0.75,
+        )
+        .expect("store ball position");
+
+        let positions = core.config().ball.positions;
+        assert_eq!(positions.get("\\\\.\\DISPLAY1"), Some(&(0.25, 0.75)));
+
+        let reloaded = AppConfig::load_or_default(&core.paths().config_file);
+        assert_eq!(
+            reloaded.ball.positions.get("\\\\.\\DISPLAY1"),
+            Some(&(0.25, 0.75))
+        );
+
+        // 同一台显示器再次拖动只更新该条目。
+        store_ball_position(
+            &core.config,
+            &core.paths().config_file,
+            "\\\\.\\DISPLAY1",
+            0.1,
+            0.2,
+        )
+        .expect("update ball position");
+        let positions = core.config().ball.positions;
+        assert_eq!(positions.len(), 1);
+        assert_eq!(positions.get("\\\\.\\DISPLAY1"), Some(&(0.1, 0.2)));
     }
 
     #[test]

@@ -6,7 +6,7 @@
 use tauri::image::Image;
 use tauri::menu::MenuBuilder;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::App;
+use tauri::{App, Manager};
 
 use crate::window_lifecycle;
 
@@ -49,8 +49,9 @@ pub fn create(app: &App, library_ok: bool) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             MENU_OPEN_MAIN => window_lifecycle::show_main_window(app),
             MENU_TOGGLE_BALL => {
-                // 悬浮球在 Task 15 接入；阶段 01 先记录占位日志。
-                tracing::info!("tray: toggle ball is not implemented until phase 01 task 15");
+                // 悬浮球可见性由 AppCore 维护：写配置 → 同步线程，返回新状态。
+                let enabled = app.state::<visrecall_app_core::AppCore>().toggle_ball();
+                tracing::info!(enabled, "tray: floating ball visibility toggled");
             }
             MENU_SETTINGS => {
                 // 设置页在后续任务实现；阶段 01 先打开主窗口承接。
