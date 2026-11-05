@@ -14,7 +14,9 @@ use visrecall_capture::{GdiFrameGrabber, Win32WindowProbe};
 use visrecall_domain::AppError;
 use visrecall_library::paths::AppPaths;
 use visrecall_library::{AppConfig, Library};
-use visrecall_shell::ball::{spawn_ball_thread, BallConfig, BallHandle};
+use visrecall_shell::ball::{
+    spawn_ball_thread, BallConfig, BallHandle, MAX_BALL_SIZE, MIN_BALL_SIZE,
+};
 use visrecall_shell::hotkey::{spawn_hotkey_thread, HotkeyHandle, HotkeySpec};
 use visrecall_shell::overlay::{spawn_overlay_thread, OverlayHandle};
 use visrecall_shell::{OverlayEvent, ShellEvent};
@@ -45,7 +47,9 @@ pub struct AppCore {
     /// 放在 `Arc` 后共享：[`AppVisibility`] 也要在抓帧期间隐藏/恢复球。
     ball: Arc<Mutex<Option<BallHandle>>>,
     /// 最近一次生效的悬浮球可见性；与 `config.ball.enabled` 保持一致。
-    ball_enabled: AtomicBool,
+    ///
+    /// 放 `Arc` 后共享：[`AppVisibility`] 在会话结束恢复球之前要检查它（M-3）。
+    ball_enabled: Arc<AtomicBool>,
 }
 
 /// 捕获运行时的线程句柄与通道。
@@ -117,7 +121,7 @@ impl AppCore {
             runtime: Mutex::new(None),
             main_visibility: visibility,
             ball: Arc::new(Mutex::new(None)),
-            ball_enabled: AtomicBool::new(ball_enabled),
+            ball_enabled: Arc::new(AtomicBool::new(ball_enabled)),
         }
     }
 
@@ -202,6 +206,7 @@ impl AppCore {
         let visibility: Arc<dyn WindowVisibility> = Arc::new(AppVisibility::new(
             Arc::clone(&self.main_visibility),
             Arc::clone(&self.ball),
+            Arc::clone(&self.ball_enabled),
         ));
         let coordinator = CaptureCoordinator::new(
             library,
@@ -370,7 +375,8 @@ impl AppCore {
     ///
     /// 阶段 01 不支持快捷键热重载：`capture_hotkey` 与当前值不同时整体拒绝
     /// （不保存任何字段，保留旧值）。`ball_enabled` 会立即同步到悬浮球线程；
-    /// `ball_size` 的变更需要重启才能生效（阶段 01 不重建窗口）。
+    /// `ball_size` 必须在壳层支持的 `16..=256` 内，越界整体拒绝（不落盘）；
+    /// 范围内的变更需要重启才能生效（阶段 01 不重建窗口）。
     pub fn update_settings(
         &self,
         ball_enabled: Option<bool>,
@@ -382,6 +388,14 @@ impl AppCore {
         if let Some(hotkey) = capture_hotkey.as_deref() {
             if hotkey != guard.hotkeys.capture {
                 return Err(AppError::InvalidInput("restart required".into()));
+            }
+        }
+        if let Some(size) = ball_size {
+            // 与壳层的夹取范围一致：越界时宁可拒绝，也不要「存下来但显示不同」。
+            if !(MIN_BALL_SIZE..=MAX_BALL_SIZE).contains(&size) {
+                return Err(AppError::InvalidInput(format!(
+                    "ball size must be between {MIN_BALL_SIZE} and {MAX_BALL_SIZE}"
+                )));
             }
         }
 
@@ -446,18 +460,28 @@ impl AppCore {
 /// 主窗口沿用注入的实现（`src-tauri` 的主窗口可见性实现）；悬浮球
 /// 只在抓帧前可见时才隐藏，抓帧结束后恢复原状（球被禁用时不误开）。隐藏悬浮球
 /// 走 `SendMessageW`，返回时窗口已经不可见，因此 `DwmFlush`/抓帧不会包含它。
+///
+/// 会话期间用户可能用托盘/设置关掉球：恢复前再看一次共享的 `ball_enabled`（M-3），
+/// 避免「会话里关掉的球在会话结束时又冒出来」。
 struct AppVisibility {
     main: Arc<dyn WindowVisibility>,
     ball: Arc<Mutex<Option<BallHandle>>>,
+    /// 与 [`AppCore::ball_enabled`] 共享的开关。
+    ball_enabled: Arc<AtomicBool>,
     /// 抓帧前悬浮球是否可见；`show_own_windows` 只恢复这个状态。
     ball_was_visible: AtomicBool,
 }
 
 impl AppVisibility {
-    fn new(main: Arc<dyn WindowVisibility>, ball: Arc<Mutex<Option<BallHandle>>>) -> Self {
+    fn new(
+        main: Arc<dyn WindowVisibility>,
+        ball: Arc<Mutex<Option<BallHandle>>>,
+        ball_enabled: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             main,
             ball,
+            ball_enabled,
             ball_was_visible: AtomicBool::new(false),
         }
     }
@@ -466,6 +490,11 @@ impl AppVisibility {
         self.ball
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// 会话结束是否恢复球：抓帧前可见 **且** 用户没有在会话期间禁用。
+    fn should_restore_ball(&self, was_visible: bool, enabled: bool) -> bool {
+        was_visible && enabled
     }
 }
 
@@ -487,11 +516,14 @@ impl WindowVisibility for AppVisibility {
     }
 
     fn show_own_windows(&self) {
-        if self.ball_was_visible.swap(false, Ordering::SeqCst) {
+        let was_visible = self.ball_was_visible.swap(false, Ordering::SeqCst);
+        if was_visible && self.should_restore_ball(true, self.ball_enabled.load(Ordering::SeqCst)) {
             let guard = self.lock_ball();
             if let Some(ball) = guard.as_ref() {
                 ball.set_visible(true);
             }
+        } else if was_visible {
+            tracing::info!("floating ball disabled during the capture session; leaving it hidden");
         }
         self.main.show_own_windows();
     }
@@ -751,6 +783,108 @@ mod tests {
             .update_settings(Some(true), Some(56), Some(hotkey))
             .unwrap();
         assert_eq!(updated.ball.size, 56);
+    }
+
+    /// Task 15 fix：`ball_size` 必须在壳层支持的 `16..=256` 内，越界整体拒绝且不落盘。
+    #[test]
+    fn update_settings_rejects_out_of_range_ball_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, _sink) = open(dir.path());
+        let before = core.config();
+
+        for size in [0, 1, MIN_BALL_SIZE - 1, MAX_BALL_SIZE + 1, 4096] {
+            let err = core.update_settings(None, Some(size), None).unwrap_err();
+            assert!(
+                matches!(err, AppError::InvalidInput(_)),
+                "size {size} should be rejected, got {err:?}"
+            );
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "invalid input: ball size must be between {MIN_BALL_SIZE} and {MAX_BALL_SIZE}"
+                )
+            );
+        }
+
+        // 拒绝时内存与磁盘都保持原值。
+        assert_eq!(core.config().ball.size, before.ball.size);
+        let reloaded = AppConfig::load_or_default(&core.paths().config_file);
+        assert_eq!(reloaded.ball.size, before.ball.size);
+
+        // 边界值可用。
+        let updated = core
+            .update_settings(None, Some(MIN_BALL_SIZE), None)
+            .unwrap();
+        assert_eq!(updated.ball.size, MIN_BALL_SIZE);
+        let updated = core
+            .update_settings(None, Some(MAX_BALL_SIZE), None)
+            .unwrap();
+        assert_eq!(updated.ball.size, MAX_BALL_SIZE);
+    }
+
+    /// 记录调用次数的假主窗口可见性实现。
+    #[derive(Default)]
+    struct RecordingVisibility {
+        hidden: std::sync::atomic::AtomicUsize,
+        shown: std::sync::atomic::AtomicUsize,
+    }
+
+    impl WindowVisibility for RecordingVisibility {
+        fn hide_own_windows(&self) {
+            self.hidden.fetch_add(1, Ordering::SeqCst);
+        }
+        fn show_own_windows(&self) {
+            self.shown.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Task 15 fix（M-3）：会话期间把球禁用后，会话结束不再恢复球，主窗口照常恢复。
+    #[test]
+    fn session_end_does_not_restore_a_ball_disabled_during_capture() {
+        let main = Arc::new(RecordingVisibility::default());
+        let enabled = Arc::new(AtomicBool::new(true));
+        let visibility = AppVisibility::new(
+            Arc::clone(&main) as Arc<dyn WindowVisibility>,
+            Arc::new(Mutex::new(None)),
+            Arc::clone(&enabled),
+        );
+
+        // 模拟「抓帧前球是可见的」（测试里没有真实球线程）。
+        visibility.ball_was_visible.store(true, Ordering::SeqCst);
+        // 会话期间用户用托盘/设置关掉球：共享开关被更新。
+        enabled.store(false, Ordering::SeqCst);
+
+        visibility.show_own_windows();
+
+        assert!(
+            !visibility.ball_was_visible.load(Ordering::SeqCst),
+            "the was-visible flag must be consumed even when the ball stays hidden"
+        );
+        assert_eq!(
+            main.shown.load(Ordering::SeqCst),
+            1,
+            "main window is restored regardless"
+        );
+
+        // 仍启用时走恢复路径（没有球句柄时只清标志，不 panic）。
+        visibility.ball_was_visible.store(true, Ordering::SeqCst);
+        visibility.show_own_windows();
+        assert!(!visibility.ball_was_visible.load(Ordering::SeqCst));
+        assert_eq!(main.shown.load(Ordering::SeqCst), 2);
+    }
+
+    /// 恢复判定只看「抓帧前可见」+「当前仍启用」两个条件。
+    #[test]
+    fn restore_decision_requires_visible_and_enabled() {
+        let visibility = AppVisibility::new(
+            Arc::new(NoopWindowVisibility),
+            Arc::new(Mutex::new(None)),
+            Arc::new(AtomicBool::new(true)),
+        );
+        assert!(visibility.should_restore_ball(true, true));
+        assert!(!visibility.should_restore_ball(true, false));
+        assert!(!visibility.should_restore_ball(false, true));
+        assert!(!visibility.should_restore_ball(false, false));
     }
 
     /// Task 15：`update_settings` 的 ball_enabled 立即可见（没有悬浮球线程时只更新状态）。

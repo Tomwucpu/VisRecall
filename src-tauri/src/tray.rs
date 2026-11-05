@@ -49,9 +49,20 @@ pub fn create(app: &App, library_ok: bool) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             MENU_OPEN_MAIN => window_lifecycle::show_main_window(app),
             MENU_TOGGLE_BALL => {
-                // 悬浮球可见性由 AppCore 维护：写配置 → 同步线程，返回新状态。
-                let enabled = app.state::<visrecall_app_core::AppCore>().toggle_ball();
-                tracing::info!(enabled, "tray: floating ball visibility toggled");
+                // M-2：翻转要做 `save_atomic` 落盘与同步 `SendMessageW` 切换窗口，
+                // 都不能占用 Tauri UI 线程（否则托盘/主窗口会卡顿）。投递到后台线程，
+                // 菜单回调立即返回；失败原因照旧在 AppCore 里记日志。
+                let app = app.clone();
+                let spawned = std::thread::Builder::new()
+                    .name("visrecall-tray-toggle-ball".into())
+                    .spawn(move || {
+                        // 悬浮球可见性由 AppCore 维护：写配置 → 同步线程，返回新状态。
+                        let enabled = app.state::<visrecall_app_core::AppCore>().toggle_ball();
+                        tracing::info!(enabled, "tray: floating ball visibility toggled");
+                    });
+                if let Err(err) = spawned {
+                    tracing::error!(error = %err, "tray: failed to spawn ball toggle worker");
+                }
             }
             MENU_SETTINGS => {
                 // 设置页在后续任务实现；阶段 01 先打开主窗口承接。

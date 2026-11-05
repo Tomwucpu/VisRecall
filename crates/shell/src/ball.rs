@@ -10,7 +10,12 @@
 //! 窗口是 `WS_POPUP` + `WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW |
 //! WS_EX_NOACTIVATE`：不进任务栏/Alt-Tab、不抢焦点；内容通过 32 位 ARGB DIB 与
 //! `UpdateLayeredWindow(ULW_ALPHA)` 呈现。
+//!
+//! 拖动不依赖 `WM_LBUTTONUP` 收尾：鼠标捕获被其他窗口抢走时系统只发
+//! `WM_CAPTURECHANGED`（`WM_LBUTTONUP` 可能送到抢占方），所以捕获一丢失就结束拖动，
+//! 之后不按键移动鼠标不会再移动球、也不会写位置。
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::marker::PhantomData;
@@ -19,9 +24,10 @@ use std::ptr::{addr_of_mut, null_mut};
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use crossbeam_channel::{bounded, Sender};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 use visrecall_capture::display::{enumerate_displays, normalize_position};
 use visrecall_domain::capture::DisplayInfo;
 use visrecall_domain::geometry::{PhysicalPoint, PhysicalRect};
@@ -45,16 +51,18 @@ use windows::Win32::Graphics::GdiPlus::{
 };
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyState, ReleaseCapture, SetCapture, VK_LBUTTON,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW,
     GetWindowLongPtrW, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassW,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage,
     UnregisterClassW, UpdateLayeredWindow, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, IDC_ARROW, MSG,
     SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ULW_ALPHA, WM_APP, WM_CLOSE, WM_DESTROY, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ULW_ALPHA, WM_APP, WM_CAPTURECHANGED, WM_CLOSE,
+    WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::{CaptureTrigger, ShellEvent};
@@ -66,9 +74,15 @@ const BALL_WINDOW_TITLE: &str = "VisRecall Ball";
 
 /// 默认尺寸（与 `BallConfig::default().size` 一致）。
 pub const DEFAULT_BALL_SIZE: u32 = 48;
-/// 尺寸下限/上限：配置被手工改坏时不至于画出不可见或占满屏幕的球。
-const MIN_BALL_SIZE: u32 = 16;
-const MAX_BALL_SIZE: u32 = 256;
+/// 尺寸下限：配置被手工改坏时不至于画出不可见的球。
+pub const MIN_BALL_SIZE: u32 = 16;
+/// 尺寸上限：配置被手工改坏时不至于画出占满屏幕的球。
+pub const MAX_BALL_SIZE: u32 = 256;
+/// 悬浮球线程回报「窗口已就绪」的最长等待时间。
+///
+/// 超时只影响首帧：`spawn_ball_thread` 不阻塞启动（M-8），线程仍会继续创建窗口，
+/// 之后 `BallHandle::set_visible` 照常生效。
+const BALL_READY_TIMEOUT: Duration = Duration::from_secs(2);
 /// 首次出现时距工作区右下角的边距（物理像素）。
 const DEFAULT_MARGIN: i32 = 24;
 /// 按下后移动超过该距离（物理像素）视为拖动，否则算单击。
@@ -190,10 +204,17 @@ pub fn spawn_ball_thread(config: BallConfig, events: Sender<ShellEvent>) -> Ball
         .spawn(move || ball_thread_main(config, events, ready_tx, thread_hwnd, thread_visible));
 
     match spawned {
-        Ok(_) => match ready_rx.recv() {
+        Ok(_) => match ready_rx.recv_timeout(BALL_READY_TIMEOUT) {
             Ok(Ok(())) => info!(size = requested_size, "floating ball thread started"),
             Ok(Err(err)) => error!(error = %err, "floating ball unavailable"),
-            Err(_) => error!("floating ball thread exited before reporting its window"),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => warn!(
+                timeout_ms = BALL_READY_TIMEOUT.as_millis() as u64,
+                "floating ball window not ready in time; continuing without waiting \
+                 (visibility will be applied by the next set_visible call)"
+            ),
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                error!("floating ball thread exited before reporting its window")
+            }
         },
         Err(err) => error!(error = %err, "failed to spawn floating ball thread"),
     }
@@ -380,7 +401,14 @@ fn ball_thread_main(
         }
     };
 
-    if let Err(err) = run_ball_window(config, instance, events, &ready, &hwnd_slot, &visible) {
+    if let Err(err) = run_ball_window(
+        config,
+        instance,
+        events,
+        &ready,
+        Arc::clone(&hwnd_slot),
+        &visible,
+    ) {
         // `run_ball_window` 在回报成功之前失败时不会发送 ready；这里补上错误。
         let _ = ready.send(Err(err));
     }
@@ -397,7 +425,7 @@ fn run_ball_window(
     instance: HINSTANCE,
     events: Sender<ShellEvent>,
     ready: &Sender<Result<(), AppError>>,
-    hwnd_slot: &AtomicIsize,
+    hwnd_slot: Arc<AtomicIsize>,
     visible: &Arc<AtomicBool>,
 ) -> Result<(), AppError> {
     let displays = match enumerate_displays() {
@@ -417,16 +445,16 @@ fn run_ball_window(
     }
     let position = restore_ball_position(&config.positions, &displays, size);
 
-    let state = Box::new(BallWindowState {
+    // 窗口状态放在 `RefCell` 后：`SetWindowPos`/`ShowWindow` 可能同步重入 wndproc，
+    // 每次一律短借用，绝不把可变引用跨越窗口 API 调用（M-7）。
+    let state = Box::new(RefCell::new(BallWindowState {
         size,
         position,
         events,
         visible: Arc::clone(visible),
-        dragging: false,
-        moved: false,
-        press_cursor: POINT::default(),
-        press_origin: position,
-    });
+        drag: DragState::inactive(),
+        hwnd_slot: Arc::clone(&hwnd_slot),
+    }));
     let state_ptr = Box::into_raw(state);
 
     let hwnd = match create_ball_window(instance, position, size) {
@@ -480,36 +508,148 @@ fn run_ball_window(
         }
     }
 
+    // WM_DESTROY 已把共享句柄置 0；这里再写一次只是兜底（幂等）。
     hwnd_slot.store(0, Ordering::SeqCst);
     // SAFETY: 消息循环已退出且窗口已销毁；状态不再被任何消息处理引用。
     unsafe { drop(Box::from_raw(state_ptr)) };
     Ok(())
 }
 
-/// 窗口消息处理所需的可变状态；只在悬浮球线程访问。
+/// 窗口消息处理所需的状态；只在悬浮球线程访问，每次消息短借用（见 [`with_state`]）。
 struct BallWindowState {
     size: u32,
     /// 当前左上角（全局物理像素）。
     position: PhysicalPoint,
     events: Sender<ShellEvent>,
     visible: Arc<AtomicBool>,
-    dragging: bool,
+    /// 拖动状态机（纯逻辑，见 [`DragState`]）。
+    drag: DragState,
+    /// 共享窗口句柄；窗口销毁时置 0，让跨线程投递不再打到失效句柄（M-4）。
+    hwnd_slot: Arc<AtomicIsize>,
+}
+
+/// 拖动进度。
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum DragUpdate {
+    /// 不在拖动中（未按下，或已结束/取消）：忽略本次移动。
+    Ignore,
+    /// 拖动中但尚未越过 [`DRAG_THRESHOLD`]：不移动窗口。
+    Pending,
+    /// 越过阈值：把窗口移动到该左上角。
+    Move(PhysicalPoint),
+    /// 拖动中左键已不在按下状态（捕获丢失的典型信号）：已结束拖动，不产生事件。
+    Cancelled,
+}
+
+/// 拖动状态机：与 Win32 解耦，便于单测「捕获丢失后移动不再生效」（I-1）。
+///
+/// 生命周期：`begin`（`WM_LBUTTONDOWN`）→ `on_move`（`WM_MOUSEMOVE`）→
+/// `finish`（`WM_LBUTTONUP`）或 `cancel`（`WM_CAPTURECHANGED` / 左键已松开）。
+/// `cancel` 之后必须重新 `begin` 才能再次拖动，避免捕获丢失后「移一下鼠标球就跳走」。
+#[derive(Clone, Debug, PartialEq)]
+struct DragState {
+    active: bool,
     /// 本次按下后是否已越过拖动阈值。
     moved: bool,
     /// 按下时的光标位置与窗口左上角，用于计算拖动位移。
-    press_cursor: POINT,
+    press_cursor: (i32, i32),
     press_origin: PhysicalPoint,
 }
 
-/// 读窗口状态；窗口尚未绑定状态（`WM_CREATE` 之前）返回 `None`。
-unsafe fn ball_state(hwnd: HWND) -> Option<&'static mut BallWindowState> {
+impl DragState {
+    const fn inactive() -> Self {
+        Self {
+            active: false,
+            moved: false,
+            press_cursor: (0, 0),
+            press_origin: PhysicalPoint { x: 0, y: 0 },
+        }
+    }
+
+    /// 开始拖动：记录光标起点与窗口原点。
+    fn begin(&mut self, cursor: (i32, i32), origin: PhysicalPoint) {
+        *self = Self {
+            active: true,
+            moved: false,
+            press_cursor: cursor,
+            press_origin: origin,
+        };
+    }
+
+    fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// 结束拖动（捕获丢失/取消）；返回之前是否处于拖动状态。
+    fn cancel(&mut self) -> bool {
+        let was_active = self.active;
+        *self = Self::inactive();
+        was_active
+    }
+
+    /// 拖动中的一次移动；`pressed == false` 表示左键已不在按下状态 → 视为捕获丢失。
+    fn on_move(&mut self, cursor: (i32, i32), pressed: bool) -> DragUpdate {
+        if !self.active {
+            return DragUpdate::Ignore;
+        }
+        if !pressed {
+            self.cancel();
+            return DragUpdate::Cancelled;
+        }
+
+        let dx = cursor.0 - self.press_cursor.0;
+        let dy = cursor.1 - self.press_cursor.1;
+        if !self.moved {
+            if dx.abs() <= DRAG_THRESHOLD && dy.abs() <= DRAG_THRESHOLD {
+                return DragUpdate::Pending;
+            }
+            self.moved = true;
+        }
+        DragUpdate::Move(PhysicalPoint {
+            x: self.press_origin.x + dx,
+            y: self.press_origin.y + dy,
+        })
+    }
+
+    /// 松开：返回 `None` 表示不在拖动；`Some(false)` 是单击，`Some(true)` 是拖动。
+    fn finish(&mut self) -> Option<bool> {
+        if !self.active {
+            return None;
+        }
+        let moved = self.moved;
+        *self = Self::inactive();
+        Some(moved)
+    }
+}
+
+/// 取窗口状态抽屉；窗口尚未绑定状态（`WM_CREATE` 之前）返回 `None`。
+unsafe fn ball_state(hwnd: HWND) -> Option<&'static RefCell<BallWindowState>> {
     // SAFETY: 调用方保证 `hwnd` 是悬浮球窗口；指针在消息循环退出后才释放。
     let raw = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) };
     if raw == 0 {
         return None;
     }
-    // SAFETY: `raw` 由 `Box<BallWindowState>` 泄漏而来，且所有消息都在悬浮球线程串行处理。
-    Some(unsafe { &mut *(raw as *mut BallWindowState) })
+    // SAFETY: `raw` 由 `Box<RefCell<BallWindowState>>` 泄漏而来，且状态只在悬浮球线程访问。
+    Some(unsafe { &*(raw as *const RefCell<BallWindowState>) })
+}
+
+/// 短借用窗口状态做只读操作。
+///
+/// 借用失败说明正在处理外层消息（`SetWindowPos`/`ShowWindow` 之类的窗口 API 可以
+/// 同步重入 wndproc）；此时直接忽略本次消息，绝不等同一份状态上的第二个可变引用（M-7）。
+fn with_state<R>(hwnd: HWND, f: impl FnOnce(&BallWindowState) -> R) -> Option<R> {
+    // SAFETY: 见 `ball_state`；借用只在本函数内有效。
+    let cell = unsafe { ball_state(hwnd) }?;
+    let state = cell.try_borrow().ok()?;
+    Some(f(&state))
+}
+
+/// 短借用窗口状态做可变操作（同上，不跨窗口 API 调用）。
+fn with_state_mut<R>(hwnd: HWND, f: impl FnOnce(&mut BallWindowState) -> R) -> Option<R> {
+    // SAFETY: 见 `ball_state`；借用只在本函数内有效。
+    let cell = unsafe { ball_state(hwnd) }?;
+    let mut state = cell.try_borrow_mut().ok()?;
+    Some(f(&mut state))
 }
 
 unsafe extern "system" fn ball_window_proc(
@@ -519,25 +659,30 @@ unsafe extern "system" fn ball_window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     // SAFETY: 见 `ball_state`；`None` 时走默认处理。
-    let Some(state) = (unsafe { ball_state(hwnd) }) else {
+    if unsafe { ball_state(hwnd) }.is_none() {
         return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
-    };
+    }
 
     match message {
         WM_LBUTTONDOWN => {
-            begin_drag(hwnd, state);
+            press_ball(hwnd);
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
-            move_drag(hwnd, state);
+            drag_ball(hwnd);
             LRESULT(0)
         }
         WM_LBUTTONUP => {
-            end_drag(hwnd, state);
+            release_ball(hwnd);
+            LRESULT(0)
+        }
+        // I-1：捕获被其他窗口抢走时不会再有 `WM_LBUTTONUP`，必须在这里收尾。
+        WM_CAPTURECHANGED => {
+            cancel_drag(hwnd);
             LRESULT(0)
         }
         WM_BALL_SET_VISIBLE => {
-            apply_visibility(hwnd, state, wparam.0 != 0);
+            set_ball_visible(hwnd, wparam.0 != 0);
             LRESULT(0)
         }
         WM_CLOSE => {
@@ -548,6 +693,8 @@ unsafe extern "system" fn ball_window_proc(
             LRESULT(0)
         }
         WM_DESTROY => {
+            // M-4：窗口销毁之前先让共享句柄失效，跨线程投递从此拿到 0。
+            let _ = with_state(hwnd, |state| state.hwnd_slot.store(0, Ordering::SeqCst));
             // SAFETY: 结束本线程消息循环（`GetMessageW` 返回 WM_QUIT）。
             unsafe { PostQuitMessage(0) };
             LRESULT(0)
@@ -556,25 +703,28 @@ unsafe extern "system" fn ball_window_proc(
     }
 }
 
-/// 按下：捕获鼠标并记录拖动起点；尚未移动，松开即单击。
-fn begin_drag(hwnd: HWND, state: &mut BallWindowState) {
+/// 按下：记录拖动起点并捕获鼠标；尚未移动，松开即单击。
+fn press_ball(hwnd: HWND) {
     let mut cursor = POINT::default();
     // SAFETY: 输出指针指向栈上 `POINT`。
     if let Err(err) = unsafe { GetCursorPos(&mut cursor) } {
         warn!(error = %err, "GetCursorPos failed on ball press; drag disabled");
         return;
     }
+    // 先 `SetCapture` 再进入拖动状态：`SetCapture` 可能同步派发 `WM_CAPTURECHANGED`，
+    // 那时拖动尚未开始，`cancel_drag` 是空操作，不会误杀这次拖动。
     // SAFETY: `hwnd` 属于本线程；捕获鼠标让窗口外的移动/松开仍然送达。
     unsafe { SetCapture(hwnd) };
-    state.dragging = true;
-    state.moved = false;
-    state.press_cursor = cursor;
-    state.press_origin = state.position;
+    let _ = with_state_mut(hwnd, |state| {
+        let origin = state.position;
+        state.drag.begin((cursor.x, cursor.y), origin);
+    });
 }
 
-/// 移动：越过 [`DRAG_THRESHOLD`] 后按光标位移移动窗口（不改尺寸、不抢焦点）。
-fn move_drag(hwnd: HWND, state: &mut BallWindowState) {
-    if !state.dragging {
+/// 移动：拖动中且左键仍按下时按位移移动窗口（不改尺寸、不抢焦点）。
+fn drag_ball(hwnd: HWND) {
+    // 未在拖动（鼠标只是掠过球）时先返回，省掉两次系统调用。
+    if !with_state(hwnd, |state| state.drag.is_active()).unwrap_or(false) {
         return;
     }
     let mut cursor = POINT::default();
@@ -583,36 +733,70 @@ fn move_drag(hwnd: HWND, state: &mut BallWindowState) {
         debug!(error = %err, "GetCursorPos failed during ball drag");
         return;
     }
+    // I-1 兜底：捕获丢失时 `WM_LBUTTONUP` 可能送到抢占方，这里以左键状态为准。
+    // SAFETY: 无参数查询调用线程的输入状态；高字节置位表示按下。
+    let pressed = unsafe { GetKeyState(VK_LBUTTON.0 as i32) } < 0;
 
-    let dx = cursor.x - state.press_cursor.x;
-    let dy = cursor.y - state.press_cursor.y;
-    if !state.moved {
-        if dx.abs() <= DRAG_THRESHOLD && dy.abs() <= DRAG_THRESHOLD {
-            return;
-        }
-        state.moved = true;
-    }
-
-    let target = PhysicalPoint {
-        x: state.press_origin.x + dx,
-        y: state.press_origin.y + dy,
+    // 借用只覆盖纯逻辑推进；下面的窗口 API 调用不再持有引用（M-7）。
+    let Some((update, size)) = with_state_mut(hwnd, |state| {
+        let update = state.drag.on_move((cursor.x, cursor.y), pressed);
+        (update, state.size)
+    }) else {
+        return;
     };
-    if move_window(hwnd, target, state.size) {
-        state.position = target;
+
+    match update {
+        DragUpdate::Move(target) => {
+            if move_window(hwnd, target, size) {
+                let _ = with_state_mut(hwnd, |state| state.position = target);
+            }
+        }
+        DragUpdate::Cancelled => {
+            debug!("floating ball drag cancelled: left button released without WM_LBUTTONUP");
+            release_capture();
+        }
+        DragUpdate::Ignore | DragUpdate::Pending => {}
+    }
+}
+
+/// `WM_CAPTURECHANGED`：捕获被改动时立即结束拖动，不移动窗口、不发送 `BallMoved`。
+///
+/// 不在捕获丢失时调用 `ReleaseCapture`：捕获已经不在本窗口，调用只会白白派发消息。
+fn cancel_drag(hwnd: HWND) {
+    let (cancelled, position) = with_state_mut(hwnd, |state| (state.drag.cancel(), state.position))
+        .unwrap_or((false, PhysicalPoint::default()));
+    if cancelled {
+        debug!(
+            x = position.x,
+            y = position.y,
+            "floating ball lost the mouse capture mid-drag; ball stays where it is"
+        );
+    } else {
+        // 正常松开（`release_ball` 里的 ReleaseCapture）也会走到这里，此时拖动已结束。
+        trace!("floating ball lost the mouse capture; no drag to cancel");
     }
 }
 
 /// 松开：未移动 → `CaptureRequest(BallClick)`；移动 → 夹回工作区并上报归一化中心。
-fn end_drag(hwnd: HWND, state: &mut BallWindowState) {
-    if !state.dragging {
+fn release_ball(hwnd: HWND) {
+    // 先结束拖动并把后续需要的字段取出来，再调用窗口/显示器 API（可能同步重入 wndproc）。
+    let Some((moved, mut position, size, events)) = with_state_mut(hwnd, |state| {
+        state
+            .drag
+            .finish()
+            .map(|moved| (moved, state.position, state.size, state.events.clone()))
+    })
+    .flatten() else {
         return;
-    }
-    state.dragging = false;
-    // SAFETY: 与 `SetCapture` 成对调用；失败无需处理。
-    let _ = unsafe { ReleaseCapture() };
+    };
+    // SAFETY: 与 `SetCapture` 成对；拖动已结束，失败无需处理。
+    release_capture();
 
-    if !state.moved {
-        send_event(state, ShellEvent::CaptureRequest(CaptureTrigger::BallClick));
+    if !moved {
+        send_event(
+            &events,
+            ShellEvent::CaptureRequest(CaptureTrigger::BallClick),
+        );
         return;
     }
 
@@ -624,14 +808,15 @@ fn end_drag(hwnd: HWND, state: &mut BallWindowState) {
         }
     };
 
-    let clamped = clamp_ball_position(&displays, state.position, state.size);
-    if clamped != state.position && move_window(hwnd, clamped, state.size) {
-        state.position = clamped;
+    let clamped = clamp_ball_position(&displays, position, size);
+    if clamped != position && move_window(hwnd, clamped, size) {
+        position = clamped;
+        let _ = with_state_mut(hwnd, |state| state.position = clamped);
     }
 
     let center = PhysicalPoint {
-        x: state.position.x + state.size as i32 / 2,
-        y: state.position.y + state.size as i32 / 2,
+        x: position.x + size as i32 / 2,
+        y: position.y + size as i32 / 2,
     };
     let Some(target) = display_at_or_nearest(&displays, center) else {
         warn!("no display found for the ball position; not saving");
@@ -639,7 +824,7 @@ fn end_drag(hwnd: HWND, state: &mut BallWindowState) {
     };
     let (nx, ny) = normalize_position(target, center);
     send_event(
-        state,
+        &events,
         ShellEvent::BallMoved {
             display_id: target.id.clone(),
             nx,
@@ -649,19 +834,30 @@ fn end_drag(hwnd: HWND, state: &mut BallWindowState) {
     info!(display_id = %target.id, nx, ny, "floating ball moved");
 }
 
-fn send_event(state: &BallWindowState, event: ShellEvent) {
-    if state.events.send(event).is_err() {
+/// 释放鼠标捕获（只影响本线程）；拖动已结束时调用。
+fn release_capture() {
+    // SAFETY: `ReleaseCapture` 只作用于调用线程；本线程只有悬浮球窗口，
+    // 没有捕获时调用也无副作用。
+    let _ = unsafe { ReleaseCapture() };
+}
+
+fn send_event(events: &Sender<ShellEvent>, event: ShellEvent) {
+    if events.send(event).is_err() {
         debug!("shell event channel closed; floating ball event dropped");
     }
 }
 
 /// 应用可见性：`SW_SHOWNOACTIVATE` 不抢焦点，`SW_HIDE` 后球不参与抓帧。
-fn apply_visibility(hwnd: HWND, state: &BallWindowState, visible: bool) {
+fn set_ball_visible(hwnd: HWND, visible: bool) {
+    // 先取走可见性标志，再调用 `ShowWindow`（可能同步重入 wndproc，不能持有借用）。
+    let Some(flag) = with_state(hwnd, |state| Arc::clone(&state.visible)) else {
+        return;
+    };
     // SAFETY: `hwnd` 属于本线程；显示时不激活窗口。
     unsafe {
         let _ = ShowWindow(hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
     }
-    state.visible.store(visible, Ordering::SeqCst);
+    flag.store(visible, Ordering::SeqCst);
     debug!(visible, "floating ball visibility changed");
 }
 
@@ -1290,5 +1486,69 @@ mod tests {
             restore_ball_position(&HashMap::new(), &displays, 48),
             point(1000 - 48 - DEFAULT_MARGIN, 1000 - 48 - DEFAULT_MARGIN)
         );
+    }
+
+    /// I-1：捕获丢失（`WM_CAPTURECHANGED`）后，再收到移动消息也不能移动球。
+    #[test]
+    fn capture_lost_ignores_later_moves() {
+        let mut drag = DragState::inactive();
+        drag.begin((100, 100), point(10, 20));
+        // 拖动过一段：窗口移动到 (60, 70)。
+        assert_eq!(
+            drag.on_move((150, 150), true),
+            DragUpdate::Move(point(60, 70))
+        );
+
+        // 捕获被抢走：立即结束拖动（不依赖 WM_LBUTTONUP）。
+        assert!(drag.cancel());
+        assert!(!drag.is_active());
+        assert!(!drag.cancel(), "cancel is idempotent");
+
+        // 之后即使仍收到 WM_MOUSEMOVE，也不会再产生移动。
+        assert_eq!(drag.on_move((900, 900), true), DragUpdate::Ignore);
+        assert_eq!(drag.on_move((1100, 800), true), DragUpdate::Ignore);
+        // 迟到的 WM_LBUTTONUP 也不产生单击/位置上报。
+        assert_eq!(drag.finish(), None);
+    }
+
+    /// I-1 兜底：左键已不在按下状态时，移动消息直接结束拖动。
+    #[test]
+    fn move_with_the_left_button_up_cancels_the_drag() {
+        let mut drag = DragState::inactive();
+        drag.begin((10, 10), point(0, 0));
+
+        assert_eq!(drag.on_move((40, 40), false), DragUpdate::Cancelled);
+        assert!(!drag.is_active());
+        assert_eq!(drag.on_move((40, 40), true), DragUpdate::Ignore);
+    }
+
+    /// 未越阈值不移动（单击），越阈值后按光标位移移动。
+    #[test]
+    fn drag_moves_only_after_the_threshold() {
+        let mut drag = DragState::inactive();
+        drag.begin((100, 100), point(10, 20));
+
+        assert_eq!(drag.on_move((102, 103), true), DragUpdate::Pending);
+        assert_eq!(
+            drag.on_move((140, 130), true),
+            DragUpdate::Move(point(50, 50))
+        );
+        // 越过阈值后即使回到阈值内也继续跟随光标（保持拖动）。
+        assert_eq!(
+            drag.on_move((101, 101), true),
+            DragUpdate::Move(point(11, 21))
+        );
+        assert_eq!(drag.finish(), Some(true));
+        assert_eq!(drag.finish(), None);
+    }
+
+    /// 未越阈值就松开 = 单击。
+    #[test]
+    fn click_below_the_threshold_reports_no_movement() {
+        let mut drag = DragState::inactive();
+        drag.begin((5, 5), point(7, 8));
+        assert_eq!(drag.on_move((8, 8), true), DragUpdate::Pending);
+        assert_eq!(drag.finish(), Some(false));
+        assert!(!drag.is_active());
     }
 }
