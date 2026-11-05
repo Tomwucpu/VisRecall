@@ -1480,7 +1480,8 @@ git commit -m "feat(app): wire capture persistence pipeline"
 
 **Files:**
 - Create: `crates/shell/src/ball.rs`
-- Modify: `crates/shell/src/lib.rs`, `crates/app-core/src/app.rs`
+- Modify: `crates/shell/src/lib.rs`, `crates/app-core/src/{app.rs,lib.rs}`
+- Modify: `src-tauri/src/tray.rs`（菜单「显示或隐藏悬浮球」接 BallHandle）
 - Modify: `docs/specs/v0.1/01-capture-loop/design.md`（先补 `ShellEvent::BallMoved` 签名）
 - Test: `crates/shell/tests/ball_position.rs`
 
