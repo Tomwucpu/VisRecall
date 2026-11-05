@@ -1397,8 +1397,10 @@ git commit -m "feat(shell): add overlay input and crop readback"
 
 **Files:**
 - Create: `crates/app-core/src/capture_flow.rs`
-- Modify: `crates/app-core/src/{app.rs,events.rs}`
+- Modify: `crates/app-core/src/{app.rs,events.rs,lib.rs}`
 - Modify: `crates/library/src/files.rs`（可用空间检查）
+- Modify: `crates/capture/src/{lib.rs,grab_gdi.rs}`（`dwm_flush()`）
+- Modify: `src-tauri/src/{main.rs,window_lifecycle.rs}`（隐藏/恢复主窗口的 `WindowVisibility` 实现）
 - Test: `crates/app-core/tests/capture_flow.rs`
 
 **Interfaces:**
