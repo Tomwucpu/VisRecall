@@ -400,6 +400,7 @@ D3D11CreateDevice(BGRA_SUPPORT, 默认适配器, 硬件 -> WARP 回退)
 - 冻结纹理转 D2D bitmap：`ID3D11Texture2D -> IDXGISurface -> CreateBitmapFromDxgiSurface(D2D1_BITMAP_OPTIONS_NONE)`。
 - 回读：提交时为每个相交显示器创建 region 大小的 staging texture，`CopySubresourceRegion` 后 `Map`，按 RowPitch 复制并拼合；屏间空隙填 0。
 - 多屏 Present：含鼠标指针的覆盖窗口 `Present(1,0)`，其余窗口 `Present(0,0)`，避免串行等待多个 vblank；重绘由输入/定时器驱动，不做空闲 60fps 常驻。
+- 控制点归属：中心在窗口内（半开）优先；中心恰在显示器边界、且该边界外侧没有其他显示器覆盖时，把中心夹到该显示器最后一个像素后归属，保证临空边/虚拟屏外沿的贴边控制点可见；内部屏缝只归右/下窗口，不重复。
 - 鼠标捕获：会话结束（提交/取消/失焦/回读失败）显式 `ReleaseCapture`；收到 `WM_CAPTURECHANGED` 时结束当前拖拽，避免捕获泄漏或键盘失效。
 - 颜色空间：阶段 01 按 SDR 处理；HDR 暂不做色调映射。
 
