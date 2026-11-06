@@ -44,7 +44,34 @@ pub struct HotkeyConflictEvent {
     pub message: String,
 }
 
-/// 阶段 01 的事件集合；后续任务只增字段/变体，不改已有名字。
+/// `items_pruned` 载荷：本次清理删除的条数。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemsPrunedEvent {
+    pub count: u64,
+}
+
+/// `storage_migration_progress` 载荷；`phase ∈ { prepare, copy, verify, done }`。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationProgressEvent {
+    pub phase: String,
+    pub done: u64,
+    pub total: u64,
+}
+
+impl MigrationProgressEvent {
+    /// 构造进度事件（`phase` 为小写字符串）。
+    pub fn new(phase: &str, done: u64, total: u64) -> MigrationProgressEvent {
+        MigrationProgressEvent {
+            phase: phase.to_string(),
+            done,
+            total,
+        }
+    }
+}
+
+/// 阶段 01 + 阶段 02 的事件集合；后续任务只增字段/变体，不改已有名字。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppEvent {
     ItemCreated(ItemEvent),
@@ -52,6 +79,22 @@ pub enum AppEvent {
     CaptureFailed(CaptureFailedEvent),
     HotkeyConflict(HotkeyConflictEvent),
     AppRecovered(AppRecoveredEvent),
+    /// 备注保存成功；前端只失效该条详情，不动列表。
+    ItemNoteUpdated(ItemEvent),
+    /// 某条素材的标签关联变化；失效详情 + 标签云。
+    ItemTagsUpdated(ItemEvent),
+    /// 标签集合变化（新增/改名/删除）；失效标签云。
+    TagsChanged,
+    /// 单条彻底删除。
+    ItemDeleted(ItemEvent),
+    /// 全库清空。
+    ItemsReset,
+    /// 保留策略清理完成。
+    ItemsPruned(ItemsPrunedEvent),
+    /// 库迁移进度。
+    StorageMigrationProgress(MigrationProgressEvent),
+    /// 热键改键成功；`src-tauri` 据此把托盘 tooltip 复原。
+    HotkeyRestored,
 }
 
 impl AppEvent {
@@ -63,6 +106,14 @@ impl AppEvent {
             AppEvent::CaptureFailed(_) => "capture_failed",
             AppEvent::HotkeyConflict(_) => "hotkey_conflict",
             AppEvent::AppRecovered(_) => "app_recovered",
+            AppEvent::ItemNoteUpdated(_) => "item_note_updated",
+            AppEvent::ItemTagsUpdated(_) => "item_tags_updated",
+            AppEvent::TagsChanged => "tags_changed",
+            AppEvent::ItemDeleted(_) => "item_deleted",
+            AppEvent::ItemsReset => "items_reset",
+            AppEvent::ItemsPruned(_) => "items_pruned",
+            AppEvent::StorageMigrationProgress(_) => "storage_migration_progress",
+            AppEvent::HotkeyRestored => "hotkey_restored",
         }
     }
 
@@ -74,6 +125,14 @@ impl AppEvent {
             AppEvent::CaptureFailed(payload) => json(payload),
             AppEvent::HotkeyConflict(payload) => json(payload),
             AppEvent::AppRecovered(payload) => json(payload),
+            AppEvent::ItemNoteUpdated(payload) => json(payload),
+            AppEvent::ItemTagsUpdated(payload) => json(payload),
+            AppEvent::TagsChanged => json(&serde_json::json!({})),
+            AppEvent::ItemDeleted(payload) => json(payload),
+            AppEvent::ItemsReset => json(&serde_json::json!({})),
+            AppEvent::ItemsPruned(payload) => json(payload),
+            AppEvent::StorageMigrationProgress(payload) => json(payload),
+            AppEvent::HotkeyRestored => json(&serde_json::json!({})),
         }
     }
 }
@@ -138,6 +197,44 @@ mod tests {
         });
         assert_eq!(event.name(), "hotkey_conflict");
         assert_eq!(event.payload()["message"], "hotkey occupied: Ctrl+Shift+S");
+    }
+
+    #[test]
+    fn phase_two_event_names_and_payloads_are_stable() {
+        let id_event = ItemEvent { id: "abc".into() };
+
+        let event = AppEvent::ItemNoteUpdated(id_event.clone());
+        assert_eq!(event.name(), "item_note_updated");
+        assert_eq!(event.payload()["id"], "abc");
+
+        let event = AppEvent::ItemTagsUpdated(id_event.clone());
+        assert_eq!(event.name(), "item_tags_updated");
+        assert_eq!(event.payload()["id"], "abc");
+
+        let event = AppEvent::TagsChanged;
+        assert_eq!(event.name(), "tags_changed");
+        assert_eq!(event.payload(), serde_json::json!({}));
+
+        let event = AppEvent::ItemDeleted(id_event);
+        assert_eq!(event.name(), "item_deleted");
+
+        let event = AppEvent::ItemsReset;
+        assert_eq!(event.name(), "items_reset");
+        assert_eq!(event.payload(), serde_json::json!({}));
+
+        let event = AppEvent::ItemsPruned(ItemsPrunedEvent { count: 3 });
+        assert_eq!(event.name(), "items_pruned");
+        assert_eq!(event.payload()["count"], 3);
+
+        let event = AppEvent::StorageMigrationProgress(MigrationProgressEvent::new("copy", 5, 9));
+        assert_eq!(event.name(), "storage_migration_progress");
+        assert_eq!(event.payload()["phase"], "copy");
+        assert_eq!(event.payload()["done"], 5);
+        assert_eq!(event.payload()["total"], 9);
+
+        let event = AppEvent::HotkeyRestored;
+        assert_eq!(event.name(), "hotkey_restored");
+        assert_eq!(event.payload(), serde_json::json!({}));
     }
 
     #[test]

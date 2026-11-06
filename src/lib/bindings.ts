@@ -13,6 +13,35 @@ export const commands = {
 	/**  只读内存配置：命令在主线程执行，但不碰磁盘。 */
 	getSettings: () => __TAURI_INVOKE<SettingsDto>("get_settings"),
 	updateSettings: (patch: SettingsPatch_Deserialize) => __TAURI_INVOKE<SettingsDto>("update_settings", { patch }),
+	getItemExt: (id: string) => __TAURI_INVOKE<ItemDetailDto_Serialize>("get_item_ext", { id }),
+	noteSet: (id: string, text: string) => __TAURI_INVOKE<null>("note_set", { id, text }),
+	tagsList: () => __TAURI_INVOKE<TagChipDto_Serialize[]>("tags_list"),
+	tagAdd: (itemId: string, name: string) => __TAURI_INVOKE<TagChipDto_Serialize>("tag_add", { itemId, name }),
+	tagDetach: (itemId: string, tagId: string) => __TAURI_INVOKE<null>("tag_detach", { itemId, tagId }),
+	tagRename: (tagId: string, name: string) => __TAURI_INVOKE<null>("tag_rename", { tagId, name }),
+	tagDelete: (tagId: string) => __TAURI_INVOKE<number>("tag_delete", { tagId }),
+	/**  复制原始内容：图片 `CF_DIB` + `PNG`，文本/链接 `CF_UNICODETEXT`。 */
+	copyItemOriginal: (itemId: string) => __TAURI_INVOKE<null>("copy_item_original", { itemId }),
+	itemDelete: (id: string) => __TAURI_INVOKE<null>("item_delete", { id }),
+	libraryPurgePreview: () => __TAURI_INVOKE<PurgePreview>("library_purge_preview"),
+	libraryPurge: (confirm: string) => __TAURI_INVOKE<null>("library_purge", { confirm }),
+	storageUsageGet: () => __TAURI_INVOKE<StorageUsageDto>("storage_usage_get"),
+	storageCapacitySet: (gigabytes: number) => __TAURI_INVOKE<null>("storage_capacity_set", { gigabytes }),
+	retentionSet: (days: number | null) => __TAURI_INVOKE<null>("retention_set", { days }),
+	retentionPreview: (days: number | null) => __TAURI_INVOKE<RetentionPreviewDto>("retention_preview", { days }),
+	retentionApply: () => __TAURI_INVOKE<PruneReportDto>("retention_apply"),
+	storageOrphansGet: () => __TAURI_INVOKE<OrphanStatsDto>("storage_orphans_get"),
+	/**  清理孤儿文件：只删 `originals/`、`texts/` 下未被引用的文件。 */
+	storageOrphansCleanup: () => __TAURI_INVOKE<OrphanStatsDto>("storage_orphans_cleanup"),
+	/**
+	 *  库位置迁移。
+	 * 
+	 *  迁移行为（目标校验、复制、校验、写 config、闸门）在 Task 18 落地；此处先保留命令
+	 *  签名，让前端契约与 `bindings.ts` 一次定型，调用时明确返回 `BUSY` 而不是「命令不存在」。
+	 */
+	storageRelocate: (path: string) => __TAURI_INVOKE<RelocateResultDto>("storage_relocate", { path }),
+	/**  立即重启进程；只应在 `restartRequired = true` 时由横幅按钮调用。 */
+	restartApp: () => __TAURI_INVOKE<null>("restart_app"),
 };
 
 /* Types */
@@ -27,6 +56,48 @@ export type AppStatus = {
 	version: string,
 	libraryPath: string,
 	libraryOk: boolean,
+	/**  库已迁移、需要重启才能沿用新库；为真期间捕获被 `BUSY` 拒绝。 */
+	restartRequired: boolean,
+};
+
+/**  详情面板的额外内容。 */
+export type DetailExtrasDto = DetailExtrasDto_Serialize | DetailExtrasDto_Deserialize;
+
+/**  详情面板的额外内容。 */
+export type DetailExtrasDto_Deserialize = {
+	/**  AI 摘要；阶段 02 恒为 `None`（阶段 03 提供）。 */
+	summary?: string | null,
+	/**  文本素材的原文（前 20000 字符，超出部分已截断）。 */
+	bodyText?: string | null,
+	/**  图片素材的原图协议 URL；文本/链接为 `None`。 */
+	originalUrl?: string | null,
+	tags: TagChipDto_Deserialize[],
+};
+
+/**  详情面板的额外内容。 */
+export type DetailExtrasDto_Serialize = {
+	/**  AI 摘要；阶段 02 恒为 `None`（阶段 03 提供）。 */
+	summary: string | null,
+	/**  文本素材的原文（前 20000 字符，超出部分已截断）。 */
+	bodyText: string | null,
+	/**  图片素材的原图协议 URL；文本/链接为 `None`。 */
+	originalUrl: string | null,
+	tags: TagChipDto_Serialize[],
+};
+
+/**  详情聚合结果。 */
+export type ItemDetailDto = ItemDetailDto_Serialize | ItemDetailDto_Deserialize;
+
+/**  详情聚合结果。 */
+export type ItemDetailDto_Deserialize = {
+	item: ItemDto_Deserialize,
+	extras: DetailExtrasDto_Deserialize,
+};
+
+/**  详情聚合结果。 */
+export type ItemDetailDto_Serialize = {
+	item: ItemDto_Serialize,
+	extras: DetailExtrasDto_Serialize,
 };
 
 /**  列表/详情共用的素材 DTO；`thumb_url` 只在存在缩略图时由后端拼接。 */
@@ -64,6 +135,37 @@ export type ItemDto_Serialize = {
 	thumbUrl: string | null,
 };
 
+/**  孤儿文件与缺失缩略图统计。 */
+export type OrphanStatsDto = {
+	files: number,
+	bytes: number,
+	missingThumbs: number,
+};
+
+/**  清理结果：成功 N / 失败 M。 */
+export type PruneReportDto = {
+	deleted: number,
+	failed: number,
+};
+
+/**  全库清空的确认信息。 */
+export type PurgePreview = {
+	itemCount: number,
+	confirmationWord: string,
+};
+
+/**  库迁移结果：必须重启才生效。 */
+export type RelocateResultDto = {
+	restartRequired: boolean,
+	newRoot: string,
+};
+
+/**  清理预估。 */
+export type RetentionPreviewDto = {
+	itemCount: number,
+	bytes: number,
+};
+
 export type SettingsDto = {
 	libraryPath: string,
 	captureHotkey: string,
@@ -83,5 +185,39 @@ export type SettingsPatch_Serialize = {
 	ballEnabled: boolean | null,
 	ballSize: number | null,
 	captureHotkey: string | null,
+};
+
+/**  存储用量快照。 */
+export type StorageUsageDto = {
+	usedBytes: number,
+	capacityBytes: number,
+	itemCount: number,
+};
+
+/**  详情面板的标签 chip；`auto` 表示「这次关联是自动标注加的」。 */
+export type TagChipDto = TagChipDto_Serialize | TagChipDto_Deserialize;
+
+/**  详情面板的标签 chip；`auto` 表示「这次关联是自动标注加的」。 */
+export type TagChipDto_Deserialize = {
+	id: string,
+	name: string,
+	/**  关联来源是否为 `auto`；JSON 键就是 `auto`。 */
+	auto: boolean,
+	/**  色令牌名（`ochre`/`slate`/…）；前端只做令牌 → CSS 变量映射。 */
+	hue?: string | null,
+	/**  标签云的素材数量；按素材查询时为 0。 */
+	itemCount: number,
+};
+
+/**  详情面板的标签 chip；`auto` 表示「这次关联是自动标注加的」。 */
+export type TagChipDto_Serialize = {
+	id: string,
+	name: string,
+	/**  关联来源是否为 `auto`；JSON 键就是 `auto`。 */
+	auto: boolean,
+	/**  色令牌名（`ochre`/`slate`/…）；前端只做令牌 → CSS 变量映射。 */
+	hue: string | null,
+	/**  标签云的素材数量；按素材查询时为 0。 */
+	itemCount: number,
 };
 

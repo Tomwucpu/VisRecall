@@ -659,7 +659,7 @@ cargo clippy -p visrecall-shell --all-targets -- -D warnings
 - Consumes: Task 3–9 的库层/壳层能力
 - Produces: 事件层（8 个）+ IPC 骨架 + 详情/备注/标签/复制/删除/清空/用量/保留命令与全部 DTO；`storage_relocate` / `restart_app` / `AppStatus.restart_required`（T18）、`storage_orphans_*`（T19）、`pick_directory`（T14）由所属任务追加
 
-- [ ] **Step 1: 事件**
+- [x] **Step 1: 事件**
 
 ```rust
 pub enum AppEvent {
@@ -677,7 +677,7 @@ pub enum AppEvent {
 
 `name()` 分别为 `item_note_updated` / `item_tags_updated` / `tags_changed` / `item_deleted` / `items_reset` / `items_pruned` / `storage_migration_progress` / `hotkey_restored`；`payload()` 对无字段变体返回 `json!({})`。`TauriEventSink` 增加 `HotkeyRestored` 分支：`tray.set_tooltip(Some("目记 VisRecall"))`。`events.rs` 的稳定性测试补全 8 个名字断言。
 
-- [ ] **Step 2: 命令实现**
+- [x] **Step 2: 命令实现**
 
 统一走 `run_blocking`（数据库与文件遍历都是同步 IO）。示例：
 
@@ -701,7 +701,7 @@ pub async fn note_set(app: tauri::AppHandle, id: String, text: String) -> Result
 
 `storage_usage_get` 返回 `StorageUsage`；`retention_preview(days)` 用 `count_items_before` + 过期项的 `sum(文件大小)`；`retention_apply` 返回 `PruneReport`。
 
-- [ ] **Step 3: 注册与绑定**
+- [x] **Step 3: 注册与绑定**
 
 `collect_commands![...]` 追加全部新命令；用 `VITE_` 无关的方式启动一次 debug 构建刷新绑定：
 
@@ -710,7 +710,7 @@ cargo test -p visrecall            # committed_bindings_are_up_to_date 会失败
 pnpm tauri dev                     # 启动即重写 src/lib/bindings.ts，随后 Ctrl+C
 ```
 
-- [ ] **Step 4: 测试**
+- [x] **Step 4: 测试**
 
 - `api_error_maps_stable_codes` 补 `FILE_MISSING` / `CLIPBOARD_BUSY` / `CLIPBOARD_FAILED` / `BUSY`。
 - `event_names_and_payloads_are_stable` 补 8 条。

@@ -28,3 +28,5 @@ windows = { version = "0.62.2", features = [
 
 [dev-dependencies]
 tempfile = "3"
+# 仅测试用：断言 DTO 的 JSON 键名（例如标签 chip 的 `auto`）；复用工作区已锁版本。
+serde_json.workspace = true

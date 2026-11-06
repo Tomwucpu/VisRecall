@@ -5,6 +5,8 @@
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
 use visrecall_app_core::{AppCore, AppError, EventSink};
+use visrecall_domain::storage::{OrphanStats, PruneReport, RetentionPreview, StorageUsage};
+use visrecall_domain::tag::{ItemTag, TagSource};
 
 use visrecall_app_core::AppEvent;
 
@@ -114,6 +116,8 @@ pub struct AppStatus {
     pub version: String,
     pub library_path: String,
     pub library_ok: bool,
+    /// 库已迁移、需要重启才能沿用新库；为真期间捕获被 `BUSY` 拒绝。
+    pub restart_required: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
@@ -142,6 +146,160 @@ impl SettingsDto {
             ball_size: config.ball.size,
         }
     }
+}
+
+/// 存储用量快照。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageUsageDto {
+    pub used_bytes: u64,
+    pub capacity_bytes: u64,
+    pub item_count: u64,
+}
+
+impl From<StorageUsage> for StorageUsageDto {
+    fn from(usage: StorageUsage) -> StorageUsageDto {
+        StorageUsageDto {
+            used_bytes: usage.used_bytes,
+            capacity_bytes: usage.capacity_bytes,
+            item_count: usage.item_count,
+        }
+    }
+}
+
+/// 详情面板的标签 chip；`auto` 表示「这次关联是自动标注加的」。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TagChipDto {
+    pub id: String,
+    pub name: String,
+    /// 关联来源是否为 `auto`；JSON 键就是 `auto`。
+    pub auto: bool,
+    /// 色令牌名（`ochre`/`slate`/…）；前端只做令牌 → CSS 变量映射。
+    pub hue: Option<String>,
+    /// 标签云的素材数量；按素材查询时为 0。
+    pub item_count: u64,
+}
+
+impl From<ItemTag> for TagChipDto {
+    fn from(chip: ItemTag) -> TagChipDto {
+        TagChipDto {
+            id: chip.tag.id,
+            name: chip.tag.name,
+            auto: chip.origin == TagSource::Auto,
+            hue: Some(chip.hue.to_string()),
+            item_count: chip.item_count,
+        }
+    }
+}
+
+/// 详情面板的额外内容。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DetailExtrasDto {
+    /// AI 摘要；阶段 02 恒为 `None`（阶段 03 提供）。
+    pub summary: Option<String>,
+    /// 文本素材的原文（前 20000 字符，超出部分已截断）。
+    pub body_text: Option<String>,
+    /// 图片素材的原图协议 URL；文本/链接为 `None`。
+    pub original_url: Option<String>,
+    pub tags: Vec<TagChipDto>,
+}
+
+/// 详情聚合结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemDetailDto {
+    pub item: ItemDto,
+    pub extras: DetailExtrasDto,
+}
+
+impl From<visrecall_app_core::ItemDetail> for ItemDetailDto {
+    fn from(detail: visrecall_app_core::ItemDetail) -> ItemDetailDto {
+        ItemDetailDto {
+            item: ItemDto::from(detail.item),
+            extras: DetailExtrasDto {
+                summary: detail.extras.summary,
+                body_text: detail.extras.body_text,
+                original_url: detail.extras.original_url,
+                tags: detail
+                    .extras
+                    .tags
+                    .into_iter()
+                    .map(TagChipDto::from)
+                    .collect(),
+            },
+        }
+    }
+}
+
+/// 全库清空的确认信息。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PurgePreview {
+    pub item_count: u64,
+    pub confirmation_word: String,
+}
+
+/// 清理预估。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RetentionPreviewDto {
+    pub item_count: u64,
+    pub bytes: u64,
+}
+
+impl From<RetentionPreview> for RetentionPreviewDto {
+    fn from(preview: RetentionPreview) -> RetentionPreviewDto {
+        RetentionPreviewDto {
+            item_count: preview.item_count,
+            bytes: preview.bytes,
+        }
+    }
+}
+
+/// 清理结果：成功 N / 失败 M。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PruneReportDto {
+    pub deleted: u64,
+    pub failed: u64,
+}
+
+impl From<PruneReport> for PruneReportDto {
+    fn from(report: PruneReport) -> PruneReportDto {
+        PruneReportDto {
+            deleted: report.deleted,
+            failed: report.failed,
+        }
+    }
+}
+
+/// 孤儿文件与缺失缩略图统计。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct OrphanStatsDto {
+    pub files: u64,
+    pub bytes: u64,
+    pub missing_thumbs: u64,
+}
+
+impl From<OrphanStats> for OrphanStatsDto {
+    fn from(stats: OrphanStats) -> OrphanStatsDto {
+        OrphanStatsDto {
+            files: stats.files,
+            bytes: stats.bytes,
+            missing_thumbs: stats.missing_thumbs,
+        }
+    }
+}
+
+/// 库迁移结果：必须重启才生效。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RelocateResultDto {
+    pub restart_required: bool,
+    pub new_root: String,
 }
 
 /// 把 `app-core` 的事件转成 Tauri 事件；前端只订阅，不从 Rust 侧读取状态。
@@ -189,12 +347,27 @@ impl EventSink for TauriEventSink {
             }
         }
 
+        // 改键成功后要把上一次的冲突提示从托盘上撤掉，否则托盘会一直停在旧文案。
+        if matches!(event, AppEvent::HotkeyRestored) {
+            match self.app.tray_by_id(crate::tray::TRAY_ID) {
+                Some(tray) => {
+                    if let Err(err) = tray.set_tooltip(Some(TRAY_DEFAULT_TOOLTIP)) {
+                        tracing::warn!(error = %err, "failed to reset tray tooltip");
+                    }
+                }
+                None => tracing::warn!("tray icon missing; cannot reset tooltip"),
+            }
+        }
+
         let name = event.name();
         if let Err(err) = self.app.emit(name, event.payload()) {
             tracing::warn!(event = name, error = %err, "failed to emit event");
         }
     }
 }
+
+/// 托盘恢复正常状态时的提示文案（与 `tray::create` 一致）。
+const TRAY_DEFAULT_TOOLTIP: &str = "目记 VisRecall";
 
 /// 托盘 tooltip 的字符上限（Windows 通知区域提示约 128 字符，留出余量）。
 const TOOLTIP_MAX_CHARS: usize = 120;
@@ -213,6 +386,237 @@ fn capture_failed_tooltip(code: &str, message: &str) -> String {
     truncated
 }
 
+#[tauri::command]
+#[specta::specta]
+pub async fn get_item_ext(app: tauri::AppHandle, id: String) -> Result<ItemDetailDto, ApiError> {
+    run_blocking(app, move |core| {
+        core.detail(&id)
+            .map(ItemDetailDto::from)
+            .map_err(|err| ApiError::from(&err))
+    })
+    .await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn note_set(app: tauri::AppHandle, id: String, text: String) -> Result<(), ApiError> {
+    run_blocking(app, move |core| {
+        core.set_note(&id, &text)
+            .map_err(|err| ApiError::from(&err))
+    })
+    .await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn tags_list(app: tauri::AppHandle) -> Result<Vec<TagChipDto>, ApiError> {
+    run_blocking(app, move |core| {
+        let library = core.library().map_err(ApiError::from)?;
+        let tags = library.tags_list().map_err(|err| ApiError::from(&err))?;
+        Ok(tags.into_iter().map(TagChipDto::from).collect())
+    })
+    .await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn tag_add(
+    app: tauri::AppHandle,
+    item_id: String,
+    name: String,
+) -> Result<TagChipDto, ApiError> {
+    run_blocking(app, move |core| {
+        core.add_tag(&item_id, &name)
+            .map(TagChipDto::from)
+            .map_err(|err| ApiError::from(&err))
+    })
+    .await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn tag_detach(
+    app: tauri::AppHandle,
+    item_id: String,
+    tag_id: String,
+) -> Result<(), ApiError> {
+    run_blocking(app, move |core| {
+        core.detach_tag(&item_id, &tag_id)
+            .map_err(|err| ApiError::from(&err))
+    })
+    .await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn tag_rename(
+    app: tauri::AppHandle,
+    tag_id: String,
+    name: String,
+) -> Result<(), ApiError> {
+    run_blocking(app, move |core| {
+        core.rename_tag(&tag_id, &name)
+            .map_err(|err| ApiError::from(&err))
+    })
+    .await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn tag_delete(app: tauri::AppHandle, tag_id: String) -> Result<u64, ApiError> {
+    run_blocking(app, move |core| {
+        core.delete_tag(&tag_id).map_err(|err| ApiError::from(&err))
+    })
+    .await
+}
+
+/// 复制原始内容：图片 `CF_DIB` + `PNG`，文本/链接 `CF_UNICODETEXT`。
+#[tauri::command]
+#[specta::specta]
+pub async fn copy_item_original(app: tauri::AppHandle, item_id: String) -> Result<(), ApiError> {
+    run_blocking(app, move |core| {
+        core.copy_original(&item_id)
+            .map_err(|err| ApiError::from(&err))
+    })
+    .await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn item_delete(app: tauri::AppHandle, id: String) -> Result<(), ApiError> {
+    run_blocking(app, move |core| {
+        core.delete_item(&id).map_err(|err| ApiError::from(&err))
+    })
+    .await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn library_purge_preview(app: tauri::AppHandle) -> Result<PurgePreview, ApiError> {
+    run_blocking(app, move |core| {
+        let item_count = core.purge_preview().map_err(|err| ApiError::from(&err))?;
+        Ok(PurgePreview {
+            item_count,
+            confirmation_word: AppCore::PURGE_CONFIRMATION_WORD.to_string(),
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn library_purge(app: tauri::AppHandle, confirm: String) -> Result<(), ApiError> {
+    run_blocking(app, move |core| {
+        core.purge(&confirm)
+            .map(|_report| ())
+            .map_err(|err| ApiError::from(&err))
+    })
+    .await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn storage_usage_get(app: tauri::AppHandle) -> Result<StorageUsageDto, ApiError> {
+    run_blocking(app, move |core| {
+        core.usage()
+            .map(StorageUsageDto::from)
+            .map_err(|err| ApiError::from(&err))
+    })
+    .await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn storage_capacity_set(app: tauri::AppHandle, gigabytes: u32) -> Result<(), ApiError> {
+    run_blocking(app, move |core| {
+        core.set_capacity_gb(gigabytes)
+            .map_err(|err| ApiError::from(&err))
+    })
+    .await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn retention_set(app: tauri::AppHandle, days: Option<u32>) -> Result<(), ApiError> {
+    run_blocking(app, move |core| {
+        core.set_retention(days).map_err(|err| ApiError::from(&err))
+    })
+    .await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn retention_preview(
+    app: tauri::AppHandle,
+    days: Option<u32>,
+) -> Result<RetentionPreviewDto, ApiError> {
+    run_blocking(app, move |core| {
+        core.retention_preview(days)
+            .map(RetentionPreviewDto::from)
+            .map_err(|err| ApiError::from(&err))
+    })
+    .await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn retention_apply(app: tauri::AppHandle) -> Result<PruneReportDto, ApiError> {
+    run_blocking(app, move |core| {
+        Ok(PruneReportDto::from(core.prune_expired()))
+    })
+    .await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn storage_orphans_get(app: tauri::AppHandle) -> Result<OrphanStatsDto, ApiError> {
+    run_blocking(app, move |core| {
+        let library = core.library().map_err(ApiError::from)?;
+        library
+            .orphans()
+            .map(OrphanStatsDto::from)
+            .map_err(|err| ApiError::from(&err))
+    })
+    .await
+}
+
+/// 清理孤儿文件：只删 `originals/`、`texts/` 下未被引用的文件。
+#[tauri::command]
+#[specta::specta]
+pub async fn storage_orphans_cleanup(app: tauri::AppHandle) -> Result<OrphanStatsDto, ApiError> {
+    run_blocking(app, move |core| {
+        let library = core.library().map_err(ApiError::from)?;
+        library
+            .cleanup_orphans()
+            .map(OrphanStatsDto::from)
+            .map_err(|err| ApiError::from(&err))
+    })
+    .await
+}
+
+/// 库位置迁移。
+///
+/// 迁移行为（目标校验、复制、校验、写 config、闸门）在 Task 18 落地；此处先保留命令
+/// 签名，让前端契约与 `bindings.ts` 一次定型，调用时明确返回 `BUSY` 而不是「命令不存在」。
+#[tauri::command]
+#[specta::specta]
+pub async fn storage_relocate(
+    _app: tauri::AppHandle,
+    _path: String,
+) -> Result<RelocateResultDto, ApiError> {
+    Err(ApiError::new(
+        "BUSY",
+        "storage relocation is not available yet",
+    ))
+}
+
+/// 立即重启进程；只应在 `restartRequired = true` 时由横幅按钮调用。
+#[tauri::command]
+#[specta::specta]
+pub async fn restart_app(app: tauri::AppHandle) -> Result<(), ApiError> {
+    app.restart();
+}
+
 /// 所有阶段 01 命令的注册点；命令同时带 `#[tauri::command]` 与 `#[specta::specta]`。
 pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
     tauri_specta::Builder::<tauri::Wry>::new()
@@ -222,7 +626,27 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             list_items,
             get_item,
             get_settings,
-            update_settings
+            update_settings,
+            get_item_ext,
+            note_set,
+            tags_list,
+            tag_add,
+            tag_detach,
+            tag_rename,
+            tag_delete,
+            copy_item_original,
+            item_delete,
+            library_purge_preview,
+            library_purge,
+            storage_usage_get,
+            storage_capacity_set,
+            retention_set,
+            retention_preview,
+            retention_apply,
+            storage_orphans_get,
+            storage_orphans_cleanup,
+            storage_relocate,
+            restart_app
         ])
         // 前端用 try/catch 处理 `ApiError`，而不是每处解包 `{ status }`。
         .error_handling(tauri_specta::ErrorHandlingMode::Throw)
@@ -279,6 +703,7 @@ pub fn get_app_status(core: tauri::State<'_, AppCore>) -> AppStatus {
         version: env!("CARGO_PKG_VERSION").to_string(),
         library_path: config.library_path.display().to_string(),
         library_ok: core.library_ok(),
+        restart_required: core.restart_required(),
     }
 }
 
@@ -374,6 +799,16 @@ mod tests {
             ),
             (AppError::CaptureCancelled, "CAPTURE_CANCELLED"),
             (AppError::DrmProtected, "DRM_PROTECTED"),
+            (
+                AppError::FileMissing("originals/a.png".into()),
+                "FILE_MISSING",
+            ),
+            (AppError::ClipboardBusy, "CLIPBOARD_BUSY"),
+            (
+                AppError::ClipboardFailed("GlobalAlloc".into()),
+                "CLIPBOARD_FAILED",
+            ),
+            (AppError::Busy("migrating".into()), "BUSY"),
             (AppError::Io("disk".into()), "IO"),
             (AppError::Database("locked".into()), "DATABASE"),
             (AppError::Internal("oops".into()), "INTERNAL"),
@@ -435,5 +870,60 @@ mod tests {
             ItemDto::from(with_thumb).thumb_url.as_deref(),
             Some("visrecall://thumb/id-1")
         );
+    }
+
+    /// 标签 chip 的关联来源必须是 JSON 键 `auto`（不是 `auto_`）。
+    #[test]
+    fn tag_chip_serializes_auto_key() {
+        let chip = TagChipDto::from(ItemTag::new(
+            visrecall_domain::Tag {
+                id: "t1".into(),
+                name: "work".into(),
+                source: TagSource::Manual,
+                created_at: 0,
+            },
+            TagSource::Auto,
+            2,
+        ));
+
+        let json = serde_json::to_value(&chip).unwrap();
+        assert_eq!(json["auto"], true);
+        assert_eq!(json["name"], "work");
+        assert_eq!(json["itemCount"], 2);
+        assert!(json.get("auto_").is_none());
+        assert!(json["hue"].is_string());
+    }
+
+    #[test]
+    fn item_detail_dto_nests_tags_under_extras() {
+        let detail = visrecall_app_core::ItemDetail {
+            item: visrecall_domain::Item {
+                id: "id-1".into(),
+                kind: visrecall_domain::ItemKind::Text,
+                status: visrecall_domain::ItemStatus::Ready,
+                captured_at: 1,
+                source_app: None,
+                source_title: None,
+                source_url: None,
+                width: None,
+                height: None,
+                char_count: Some(3),
+                original_path: "texts/id-1.txt".into(),
+                thumb_path: None,
+                note: String::new(),
+                content_hash: "hash".into(),
+            },
+            extras: visrecall_app_core::DetailExtras {
+                summary: None,
+                body_text: Some("abc".into()),
+                original_url: None,
+                tags: vec![],
+            },
+        };
+
+        let json = serde_json::to_value(ItemDetailDto::from(detail)).unwrap();
+        assert_eq!(json["extras"]["bodyText"], "abc");
+        assert!(json["extras"]["originalUrl"].is_null());
+        assert!(json["extras"]["tags"].is_array());
     }
 }

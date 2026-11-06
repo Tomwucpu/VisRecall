@@ -4,6 +4,7 @@
 //! 库打开失败不会 panic：错误保存在 [`AppCore::library`] 里，由命令层转成
 //! `CONFIG_MISSING` 等稳定错误码。
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -12,7 +13,11 @@ use std::thread;
 use crossbeam_channel::{select, Receiver, Sender};
 use visrecall_capture::{GdiFrameGrabber, Win32WindowProbe};
 use visrecall_domain::drop::DropContent;
-use visrecall_domain::AppError;
+use visrecall_domain::storage::{
+    PruneReport, RetentionPreview, StorageUsage, MAX_RETENTION_DAYS, MIN_RETENTION_DAYS,
+};
+use visrecall_domain::tag::ItemTag;
+use visrecall_domain::{now_millis, AppError, ItemKind};
 use visrecall_library::paths::AppPaths;
 use visrecall_library::{AppConfig, Library};
 use visrecall_shell::ball::{
@@ -25,8 +30,10 @@ use visrecall_shell::{OverlayEvent, ShellEvent};
 use crate::capture_flow::{
     guard_session, CaptureCoordinator, NoopWindowVisibility, WindowVisibility,
 };
+use crate::detail::{load_detail, ItemDetail};
 use crate::events::{
-    AppEvent, AppRecoveredEvent, CaptureFailedEvent, EventSink, HotkeyConflictEvent,
+    AppEvent, AppRecoveredEvent, CaptureFailedEvent, EventSink, HotkeyConflictEvent, ItemEvent,
+    ItemsPrunedEvent,
 };
 use crate::import_flow::ImportFlow;
 
@@ -453,6 +460,204 @@ impl AppCore {
         Ok(next)
     }
 
+    /// 全库清空要求的确认词；判断在 Rust 侧，前端不得硬编码。
+    pub const PURGE_CONFIRMATION_WORD: &'static str = "删除全部";
+
+    /// 库句柄；库打不开时统一返回 `CONFIG_MISSING`（design §8）。
+    fn library_required(&self) -> Result<&Library, AppError> {
+        self.library().map_err(|_| AppError::ConfigMissing)
+    }
+
+    /// 详情聚合（素材本体 + 原文/原图 URL + 标签）。
+    pub fn detail(&self, id: &str) -> Result<ItemDetail, AppError> {
+        load_detail(self.library_required()?, id)
+    }
+
+    /// 保存备注；成功后只发 `item_note_updated`，不惊动列表。
+    pub fn set_note(&self, id: &str, text: &str) -> Result<(), AppError> {
+        self.library_required()?.set_note(id, text)?;
+        self.sink
+            .emit(AppEvent::ItemNoteUpdated(ItemEvent { id: id.to_string() }));
+        Ok(())
+    }
+
+    /// 贴标签；成功发 `item_tags_updated` + `tags_changed`。
+    pub fn add_tag(&self, item_id: &str, name: &str) -> Result<ItemTag, AppError> {
+        let chip = self.library_required()?.tag_add(item_id, name)?;
+        self.emit_item_tags_changed(item_id);
+        Ok(chip)
+    }
+
+    /// 解除关联；自动标签会写入抑制记录（库层负责）。
+    pub fn detach_tag(&self, item_id: &str, tag_id: &str) -> Result<(), AppError> {
+        self.library_required()?.tag_detach(item_id, tag_id)?;
+        self.emit_item_tags_changed(item_id);
+        Ok(())
+    }
+
+    /// 重命名标签；只影响标签集合。
+    pub fn rename_tag(&self, tag_id: &str, name: &str) -> Result<(), AppError> {
+        self.library_required()?.tag_rename(tag_id, name)?;
+        self.sink.emit(AppEvent::TagsChanged);
+        Ok(())
+    }
+
+    /// 删除标签，返回解除的关联条数。
+    pub fn delete_tag(&self, tag_id: &str) -> Result<u64, AppError> {
+        let removed = self.library_required()?.tag_delete(tag_id)?;
+        self.sink.emit(AppEvent::TagsChanged);
+        Ok(removed)
+    }
+
+    fn emit_item_tags_changed(&self, item_id: &str) {
+        self.sink.emit(AppEvent::ItemTagsUpdated(ItemEvent {
+            id: item_id.to_string(),
+        }));
+        self.sink.emit(AppEvent::TagsChanged);
+    }
+
+    /// 单条彻底删除；成功后发 `item_deleted`。
+    pub fn delete_item(&self, id: &str) -> Result<(), AppError> {
+        self.library_required()?.delete_item(id)?;
+        self.sink
+            .emit(AppEvent::ItemDeleted(ItemEvent { id: id.to_string() }));
+        Ok(())
+    }
+
+    /// 全库清空的确认信息：待删条数 + 确认词。
+    pub fn purge_preview(&self) -> Result<u64, AppError> {
+        self.library_required()?.count_items()
+    }
+
+    /// 全库清空；确认词不匹配直接拒绝，不进入任何删除。
+    pub fn purge(&self, confirm: &str) -> Result<visrecall_library::PurgeReport, AppError> {
+        if confirm != Self::PURGE_CONFIRMATION_WORD {
+            return Err(AppError::InvalidInput(
+                "confirmation word mismatch".to_string(),
+            ));
+        }
+        let report = self.library_required()?.purge_library()?;
+        self.sink.emit(AppEvent::ItemsReset);
+        Ok(report)
+    }
+
+    /// 用量快照。
+    pub fn usage(&self) -> Result<StorageUsage, AppError> {
+        self.library_required()?.usage()
+    }
+
+    /// 设置容量（软配额，GiB）。
+    pub fn set_capacity_gb(&self, gigabytes: u32) -> Result<(), AppError> {
+        self.library_required()?.set_capacity_gb(gigabytes)
+    }
+
+    /// 保存保留策略；`None` = 永久。
+    pub fn set_retention(&self, days: Option<u32>) -> Result<(), AppError> {
+        self.library_required()?.set_retention(days)
+    }
+
+    /// 清理预估：按给定天数算出会删多少条、释放多少字节。
+    ///
+    /// `None`（永久保留）返回全 0：永久策略不删任何素材。
+    pub fn retention_preview(&self, days: Option<u32>) -> Result<RetentionPreview, AppError> {
+        let Some(days) = days else {
+            return Ok(RetentionPreview::default());
+        };
+        if !(MIN_RETENTION_DAYS..=MAX_RETENTION_DAYS).contains(&days) {
+            return Err(AppError::InvalidInput(format!(
+                "retention must be {MIN_RETENTION_DAYS}..={MAX_RETENTION_DAYS} days"
+            )));
+        }
+
+        let library = self.library_required()?;
+        let cutoff = now_millis() - i64::from(days) * 86_400_000;
+        let item_count = library.count_items_before(cutoff)?;
+        let mut bytes = 0;
+        for item in library.list_expired(cutoff, 500)? {
+            bytes += file_len(&library.root().join(&item.original_path));
+            if let Some(thumb) = item.thumb_path {
+                bytes += file_len(&library.root().join(thumb));
+            }
+        }
+        Ok(RetentionPreview { item_count, bytes })
+    }
+
+    /// 按已保存的策略清理过期素材；逐条删除，单条失败不中断其余条目。
+    ///
+    /// 只在 `deleted > 0` 时发 `items_pruned`（`count` 为成功删除数）。
+    pub fn prune_expired(&self) -> PruneReport {
+        let Ok(library) = self.library_required() else {
+            return PruneReport::default();
+        };
+        let Some(days) = library.retention().days else {
+            return PruneReport::default();
+        };
+
+        let cutoff = now_millis() - i64::from(days) * 86_400_000;
+        let expired = match library.list_expired(cutoff, 500) {
+            Ok(items) => items,
+            Err(err) => {
+                tracing::warn!(%err, "failed to list expired items");
+                return PruneReport::default();
+            }
+        };
+
+        let mut report = PruneReport::default();
+        for item in expired {
+            match library.delete_item(&item.id) {
+                Ok(_) => report.deleted += 1,
+                Err(err) => {
+                    report.failed += 1;
+                    tracing::warn!(id = %item.id, %err, "failed to prune expired item");
+                }
+            }
+        }
+
+        if report.deleted > 0 {
+            self.sink.emit(AppEvent::ItemsPruned(ItemsPrunedEvent {
+                count: report.deleted,
+            }));
+        }
+        report
+    }
+
+    /// 复制原始内容：图片写 `CF_DIB` + `PNG`，文本/链接写 `CF_UNICODETEXT`。
+    ///
+    /// 文本读的是**完整原文**（不受详情 20000 字符截断影响）；链接复制的是原始 URL。
+    pub fn copy_original(&self, item_id: &str) -> Result<(), AppError> {
+        let library = self.library_required()?;
+        let item = library.get_item(item_id)?.ok_or(AppError::NotFound)?;
+
+        match item.kind {
+            ItemKind::Image => {
+                let (bytes, _mime) = crate::thumbnail::load_original_bytes(library, item_id)?;
+                visrecall_shell::clipboard::copy_image_png(&bytes)
+            }
+            ItemKind::Text => {
+                let path = library.root().join(&item.original_path);
+                let text = fs::read_to_string(&path).map_err(|err| match err.kind() {
+                    std::io::ErrorKind::NotFound => {
+                        AppError::FileMissing(item.original_path.clone())
+                    }
+                    _ => AppError::Io(format!("read {}: {err}", item.original_path)),
+                })?;
+                visrecall_shell::clipboard::copy_text(&text)
+            }
+            ItemKind::Link => match item.source_url.as_deref() {
+                Some(url) if !url.is_empty() => visrecall_shell::clipboard::copy_text(url),
+                _ => Err(AppError::FileMissing(item.id)),
+            },
+        }
+    }
+
+    /// 是否需要重启才能用新库。
+    ///
+    /// 阶段 02 Task 18 把它接到迁移闸门（`CaptureGate::RestartPending`）；在此之前恒为
+    /// `false`——没有迁移入口，也就不存在待重启状态。
+    pub fn restart_required(&self) -> bool {
+        false
+    }
+
     fn lock_config(&self) -> MutexGuard<'_, AppConfig> {
         // 持锁期间没有会 panic 的操作；被毒化时也继续使用，避免启动后永久不可用。
         self.config
@@ -477,6 +682,11 @@ impl AppCore {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
     }
+}
+
+/// 文件字节数；不存在或不可读按 0 计（预估只用于展示）。
+fn file_len(path: &Path) -> u64 {
+    fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
 }
 
 /// 抓帧期间隐藏/恢复「自有窗口」的组合实现：主窗口 + 悬浮球。
