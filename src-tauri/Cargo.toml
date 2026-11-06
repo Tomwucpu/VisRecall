@@ -37,5 +37,10 @@ serde_json.workspace = true
 # release 必须内嵌前端资源：`tauri` 的 `custom-protocol` 不在默认 features 里，
 # 缺了它 release 构建不会把 `dist/` 打进去，窗口会去连 devUrl 或直接空白。
 # 默认开启，`cargo build --release -p visrecall` 一条命令即可产出可运行的二进制。
+#
+# 副作用（已知，见 02-library-detail/verification.md §4 L3）：`tauri` 把「dev 模式」
+# 定义为「未启用 custom-protocol」，所以 debug 构建也内嵌 `dist/`：
+# - 开发态要连 Vite dev server：`cargo run -p visrecall --no-default-features`；
+# - 新克隆仓库先跑一次 `pnpm build`，否则内嵌资源缺失会导致编译失败。
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]

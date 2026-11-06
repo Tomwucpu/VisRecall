@@ -31,7 +31,11 @@ export const commands = {
 	retentionPreview: (days: number | null) => __TAURI_INVOKE<RetentionPreviewDto>("retention_preview", { days }),
 	retentionApply: () => __TAURI_INVOKE<PruneReportDto>("retention_apply"),
 	storageOrphansGet: () => __TAURI_INVOKE<OrphanStatsDto>("storage_orphans_get"),
-	/**  清理孤儿文件：只删 `originals/`、`texts/` 下未被引用的文件。 */
+	/**
+	 *  清理孤儿文件：只删 `originals/`、`texts/` 下未被引用的文件。
+	 * 
+	 *  不发事件（孤儿文件不属于任何素材），用量变化由前端在返回后重新拉取。
+	 */
 	storageOrphansCleanup: () => __TAURI_INVOKE<OrphanStatsDto>("storage_orphans_cleanup"),
 	/**
 	 *  库位置迁移：校验目标 → 停运行时 → checkpoint → 复制 → 校验 → 写 config。

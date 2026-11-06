@@ -390,3 +390,32 @@ R05 的单屏 150% 范围）、**PASS\*/REF 为主** 2 条（R07、R09）、**�
   feature 配置与 `pnpm tauri build` 产物验收——不确认这两项就无法确定阶段 02 的
   交付形态。
   详见上文 E 与 `docs/specs/v0.1/README.md` 的「阶段 02 门禁（不阻塞功能开发）」。
+
+---
+
+# 阶段 02 回填（2026-11-06）
+
+本节是**阶段 02 退出时**对上文「阶段 01 待补清单」的回填。第 7 条（实时模式决策）与
+第 10 条（打包产物）已在阶段 02 定稿/落地；其余 11 条因执行环境只能跑测试与二进制、
+不能操作 GUI（也无 4K 屏 / 第二块屏 / PresentMon），**仍为 `NOT RUN`**，逐条写原因，
+不改变上文的 `NOT RUN` 判定。同一份记录见 `02-library-detail/verification.md` §1。
+
+| # | 阶段 01 遗留项 | 阶段 02 退出时状态 | 说明 |
+|---|---|---|---|
+| 1 | 物理 4K + PresentMon 交叉验证 | **NOT RUN**（不变） | 环境仍无 4K 面板、无 PresentMon。替代证据仍是 Task 10 的合成 4K（avg 6.06 ms / P95 ≤6.28 ms / max ≤13.18 ms / drops=0） |
+| 2 | 双屏与混合 DPI | **NOT RUN**（不变） | 仍为单屏；只有 `stitch` / `display_geometry` 单测 |
+| 3 | 单屏 100% / 125% / 200% | **仍不完整** | 本机当前为 **125%**（`LogPixels=120`），阶段 01 的几何验收在 150% 下做；100%/200% 需注销会话改缩放，未做 |
+| 4 | 物理 OLE 四来源拖放 | **NOT RUN**（不变） | 无 GUI 会话；替代证据仍是 Task 16 的真实 OLE 管线 12 场景 |
+| 5 | DRM / 独占全屏 | **NOT RUN**（不变） | 未构造真实 DRM 窗口；`is_blank_frame` 只有单测 |
+| 6 | 提权窗口与 UIPI 拖放 | **NOT RUN**（不变） | 需 UAC 提权会话 |
+| 7 | 实时模式决策（D2-01） | **已定稿：不实现** | 见 `02-library-detail/design.md` §1.1；维持 `CAPTURE_FAILED` 降级，阶段 04 复评 |
+| 8 | 托盘内存与空闲 CPU 门禁口径 | **部分** | 阶段 02 新增一次 release 实测：托盘驻留 WS **42.2 MB** / 私有 **33.5 MB**、主窗口打开后 WS **51.9 MB** / 私有 **36.4 MB**（有命令输出可复核，比阶段 01 的「未落盘快照」强）；**10 分钟 PerfMon 空闲 CPU 仍未做** |
+| 9 | 列表视觉验收（20 条滚动/翻页/解析中过渡） | **NOT RUN**（不变） | 库内只有 1 条素材，且无 GUI 操作；替代证据为 list 游标测试 + 列表组件测试 |
+| 10 | 打包产物（D2-02） | **已完成** | `src-tauri/Cargo.toml` 增加 `[features] default = ["custom-protocol"]`（Task 20）。`cargo build --release -p visrecall` 产出 20,015,616 B 二进制，脱离 `pnpm dev` 运行通过：`cold start to tray: 180ms`、`main window created`、`Responding=True`。**E.14 记录的「release 指向 devUrl」问题已修复**；副作用见 `02-library-detail/verification.md` §4 L3（debug 构建也内嵌 `dist/`） |
+| 11 | 30 分钟连续使用 + ≥20 次真实捕获 | **仍未达成** | 阶段 02 未做真实交互长跑（进程只跑了约 1 分钟冒烟，无崩溃）。requirements §5 退出条件 2 **继续挂账** |
+| 12 | 同一画面重复捕获不去重 | **NOT RUN**（不变） | 需两次真实捕获 |
+| 13 | 滚动/帧率量化 | **NOT RUN**（不变） | 无 PresentMon、无 WebView2 帧率工具 |
+
+**回填结论**：13 项中 **2 项已收口**（#7 决策、#10 打包产物）、**1 项部分改善**（#8 内存有
+可复核实测、CPU 未做）、**10 项仍 `NOT RUN` 或未达成**。因此阶段 01 的结论措辞不变：
+**阶段 01 有条件完成**；阶段 02 的退出结论同样带条件（见 `02-library-detail/verification.md` §5）。

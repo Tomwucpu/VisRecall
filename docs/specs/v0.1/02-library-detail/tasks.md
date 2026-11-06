@@ -1368,7 +1368,7 @@ cargo build --release -p visrecall
 - Consumes: Task 1–20 全部产物
 - Produces: 可审计的验收记录
 
-- [ ] **Step 1: 跑完整自动化门禁**
+- [x] **Step 1: 跑完整自动化门禁**
 
 ```bash
 cargo fmt --all -- --check
@@ -1377,15 +1377,15 @@ cargo test --workspace
 pnpm lint && pnpm typecheck && pnpm test && pnpm build
 ```
 
-- [ ] **Step 2: 阶段 01 遗留项逐项补测**
+- [x] **Step 2: 阶段 01 遗留项逐项补测**
 
 按 `verification.md` §1 清单执行：4K + PresentMon（无硬件则记「环境限制未验证」）、双屏与混合 DPI、单屏 100%/125%/200%、OLE 四来源拖放、DRM 与独占全屏、提权窗口、托盘内存与空闲 CPU、20 条滚动与翻页（原 100 条口径按现行规模下调，证据注明规模）、30 分钟 / ≥20 次捕获、重复捕获不去重、release 产物。
 
-- [ ] **Step 3: 阶段 02 验收**
+- [x] **Step 3: 阶段 02 验收**
 
 按 `verification.md` §2–§4 执行：详情/备注/标签/复制/删除/清空/用量/保留/迁移/球三态/热生效/恢复/构建。
 
-- [ ] **Step 4: 回填文档**
+- [x] **Step 4: 回填文档**
 
 - `01-capture-loop/verification.md`：勾选或标注环境限制，附日期与证据（截图路径、日志片段、命令输出）。
 - `02-library-detail/verification.md`：填写全部结果与遗留问题。

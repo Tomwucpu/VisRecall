@@ -12,7 +12,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::OpenFlags;
-use visrecall_app_core::capture_flow::{CaptureCoordinator, NoopWindowVisibility, OverlayPresenter};
+use visrecall_app_core::capture_flow::{
+    CaptureCoordinator, NoopWindowVisibility, OverlayPresenter,
+};
 use visrecall_app_core::events::{AppEvent, EventSink, RecordingSink};
 use visrecall_app_core::{handle_shell_event, AppCore, CaptureGate};
 use visrecall_capture::{FrameGrabber, RawFrame, WindowProbe};
@@ -328,7 +330,8 @@ fn restart_picks_up_the_new_library() {
     let fixture = fixture("Ctrl+Alt+Shift+F8");
     {
         let core = AppCore::open(paths(&fixture), Arc::new(RecordingSink::default()));
-        core.relocate_library(fixture.target.clone()).expect("relocate");
+        core.relocate_library(fixture.target.clone())
+            .expect("relocate");
         assert!(core.restart_required());
     }
 
@@ -350,7 +353,8 @@ fn capture_is_rejected_while_a_restart_is_pending() {
     let fixture = fixture("Ctrl+Alt+Shift+F9");
     let sink = Arc::new(RecordingSink::default());
     let core = AppCore::open(paths(&fixture), sink.clone());
-    core.relocate_library(fixture.target.clone()).expect("relocate");
+    core.relocate_library(fixture.target.clone())
+        .expect("relocate");
 
     let capture_sink = Arc::new(RecordingSink::default());
     let coordinator = coordinator_with_gate(&core, capture_sink.clone());
@@ -391,7 +395,8 @@ fn drop_is_rejected_while_a_restart_is_pending() {
     let fixture = fixture("Ctrl+Alt+Shift+F10");
     let sink = Arc::new(RecordingSink::default());
     let core = AppCore::open(paths(&fixture), sink.clone());
-    core.relocate_library(fixture.target.clone()).expect("relocate");
+    core.relocate_library(fixture.target.clone())
+        .expect("relocate");
 
     let capture_sink = Arc::new(RecordingSink::default());
     let coordinator = coordinator_with_gate(&core, capture_sink.clone());

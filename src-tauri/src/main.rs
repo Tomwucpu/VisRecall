@@ -126,13 +126,26 @@ fn init_logging() {
 /// 生成的绑定必须入库，且必须与当前命令/类型定义一致。
 ///
 /// 测试只导出到临时文件再与受版本控制的文件比对，不会改写工作区文件；
-/// 需要刷新时启动 debug 构建（`pnpm tauri dev` 或 `cargo run -p visrecall`），
-/// 启动时会把绑定写到真实路径。
+/// 需要刷新时二选一：启动 debug 构建（`pnpm tauri dev` 或 `cargo run -p visrecall`）
+/// 会在启动时写真实路径，或者跑
+/// `cargo test -p visrecall --bin visrecall -- --ignored refresh_committed_bindings`
+/// （不需要拉起窗口，适合只想刷新的场景）。
 #[cfg(all(test, debug_assertions))]
 mod bindings_test {
     /// 生成器与仓库文件可能落在不同平台的换行风格上，比较前统一换行。
     fn normalize(text: &str) -> String {
         text.replace("\r\n", "\n")
+    }
+
+    /// 刷新受版本控制的绑定文件（默认不跑，避免测试改写工作区）。
+    ///
+    /// 命令与类型的**文档注释**也会进生成文件：改了命令的 doc 就要刷一次，
+    /// 否则 `committed_bindings_are_up_to_date` 会失败。
+    #[test]
+    #[ignore = "writes src/lib/bindings.ts; run explicitly to refresh bindings"]
+    fn refresh_committed_bindings() {
+        let builder = super::ipc::specta_builder();
+        super::ipc::export_bindings(&builder).expect("export bindings");
     }
 
     #[test]

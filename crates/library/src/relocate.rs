@@ -262,6 +262,10 @@ fn copy_file(from: &Path, to: &Path) -> Result<(), AppError> {
     })?;
     fs::rename(&tmp, to).map_err(|err| {
         let _ = fs::remove_file(&tmp);
-        AppError::Io(format!("rename {} -> {}: {err}", tmp.display(), to.display()))
+        AppError::Io(format!(
+            "rename {} -> {}: {err}",
+            tmp.display(),
+            to.display()
+        ))
     })
 }
