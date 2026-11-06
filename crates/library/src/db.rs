@@ -86,6 +86,37 @@ impl Library {
         Ok(canonical)
     }
 
+    /// 把库内相对路径解析为绝对路径，**不要求文件存在**。
+    ///
+    /// [`Library::relative_to_root`] 依赖 `canonicalize`，只能解析已存在的文件；
+    /// 删除流程需要「文件可能已经被用户手工删掉」的路径解析，因此单独提供：
+    /// 相对路径本身先做组件校验（拒绝绝对路径、盘符、`..`），文件存在时再
+    /// canonicalize 并复核仍位于库根目录内（防符号链接逃逸）。
+    pub fn resolve_existing_or_join(&self, rel: &str) -> Result<PathBuf, AppError> {
+        let relative = Path::new(rel);
+        if !is_safe_relative(relative) {
+            return Err(AppError::InvalidInput(format!(
+                "path escapes library root: {rel}"
+            )));
+        }
+
+        let root = fs::canonicalize(&self.root)
+            .map_err(|err| AppError::Io(format!("canonicalize {}: {err}", self.root.display())))?;
+        let joined = root.join(relative);
+        if !joined.exists() {
+            return Ok(joined);
+        }
+
+        let canonical = fs::canonicalize(&joined)
+            .map_err(|err| AppError::Io(format!("canonicalize {}: {err}", joined.display())))?;
+        if !canonical.starts_with(&root) {
+            return Err(AppError::InvalidInput(format!(
+                "path escapes library root: {rel}"
+            )));
+        }
+        Ok(canonical)
+    }
+
     /// 启动恢复：把遗留的 `running` 任务改回 `queued`，返回恢复条数。
     pub fn recover_jobs(&self) -> Result<u64, AppError> {
         let conn = self.conn()?;

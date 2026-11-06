@@ -339,7 +339,7 @@ cargo test -p visrecall-library --test items_db
   - `Library::purge_library() -> Result<PurgeReport, AppError>`（`PurgeReport { items, tags, files_removed, files_failed }`）
   - `Library::clear_content_dirs() -> Result<(u64, u64), AppError>`
 
-- [ ] **Step 1: 单条删除（库删完再删文件）**
+- [x] **Step 1: 单条删除（库删完再删文件）**
 
 ```rust
 pub fn delete_item(&self, id: &str) -> Result<DeletedItem, AppError> {
@@ -360,11 +360,11 @@ pub fn delete_item(&self, id: &str) -> Result<DeletedItem, AppError> {
 
 `relative_to_root` 要求文件存在（内部 `canonicalize`）；文件已被手动删除时它会返回 `Io`，因此**先用 `self.root().join(rel)` 拼绝对路径并做组件校验**，不要直接依赖 `relative_to_root`。为此新增 `Library::resolve_existing_or_join(rel)`。
 
-- [ ] **Step 2: 清空**
+- [x] **Step 2: 清空**
 
 事务内按 `jobs → item_tags → tag_suppressions → tags → items` 顺序 DELETE（先子后父，避免外键顺序问题）；随后 `clear_content_dirs()` 删除 `originals/`、`texts/`、`thumbs/` 下普通文件（复用 `cleanup.rs` 的 `collect_files`，把它提到 `pub(crate)`）。
 
-- [ ] **Step 3: 测试**
+- [x] **Step 3: 测试**
 
 - 删除后文件消失、`jobs`/`item_tags` 无残留；原图文件已被手动删掉时仍返回成功。
 - 清空后 5 张表计数为 0，`settings` 与 `schema_migrations` 保留，三个内容目录为空但存在。

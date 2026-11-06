@@ -10,6 +10,7 @@ pub mod files;
 pub mod items;
 pub mod migrations;
 pub mod paths;
+pub mod purge;
 pub mod settings_kv;
 pub mod tags;
 
@@ -17,6 +18,7 @@ pub use cleanup::StartupCleanup;
 pub use config::{AppConfig, BallConfig, CaptureConfig, HotkeyConfig, PrivacyConfig};
 pub use db::Library;
 pub use paths::{ensure_library_root, AppPaths, LibraryMeta};
+pub use purge::{DeletedItem, PurgeReport};
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

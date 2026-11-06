@@ -23,7 +23,18 @@ pub struct StartupCleanup {
 }
 
 /// 扫描孤儿文件的目录（相对库根目录）。
-const SCAN_DIRS: [&str; 2] = ["originals", "texts"];
+///
+/// 白名单是硬约束：孤儿扫描只认这两个目录，绝不遍历库根目录，也不触碰
+/// `visrecall.db` / `-wal` / `-shm`、`library.json`、`backups/`、`tmp/`。
+pub(crate) const ORPHAN_SCAN_DIRS: [&str; 2] = ["originals", "texts"];
+
+/// 存放素材内容的目录（全库清空时清空其下文件，但保留目录本身）。
+pub(crate) const CONTENT_DIRS: [&str; 3] = ["originals", "texts", "thumbs"];
+
+/// `name` 是否是内容目录之一。
+pub(crate) fn is_content_dir(name: &str) -> bool {
+    CONTENT_DIRS.contains(&name)
+}
 
 impl Library {
     /// 启动清理：清空 `tmp/` 下的普通文件，再统计孤儿文件。
@@ -36,9 +47,9 @@ impl Library {
 
         let referenced = self.referenced_original_paths()?;
         let mut orphans = 0;
-        for dir in SCAN_DIRS {
+        for dir in ORPHAN_SCAN_DIRS {
             let base = self.root().join(dir);
-            for path in collect_files(&base) {
+            for path in walk_files(&base) {
                 let Some(relative) = relative_slash_path(self.root(), &path) else {
                     continue;
                 };
@@ -76,7 +87,7 @@ impl Library {
 /// 删除 `tmp_dir` 下所有普通文件并返回删除计数；目录不存在返回 0。
 fn clear_tmp(tmp_dir: &Path) -> u64 {
     let mut removed = 0;
-    for path in collect_files(tmp_dir) {
+    for path in walk_files(tmp_dir) {
         match fs::remove_file(&path) {
             Ok(()) => removed += 1,
             Err(err) => {
@@ -88,7 +99,10 @@ fn clear_tmp(tmp_dir: &Path) -> u64 {
 }
 
 /// 递归收集 `base` 下的普通文件；目录不存在或不可读时返回空列表（只记录 warn）。
-fn collect_files(base: &Path) -> Vec<std::path::PathBuf> {
+///
+/// 与 `storage` 的用量统计、`purge` 的清空共用：跳过符号链接，既不跟随也不删除，
+/// 避免越出库根目录。
+pub(crate) fn walk_files(base: &Path) -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
     let mut stack = vec![base.to_path_buf()];
 
@@ -133,7 +147,7 @@ fn collect_files(base: &Path) -> Vec<std::path::PathBuf> {
 }
 
 /// `path` 相对 `root` 的路径，分隔符统一为 `/`；无法表示时返回 `None`。
-fn relative_slash_path(root: &Path, path: &Path) -> Option<String> {
+pub(crate) fn relative_slash_path(root: &Path, path: &Path) -> Option<String> {
     let relative = path.strip_prefix(root).ok()?;
     let mut parts = Vec::new();
     for component in relative.components() {
@@ -146,7 +160,7 @@ fn relative_slash_path(root: &Path, path: &Path) -> Option<String> {
 }
 
 /// 数据库里的相对路径统一成 `/` 分隔、去掉开头的 `./`。
-fn normalize_db_path(raw: &str) -> String {
+pub(crate) fn normalize_db_path(raw: &str) -> String {
     raw.replace('\\', "/").trim_start_matches("./").to_string()
 }
 
