@@ -12,7 +12,7 @@
 |---|---|---|---|
 | D2-01 | 实时模式 | **不实现**。抓帧重试仍失败 → `CAPTURE_FAILED`，列已知限制，阶段 04 复评 | 透明覆盖层无冻结帧会改变选区语义（画面在动），收益低于成本；用户已有「重试捕获」路径 |
 | D2-02 | 打包交付 | **只修 release 资源加载**（启用 `tauri/custom-protocol`），不产出安装包 | 安装包、签名、自动更新集中在阶段 04 一次性处理，避免两次返工；release 二进制必须可手工运行 |
-| D2-03 | 位置迁移 | **复制 + 校验 + 写 config + 要求重启**；失败不删源、不改 config；不做显式续传文件 | 热切换库句柄需要把 `AppCore.library` 改成可替换并处理在途任务，风险远高于收益；重启路径对用户是可理解的 |
+| D2-03 | 位置迁移 | **复制 + 校验 + 写 config + 要求重启**；重启前捕获保持禁用（闸门 `RestartPending` + 横幅 + `BUSY`）；失败不删源、不改 config；不做显式续传文件 | 热切换库句柄需要把 `AppCore.library` 改成可替换并处理在途任务，风险远高于收益；重启路径对用户是可理解的。禁用必须是显式状态而非「线程已停」，否则球消失、热键无反应会被当成故障 |
 | D2-04 | 保留策略 | **启动清理 + 手动立即清理**，含预估；不做 3 天预告 | 定时器 + 预告状态持久化约 2 人日，V0.1 测试规模（≤20 条）下用户手动清理已足够；偏差记录在 §1.2 |
 | D2-05 | 策略存储位置 | 容量与保留天数存 **库内 `settings` 表**（键 `storage.capacity_gb` / `storage.retention_days`） | 策略属于「这个库」而非「这台机器」；`config.json` 跟安装走，换库后会张冠李戴；`settings` 表 0001 已建但未用 |
 | D2-06 | 标签来源 | `item_tags.origin` 记「这条关联是自动还是手动加的」；`tags.source` 记标签首次创建来源 | 同一标签可能被自动贴到 A、被手动贴到 B，chip 的「自动」视觉必须按关联判定，否则语义错 |
@@ -101,10 +101,11 @@ crates/app-core/src/
   lib.rs                 # 修改：导出
 
 src-tauri/src/
-  ipc.rs                 # 修改：新增 20 个命令 + DTO
+  ipc.rs                 # 修改：新增 21 个命令 + DTO；get_app_status 扩展 restartRequired
   protocol.rs            # 修改：/original/<id> 分支
 
 src/
+  app/App.tsx            # 修改：库迁移待重启横幅（含「立即重启」）
   lib/api.ts             # 修改：stub → 真实命令
   lib/bindings.ts        # 重新生成（不手写）
   lib/events.ts          # 修改：按事件类型分派失效范围
@@ -239,7 +240,7 @@ pub struct OrphanStats {
 
 ## 5. IPC 契约
 
-### 5.1 命令（20 条新增，1 条扩展）
+### 5.1 命令（21 条新增，2 条扩展）
 
 | 命令 | 入参 | 返回 | 说明 |
 |---|---|---|---|
@@ -263,7 +264,9 @@ pub struct OrphanStats {
 | `storage_orphans_cleanup` | — | `OrphanStats` | 返回清理结果（removed 放 files） |
 | `storage_relocate` | `path` | `RelocateResult` | `{ restartRequired, newRoot }`；`INVALID_INPUT` / `BUSY` / `IO` |
 | `pick_directory` | — | `Option<String>` | 目录选择器；仅在 Rust 侧调用 dialog 插件，不给前端开放文件系统权限 |
+| `restart_app` | — | `never` | 立即重启进程；仅在 `restart_required = true` 时由横幅按钮调用 |
 | `update_settings` | 扩展 patch | `SettingsDto` | 新增 `ballEdgeHide` / `hideInFullscreen`，且三项改动即时生效 |
+| `get_app_status` | —（扩展返回） | `AppStatus` | 新增 `restartRequired`，供重启横幅读取 |
 
 `get_item_ext` 保留「扩展既有 `get_item` 读路径」的思路：内部复用 `Library::get_item`，再补 extras，不新建第二条读路径。
 
@@ -291,6 +294,14 @@ pub struct PurgePreview { pub item_count: u64, pub confirmation_word: String }
 pub struct RetentionPreview { pub item_count: u64, pub bytes: u64 }
 pub struct PruneReport { pub deleted: u64, pub failed: u64 }
 pub struct RelocateResult { pub restart_required: bool, pub new_root: String }
+
+// 扩展既有 DTO：running 的库仍是旧库，restartRequired 解释这个差异。
+pub struct AppStatus {
+    pub version: String,
+    pub library_path: String,     // 配置里的路径（迁移成功即新路径）
+    pub library_ok: bool,
+    pub restart_required: bool,   // true 期间捕获被 Busy 拒绝
+}
 ```
 
 `auto_` 用 `#[serde(rename = "auto")]` 输出，保持与 `api.ts` 现有 `TagChip` 类型一致。
@@ -467,10 +478,10 @@ retention_apply()
 
 ```text
 storage_relocate(path)
-  ├─ 守卫：RelocateGuard（原子标记，第二个并发调用 → BUSY）
+  ├─ 闸门：Idle → Relocating（CAS；第二个并发调用 → BUSY）
   ├─ 校验目标（§requirements P2-R09 四条）
   ├─ 源库大小 = usage.used_bytes（仅用于目标盘剩余空间预估）
-  ├─ stop_runtime()                       // 丢弃 shell_tx + 覆盖层句柄
+  ├─ stop_runtime()                       // 捕获暂停；球/热键线程随之停止
   ├─ Library::checkpoint()                // PRAGMA wal_checkpoint(TRUNCATE)
   ├─ copy_tree(src, dst, progress)
   │    逐文件：目标已存在且大小相同 → 跳过（天然续传）
@@ -480,9 +491,54 @@ storage_relocate(path)
   │    open read-only → PRAGMA integrity_check = ok
   │    COUNT(*) FROM items 与源一致
   │    library.json.library_id 一致
-  ├─ 成功：Config.library_path = dst; save_atomic → 返回 restartRequired=true
-  └─ 失败：不动 config；start_runtime() 恢复；返回错误；目标残留文件保留（供诊断/重试）
+  ├─ 成功：Config.library_path = dst; save_atomic
+  │        → 闸门置 RestartPending（不回到 Idle）
+  │        → start_runtime() + start_hotkey()   // 球/热键恢复，但捕获被闸门拒绝
+  │        → 发 storage_migration_progress { phase: "done" }
+  │        → 返回 restartRequired = true
+  └─ 失败：不动 config；闸门回 Idle；start_runtime() + start_hotkey()
+           → 返回错误；目标残留文件保留（供诊断/重试）
 ```
+
+### 6.9.1 迁移后的捕获闸门
+
+成功路径不能靠「线程已经停了」来被动禁用捕获：球消失、快捷键无反应，用户无法区分「迁移完成待重启」和「应用坏了」。因此引入显式闸门，让拒绝变成可解释的反馈：
+
+```rust
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CaptureGate { Idle, Relocating, RestartPending }
+```
+
+- 闸门存 `AppCore` 的 `AtomicU8`，`restart_required` 直接由 `gate == RestartPending` 派生，不另设布尔量，避免两个状态漂移。
+- 闸门检查必须放在**捕获循环的事件分发处**（`app.rs::spawn_capture_loop`），一次覆盖两条写入入口：
+
+```rust
+// 捕获循环持有 Arc<AtomicU8> 的闸门克隆；gate_message 是唯一文案来源
+if let Some(message) = gate_message(gate.load(Ordering::SeqCst)) {
+    sink.emit(AppEvent::CaptureFailed(CaptureFailedEvent { code: "BUSY".into(), message }));
+    continue;
+}
+```
+
+```rust
+fn gate_message(gate: u8) -> Option<&'static str> {
+    match CaptureGate::from_u8(gate) {
+        CaptureGate::Idle => None,
+        CaptureGate::Relocating => Some("库正在迁移，捕获已暂停"),
+        CaptureGate::RestartPending => Some("库已迁移，请重启后再捕获"),
+    }
+}
+```
+
+  只拦 `CaptureRequest` 会漏掉拖放：`ShellEvent::Drop` 走的是独立导入线程（`ImportFlow`），不经过 `CaptureCoordinator::preflight`，在 `RestartPending` 期间仍会把文件写进旧库。
+
+- `CaptureCoordinator::preflight` 里再放一份同样的检查作为纵深防御，防止将来新增入口绕过循环；两处共用 `gate_message`，不复制文案。
+
+- `capture_flow.rs` 的错误码映射必须补 `AppError::Busy(_) => "BUSY"`，否则会落到默认的 `INTERNAL`，前端提示就成了「内部错误」。
+- 成功路径恢复运行时与热键后，用户点球或按快捷键会走同一条 `capture_failed { code: "BUSY" }` 通道，托盘与主窗口都能看到原因；同时前端横幅常驻。
+- `library_root()` 在 `RestartPending` 时返回 `config.library_path`（新路径），否则「打开库目录」会打开旧目录，与界面展示的路径互相矛盾。
+- 闸门只在本进程内生效，不持久化：进程重启后 `AppCore` 重新构造，闸门为 `Idle`，此时打开的就是新库。
+- 「立即重启」直接调 `app.restart()`，不等待前端未落盘的备注草稿（最多 300ms 防抖窗口）。这与用户正常退出应用的行为一致，不额外做 flush——为一次迁移重启引入跨组件保存协调，成本高于收益。
 
 `stop_runtime()` 需要新增（`AppCore` 目前只有 `start_runtime`）：
 
@@ -494,13 +550,20 @@ pub fn stop_runtime(&self) {
 }
 ```
 
-三条都要停，原因各不相同：`CaptureRuntime` 的 `Drop` 让捕获循环退出；热键线程在 `spawn_hotkey_thread` 时就捕获了 `Sender`，通道一断，事件永远投不进新循环；球线程同理，且它的 `Sender` 是 clone，不停会留下一个「能点但投递失败」的球。恢复顺序必须是 `start_runtime()` → `start_hotkey()`（后者依赖前者建好的通道）。迁移失败路径**必须**恢复这三者：漏掉任何一条，用户看到的就是「球没了、热键失灵」，因此这条路径必须有集成测试。
+三条都要停，原因各不相同：`CaptureRuntime` 的 `Drop` 让捕获循环退出；热键线程在 `spawn_hotkey_thread` 时就捕获了 `Sender`，通道一断，事件永远投不进新循环；球线程同理，且它的 `Sender` 是 clone，不停会留下一个「能点但投递失败」的球。恢复顺序必须是 `start_runtime()` → `start_hotkey()`（后者依赖前者建好的通道）。
+
+**两条出口都要恢复**，但恢复后的捕获行为不同：
+
+- **失败**：闸门回 `Idle`，恢复后捕获正常可用（库没变）。
+- **成功**：闸门留在 `RestartPending`，恢复后球与热键都在、但每次捕获都被 `BUSY` 拒绝并给出「库已迁移，请重启」的提示。这样用户看到的是明确的待重启状态，而不是「球没了、按键没反应」的疑似崩溃。
+
+因此这条编排路径需要两条集成测试：失败后捕获恢复；成功后捕获被拒且不产生新素材。
 
 `start_runtime` 会重建球线程与覆盖层线程（`app.rs` 现有的 `*self.lock_ball() = Some(ball)` 逻辑），球窗口会重建一次，位置从配置恢复——这是可接受的可见闪动。
 
-> 迁移失败恢复路径必须调用 `start_runtime()` + `start_hotkey()`；这条路径要有集成测试（注入「校验失败」的假目标），否则用户迁移失败后会以为应用坏了。
+> 迁移的两条出口都必须调用 `start_runtime()` + `start_hotkey()`；漏掉任何一条，用户看到的就是「球没了、热键失灵」。失败路径的闸门回 `Idle`，成功路径的闸门留 `RestartPending`——这条差异必须有集成测试覆盖。
 
-迁移期间写操作：`RelocateGuard` 在 `AppCore` 里以 `AtomicBool` 暴露 `is_relocating()`，捕获入口检查后返回 `Busy`。缩略图 worker 可能仍在写 `thumbs/`，这部分文件不保证进入目标库——缩略图可重建（架构 §5.4），且目标库里这些素材的 `thumb_path` 指向缺失文件时界面显示占位，不报错。此边界写入 `verification.md`，不作为缺陷。
+迁移期间的写入边界：缩略图 worker 可能仍在写 `thumbs/`，这部分文件不保证进入目标库——缩略图可重建（架构 §5.4），且目标库里这些素材的 `thumb_path` 指向缺失文件时界面显示占位，不报错。此边界写入 `verification.md`，不作为缺陷。
 
 ### 6.10 悬浮球三态
 
@@ -571,7 +634,7 @@ fn spawn_capture_hotkey(&self, spec: HotkeySpec) -> Result<HotkeyHandle, AppErro
 
 1. **配置锁先于壳层锁**。`update_settings` 已在改内存后 `drop(guard)` 再碰球线程；热键重载沿用同一顺序（配置锁释放后再 `hotkey.take()`），否则与捕获循环的「球位置落盘」形成反向持锁。
 2. **库连接锁不跨文件 IO**。删除顺序是「事务提交 → 释放连接 → 删文件」，`item_delete` 的文件删除在 `conn` guard 释放后进行。
-3. **迁移期间只允许一个长任务**。`RelocateGuard` 同时被迁移与保留清理复用（`Busy`），避免「正在迁移时启动清理把源库删了一半」。
+3. **迁移期间只允许一个长任务**。闸门的 `Relocating` 状态同时挡住迁移与保留清理（第二个调用 `Busy`），避免「正在迁移时启动清理把源库删了一半」。
 4. **事件发送不持锁**。所有 `sink.emit` 在锁释放后调用；`TauriEventSink::emit` 会走 Tauri 的事件通道，持锁发送容易在窗口销毁时卡住。
 
 ## 8. 失败与降级矩阵
@@ -587,8 +650,10 @@ fn spawn_capture_hotkey(&self, spec: HotkeySpec) -> Result<HotkeyHandle, AppErro
 | 删除时文件删不掉 | 库已删、`warn` | 删除成功；孤儿统计里能看到 |
 | 容量已满 | 捕获前 `STORAGE_FULL` | 托盘提示 + 主窗口 Toast「库已满，请清理」 |
 | 迁移目标非空 | `INVALID_INPUT` | 行内错误，保留对话框 |
-| 迁移校验失败 | 不改 config、恢复运行时 | 错误 Toast + 「原库未受影响」说明 |
-| 迁移中捕获 | `BUSY` | 捕获按钮禁用 + 提示「正在迁移」 |
+| 迁移校验失败 | 不改 config、闸门回 `Idle`、恢复运行时 | 错误 Toast + 「原库未受影响」说明 |
+| 迁移成功后捕获 | `BUSY`，不写旧库 | 横幅常驻；球/热键触发时提示「库已迁移，请重启」 |
+| 重启前「打开库目录」 | 返回 config 的新路径 | 打开新目录，与界面展示一致 |
+| 迁移中捕获 | `BUSY`，提示「库正在迁移」 | 捕获按钮禁用 + 提示「正在迁移」 |
 | 保留清理单条失败 | 计数继续 | 汇总「成功 N / 失败 M」 |
 | 策略配置损坏 | 按默认值 + `warn` | 设置页显示默认值 |
 | 库打不开 | 既有 `library_ok=false` | 既有异常态；所有新命令返回 `CONFIG_MISSING` |
@@ -601,7 +666,7 @@ fn spawn_capture_hotkey(&self, spec: HotkeySpec) -> Result<HotkeyHandle, AppErro
 |---|---|---|
 | 纯函数单测 | 标签名规范化、色令牌散列、DIB 字节布局、UTF-16/CRLF、原文按字符截断、球状态机 | `#[test]` |
 | library 集成测试 | 迁移幂等、标签 CRUD 与级联、备注长度、删除事务、清空、用量求和、保留选条、孤儿扫描、迁移复制/校验 | `tempfile` + 真实 SQLite |
-| app-core 集成测试 | 详情聚合、复制编排（注入假剪贴板 trait）、容量门禁、迁移失败恢复运行时、热键重载顺序（同进程占用组合模拟冲突） | 既有的 `RecordingSink` 模式 |
+| app-core 集成测试 | 详情聚合、复制编排（注入假剪贴板 trait）、容量门禁、迁移两条出口的闸门差异、热键重载顺序（同进程占用组合模拟冲突） | 既有的 `RecordingSink` 模式 |
 | 协议测试 | `/original/<id>` 解析、越界拒绝、缺文件 404、方法限制 | 纯响应构造（沿用 `protocol.rs` 现有风格） |
 | 前端组件测试 | 详情标签增删、备注四态、存储 pane 写控件、侧栏标签云 | Vitest + Testing Library |
 | 手工验收 | 复制到 Word/微信、迁移到另一块盘、球三态、全屏隐藏、双屏/DPI 矩阵 | `verification.md` |
@@ -630,6 +695,7 @@ pub trait ClipboardWriter: Send + Sync {
 - 删除素材后 `jobs` 无残留（阶段 03 会跑这些任务，残留会导致「任务指向不存在的素材」）。
 - 迁移目标路径包含当前库前缀（`C:\lib` vs `C:\lib2`）：必须用路径组件比较，不能用字符串前缀。
 - 迁移中断（模拟 `copy_tree` 中途返回错误）后 `config.json` 未变、运行时恢复。
+- 迁移成功后闸门为 `RestartPending`：捕获返回 `Busy`、旧库条数不变；用新 config 重建 `AppCore`（模拟重启）后闸门回到 `Idle`。
 - 保留清理在 `days=null` 时不删任何东西（防止默认值把库清空）。
 
 ## 10. 风险与门禁

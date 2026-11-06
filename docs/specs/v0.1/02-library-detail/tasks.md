@@ -97,6 +97,8 @@ fn backup_before_migration(conn: &Connection, root: &Path) -> Option<PathBuf> {
 
 `db.rs` 的 `Library::open` 改为 `migrations::apply(&mut conn, &root)?`；`migrations.rs` 的两个既有测试传 `tempfile::tempdir()` 的路径。
 
+> 备份路径里的 checkpoint 是**最佳努力**：启动时还没有其他连接，且备份失败只 `warn`，所以这里不判定 `busy`。严格判定（`busy != 0` 即失败）只用于位置迁移，见 Task 6 的 `checkpoint()`。
+
 - [ ] **Step 3: `settings` 键值读写**
 
 ```rust
@@ -418,9 +420,25 @@ pub(crate) fn dir_size(files: &[PathBuf]) -> u64;
 
 `cleanup_orphans()` 只删 `files` 部分，逐条 `remove_file` 并汇总实际删除数。
 
+**范围白名单（硬约束）**：扫描根只有 `originals/` 与 `texts/` 两个目录，逐个文件与 `items.original_path` 比对。不得遍历库根目录，不得触碰 `visrecall.db`、`visrecall.db-wal`、`visrecall.db-shm`、`library.json`、`backups/`、`tmp/`——`tmp/` 的清理属于启动流程，`backups/` 是迁移回滚的凭据。
+
+实现上不由调用方传目录：把根集合写成常量，新增目录必须改这一处常量，避免以后被误扩展。
+
 - [ ] **Step 5: checkpoint**
 
-`conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")`，错误映射 `DATABASE`。
+```rust
+pub fn checkpoint(&self) -> Result<(), AppError> {
+    let conn = self.conn()?;
+    let busy: i64 = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
+        .map_err(db_error)?;
+    if busy != 0 {
+        return Err(AppError::Busy(format!("checkpoint incomplete ({busy} busy)")));
+    }
+    Ok(())
+}
+```
+
+必须用 `query_row` 读第一列，不能用 `execute_batch`：后者拿不到 `busy` 计数，部分 checkpoint 会被当成成功——那正是「复制出一个缺帧的库」的入口。
 
 - [ ] **Step 6: 测试**
 
@@ -429,6 +447,8 @@ pub(crate) fn dir_size(files: &[PathBuf]) -> u64;
 - `retention_days` 0 / 3651 被拒；`None` 成功。
 - 放一个未入库文件 → `orphans().files == 1`；清理后文件消失、返回 1。
 - 删除某缩略图 → `missing_thumbs == 1`。
+- **清理不越界**：`cleanup_orphans()` 之后 `visrecall.db`、`-wal`、`-shm`、`library.json` 仍然存在且 mtime 未变，`count_items()` 与清理前一致。
+- **checkpoint 判定**：无其他连接时 `checkpoint()` 返回 `Ok` 且 `-wal` 归零；另开一条连接持读事务时返回 `Err(Busy)`。
 
 **Verify:**
 
@@ -637,7 +657,7 @@ cargo clippy -p visrecall-shell --all-targets -- -D warnings
 
 **Interfaces:**
 - Consumes: Task 3–9 的库层/壳层能力
-- Produces: 事件层（8 个）+ IPC 骨架 + 详情/备注/标签/复制/删除/清空/用量/保留命令与全部 DTO；`storage_relocate`（T18）、`storage_orphans_*`（T19）、`pick_directory`（T14）由所属任务追加注册
+- Produces: 事件层（8 个）+ IPC 骨架 + 详情/备注/标签/复制/删除/清空/用量/保留命令与全部 DTO；`storage_relocate` / `restart_app` / `AppStatus.restart_required`（T18）、`storage_orphans_*`（T19）、`pick_directory`（T14）由所属任务追加
 
 - [ ] **Step 1: 事件**
 
@@ -714,7 +734,8 @@ git diff --stat src/lib/bindings.ts
 - Modify: `src/lib/api.ts`
 - Modify: `src/lib/events.ts`
 - Modify: `src/lib/queryClient.ts`
-- Modify: `src/lib/api.test.ts`、`src/lib/events.test.ts`
+- Modify: `src/app/App.tsx`（迁移待重启横幅）
+- Modify: `src/lib/api.test.ts`、`src/lib/events.test.ts`、`src/app/App.test.tsx`
 
 **Interfaces:**
 - Consumes: `commands.*`（Task 10 生成）
@@ -735,6 +756,7 @@ export const queryKeys = {
   items: ["items"] as const,
   detail: (id: string) => ["detail", id] as const,
   settings: ["settings"] as const,
+  status: ["status"] as const,
   tags: ["tags"] as const,
   usage: ["usage"] as const,
   orphans: ["orphans"] as const,
@@ -762,6 +784,18 @@ export function subscribeAppEvents(client: QueryClient = queryClient): () => voi
 
 `api.test.ts`：每条命令断言调用了对应 `commands.*` 且参数正确（mock `@tauri-apps/api/core` 的 `invoke`）。
 `events.test.ts`：用 `vi.mock` 触发各事件名，断言只失效预期键（例如 `item_note_updated` 不得重置 `items`）。
+
+- [ ] **Step 5: 迁移待重启横幅**
+
+`getStatus()` 的类型来自生成的 `AppStatus`（新增 `restartRequired: boolean`）。`App.tsx` 用 `useQuery({ queryKey: queryKeys.status, queryFn: api.getStatus })` 读取，`restartRequired === true` 时在三栏之上渲染常驻横幅：
+
+```text
+库已迁移到 <libraryPath>，重启后生效；重启前捕获已暂停。   [立即重启]
+```
+
+按钮调 `commands.restartApp()`（期间置 loading 并禁用重复点击）。横幅只在 `restartRequired` 为真时出现，与设置弹窗、详情面板的开关无关；`getStatus` 失败时不渲染横幅、不阻塞列表。
+
+测试：`getStatus` 返回 `restartRequired: true` → 横幅出现、文案含新路径；点击按钮调用 `restartApp` 且只调用一次；`false` → 不渲染。
 
 **Verify:**
 
@@ -880,7 +914,12 @@ pnpm test -- src/features/shell && pnpm typecheck
 容量输入框（数字，1–4096）失焦提交；保留策略分段控件选天数后先 `getRetentionPreview(days)`，弹确认「将移除 X 条 / 释放 Y」，确认后 `setRetention`；「立即清理」调 `applyRetention` 并展示 `deleted/failed`。
 「更换」需要目录选择：**用 Rust 侧 `tauri-plugin-dialog`（`DialogExt::file().pick_folder()`）暴露一条 `pick_directory() -> Option<String>` 命令**，而不是前端直调插件——这样不必新增前端依赖与 capability 权限，路径也保持「只在 Rust 侧流转」的既有约定（与 `open_library_folder` 一致）。选择后调 `relocateStorage(path)`，进度用 `listen("storage_migration_progress")` 驱动进度条，成功后展示「已迁移到 X，重启后生效」。
 危险区：折叠的「清空素材库」→ 输入确认词（来自 `getPurgePreview()`）→ `purgeLibrary(word)`。
-底部展示孤儿统计与「清理孤儿文件」按钮（二次确认）。
+底部展示孤儿统计与「清理孤儿文件」按钮（二次确认）。危险区说明与数据库提示：
+
+```text
+库目录下的 visrecall.db / visrecall.db-wal / visrecall.db-shm 属于同一个数据库，
+请勿单独删除或移动；原图与文本位于 originals/ 与 texts/，可直接用系统工具查看。
+```
 
 - [ ] **Step 3: 测试**
 
@@ -1080,9 +1119,11 @@ cargo test -p visrecall-app-core --test capture_flow
 **Files:**
 - Create: `crates/library/src/relocate.rs`
 - Create: `crates/library/tests/relocate_fs.rs`
-- Create: `crates/app-core/src/storage_flow.rs`（追加 `relocate`）
-- Modify: `crates/app-core/src/app.rs`（`stop_runtime`、`is_relocating`）
 - Create: `crates/app-core/tests/relocate_flow.rs`
+- Modify: `crates/app-core/src/app.rs`（`stop_runtime`、`CaptureGate`、`relocate_library`）
+- Modify: `crates/app-core/src/storage_flow.rs`（迁移编排）
+- Modify: `crates/app-core/src/capture_flow.rs`（闸门检查 + `BUSY` 错误码）
+- Modify: `src-tauri/src/ipc.rs`（`storage_relocate`、`restart_app`、`AppStatus.restartRequired`）
 
 **Interfaces:**
 - Consumes: `Library::root/checkpoint/usage`、`files::free_space_bytes`、`Config::save_atomic`
@@ -1092,6 +1133,7 @@ cargo test -p visrecall-app-core --test capture_flow
   - `relocate::verify(dst, expected_items, expected_library_id) -> Result<(), AppError>`
   - `AppCore::relocate_library(path) -> Result<RelocateResult, AppError>`
   - `AppCore::stop_runtime()`
+  - `AppCore::gate() -> CaptureGate`、`AppCore::set_gate(CaptureGate)`
 
 - [ ] **Step 1: 目标校验（组件级比较，不用字符串前缀）**
 
@@ -1127,6 +1169,16 @@ pub fn copy_library(src: &Path, dst: &Path, progress: &dyn Fn(&str, u64, u64)) -
 
 `visrecall.db-wal` / `-shm` 不复制（已 checkpoint）。
 
+**连接纪律（硬约束）**：`checkpoint(TRUNCATE)` 之前不得打开任何新的 `Connection`——校验、用量、行数对账都在复制完成后只对**目标库**打开；源库的行数与 `library_id` 用现有写连接读出并作为参数传入 `verify`（复用连接，不新开）。
+
+原因：TRUNCATE 需要所有读者处于同一快照。多一个持快照的连接，checkpoint 会退化为部分模式（`busy` 非 0），此时复制出的 `visrecall.db` 仍缺最近的帧——而 `integrity_check` 照样返回 `ok`，只有数据少了一截。
+
+```rust
+library.checkpoint()?;   // T6 内部判定 busy != 0 → Busy；此处失败即中止迁移，闸门回 Idle
+```
+
+这里不重复解析 PRAGMA 返回值：判定只有一处（`checkpoint()`），迁移编排只负责「失败就中止、不进复制」。
+
 - [ ] **Step 3: 校验**
 
 ```rust
@@ -1140,17 +1192,74 @@ pub fn verify(dst: &Path, expected_items: u64, expected_id: &str) -> Result<(), 
 }
 ```
 
-- [ ] **Step 4: 编排**
+- [ ] **Step 4: 编排与捕获闸门**
 
-按 `design.md` §6.9 的顺序实现；`RelocateGuard` 用 `AtomicBool::compare_exchange` 实现（第二个调用 `Busy`）。失败分支必须 `start_runtime()` + `start_hotkey()`。
+```rust
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CaptureGate { Idle, Relocating, RestartPending }   // AtomicU8 存储
+```
+
+顺序严格按 `design.md` §6.9：闸门 `Idle → Relocating`（`compare_exchange`，失败 `Busy`）→ 校验目标 → `stop_runtime()` → `checkpoint()` → 复制 → 校验 → 写 config。
+
+两条出口的差异是本任务的核心：
+
+```rust
+// 成功
+config.library_path = dst;
+config.save_atomic(&self.paths.config_file)?;
+self.set_gate(CaptureGate::RestartPending);   // 关键：不回 Idle
+self.start_runtime()?;                         // 球/热键恢复，但捕获被闸门拒绝
+self.start_hotkey()?;
+sink.emit(StorageMigrationProgress { phase: "done", .. });
+Ok(RelocateResult { restart_required: true, new_root: dst })
+
+// 失败
+self.set_gate(CaptureGate::Idle);
+self.start_runtime().ok();
+self.start_hotkey().ok();
+Err(err)                                       // config 未改，目标残留保留
+```
+
+`CaptureGate::RestartPending` 时 `library_root()` 返回 `config.library_path`（新路径），否则「打开库目录」会打开旧目录。
+
+`capture_flow.rs` / `app.rs` 两处补闸门，**主检查在捕获循环的事件分发处**（覆盖 `CaptureRequest` 与 `Drop` 两条写入口）：
+
+```rust
+// app.rs::spawn_capture_loop：分支最前面，CaptureRequest 与 Drop 都要挡
+fn gate_message(gate: u8) -> Option<&'static str> {
+    match CaptureGate::from_u8(gate) {
+        CaptureGate::Idle => None,
+        CaptureGate::Relocating => Some("库正在迁移，捕获已暂停"),
+        CaptureGate::RestartPending => Some("库已迁移，请重启后再捕获"),
+    }
+}
+
+// capture_flow.rs::preflight 里再查一次（纵深防御，防新入口绕过循环）
+match self.gate() {
+    CaptureGate::Idle => {}
+    other => return Err(AppError::Busy(gate_message(other as u8).unwrap_or("busy").into())),
+}
+// 错误码映射（原 match 在 capture_flow.rs 的 capture_failed 构造处）
+AppError::Busy(_) => "BUSY",
+```
+
+为什么不能只查 `preflight`：`ShellEvent::Drop` 由独立导入线程（`ImportFlow`）处理，不经过 `CaptureCoordinator::preflight`；只查一处会让「迁移成功后往悬浮球拖一张图」仍然写进旧库。
+
+`restart_app` 命令直接 `app.restart()`（Tauri 2 `AppHandle::restart`）；`get_app_status` 增加 `restart_required: self.gate() == RestartPending`。
 
 - [ ] **Step 5: 测试**
 
 - `validate_target`：非绝对路径 / 目标在源内 / 源在目标内 / 目标非空 / 空间不足 全部拒绝；`C:\lib` 与 `C:\lib2` 视为不同（组件比较）。
 - `copy_library` 两次执行：第二次全部跳过，文件数一致。
 - `verify` 失败：改一行 `items` 数量后注入期望值不匹配 → 报错。
-- 编排失败（目标目录在复制中途设为只读）→ `config.json` 内容未变、`is_relocating() == false`、运行时已恢复。
-- 编排成功 → config 路径变更、返回 `restart_required = true`、源目录文件仍在。
+- **checkpoint 被读者阻塞**：在 `checkpoint()` 之前另开一个 `Connection` 并开始一个读事务 → `PRAGMA wal_checkpoint(TRUNCATE)` 返回 `busy != 0` → 迁移返回 `Busy`、目标目录无文件、`config.json` 未变、闸门回 `Idle`。
+- **只复制主库是错的**：构造「有数据但未 checkpoint」的库，只复制 `visrecall.db` 到目标后 `verify` 必须失败（`no such table: items` 或行数不符），证明行数校验能拦住这类错误。
+- **失败出口**：目标目录在复制中途设为只读 → `config.json` 内容未变、`gate() == Idle`、`start_runtime` + `start_hotkey` 已恢复（用 `ball`/`hotkey` 句柄是否 `Some` 断言）。
+- **成功出口**：`config` 路径变更、返回 `restart_required = true`、`gate() == RestartPending`、源目录文件仍在、`get_app_status().restart_required == true`。
+- **成功后捕获被拒**：闸门为 `RestartPending` 时调 `CaptureCoordinator::preflight`（或直接调捕获入口）返回 `AppError::Busy`，且 `list_items` 条数不变；`capture_failed` 事件的 `code == "BUSY"`。
+- **成功后拖放被拒**：向捕获循环投递 `ShellEvent::Drop`，确认不产生素材、旧库条数不变、事件码为 `BUSY`（防止只查 `preflight` 的漏洞）。
+- **重启语义**：用同一 `config` 重新构造 `AppCore`（模拟重启）→ `gate() == Idle`、`restart_required == false`、库根目录为新路径。
+- `library_root()` 在 `RestartPending` 时等于新路径，`Idle` 时等于已打开库的根目录。
 
 **Verify:**
 
@@ -1187,6 +1296,7 @@ cargo test -p visrecall-app-core --test relocate_flow
 - 孤儿清理只删未引用文件，已引用文件保留。
 - 清理返回实际删除数（含「文件已被手动删除」时计为成功）。
 - 缩略图缺失计数正确。
+- **扫描范围白名单**：在库根放 `junk.bin`、在 `backups/` 放一个文件、保留 `tmp/` 里的残留文件，执行清理后三者都仍在——它们不在 `originals/`、`texts/` 之下，不属于孤儿清理的职责。
 
 **Verify:**
 
