@@ -1320,7 +1320,7 @@ cargo test -p visrecall-app-core
 - Consumes: `dist/` 构建产物
 - Produces: 不依赖 `devUrl` 的 release 二进制
 
-- [ ] **Step 1: 启用 custom-protocol**
+- [x] **Step 1: 启用 custom-protocol**
 
 ```toml
 # src-tauri/Cargo.toml
@@ -1331,18 +1331,18 @@ custom-protocol = ["tauri/custom-protocol"]
 
 `tauri.conf.json` 确认 `build.frontendDist = "../dist"`、`devUrl` 仅用于开发。
 
-- [ ] **Step 2: 构建**
+- [x] **Step 2: 构建**
 
 ```bash
 pnpm build
 cargo build --release -p visrecall
 ```
 
-- [ ] **Step 3: 验收**
+- [x] **Step 3: 验收**
 
 关闭 `pnpm dev`，直接运行 `target/release/visrecall.exe`：主窗口能打开、列表可读、缩略图显示、捕获可用、设置可开。记录启动耗时与内存快照（供 verification）。
 
-- [ ] **Step 4: 记录**
+- [x] **Step 4: 记录**
 
 在 `verification.md` §2 记录二进制路径、构建时间、验收结果；不产出安装包（D2-02）。
 

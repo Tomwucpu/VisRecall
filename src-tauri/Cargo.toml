@@ -32,3 +32,10 @@ windows = { version = "0.62.2", features = [
 tempfile = "3"
 # 仅测试用：断言 DTO 的 JSON 键名（例如标签 chip 的 `auto`）；复用工作区已锁版本。
 serde_json.workspace = true
+
+[features]
+# release 必须内嵌前端资源：`tauri` 的 `custom-protocol` 不在默认 features 里，
+# 缺了它 release 构建不会把 `dist/` 打进去，窗口会去连 devUrl 或直接空白。
+# 默认开启，`cargo build --release -p visrecall` 一条命令即可产出可运行的二进制。
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

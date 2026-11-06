@@ -15,7 +15,7 @@
 | 库路径与素材条数 | |
 | `cargo --version` / `rustc --version` | |
 | `node --version` / `pnpm --version` | |
-| release 二进制路径与构建时间 | |
+| release 二进制路径与构建时间 | `target/release/visrecall.exe`，20,015,616 B（19.1 MiB），构建于 2026-11-06 17:35（`cargo build --release -p visrecall`） |
 | commit | |
 
 ## 0.1 测试数据构成（固定 20 条）
@@ -121,7 +121,7 @@ PY
 | P2-R12 | **清理不越界**：清理孤儿前后 `visrecall.db` / `-wal` / `-shm` 存在性与 mtime 不变、素材条数不变 | | 记录清理前后的 `ls` 与 `COUNT(*)` |
 | P2-R12 | **提示文案**：设置存储 pane 有「数据库文件请勿单独删除或移动」的说明 | | 截图 |
 | P2-R13 | 全部自动化门禁 | | 命令与输出见 §3 |
-| P2-R13 | release 二进制脱离 dev server 运行 | | 启动截图 + 耗时 |
+| P2-R13 | release 二进制脱离 dev server 运行 | 通过 | 停掉 `pnpm dev` 后直接运行 `target/release/visrecall.exe`（默认 `custom-protocol` 已内嵌 `dist/`）。日志：`opening app core config=C:\Users\Tomwu\AppData\Roaming\VisRecall\config.json library=C:\Users\Tomwu\Documents\VisRecall` → `tray icon created library_ok=true` → `capture runtime started` → `global hotkey registered hotkey=Ctrl+Shift+S` → `cold start to tray: 180ms`；再起一个实例触发单实例回调 → `second instance detected; showing main window` → `main window created`，窗口标题 `目记 VisRecall`、`Responding=True`。内存：托盘驻留 WS 42.2 MB / 私有 33.5 MB（30 线程）；主窗口打开后 WS 51.9 MB / 私有 36.4 MB（50 线程）。WebView2 子进程由 13 → 19（退出后回到 13，无残留）。截图未采集：沙箱禁止 `Add-Type`（截屏 API 被安全策略拦截），视觉项由进程/日志 + `%LOCALAPPDATA%\com.visrecall.desktop\EBWebView` 83 MB 用户数据目录佐证 |
 | P2-R14 | 见 §1 | | |
 
 ## 3. 自动化门禁输出
