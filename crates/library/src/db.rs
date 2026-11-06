@@ -49,6 +49,8 @@ impl Library {
             Ok(cleanup) => tracing::info!(
                 tmp_removed = cleanup.tmp_removed,
                 orphans = cleanup.orphans,
+                // 用户报障「列表灰块/文件不见了」时，这一项能直接对账（P2-R06）。
+                missing_thumbs = cleanup.missing_thumbs,
                 "startup cleanup finished"
             ),
             Err(err) => tracing::warn!(%err, "startup cleanup failed"),

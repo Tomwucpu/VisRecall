@@ -19,6 +19,11 @@ pub struct StartupCleanup {
     pub tmp_removed: u64,
     /// `originals/`、`texts/` 中未被数据库引用（未删除）的文件数。
     pub orphans: u64,
+    /// `thumb_path` 指向的文件已不存在的素材数（可重建，只报告不修）。
+    ///
+    /// 与 `originals` 缺失不同，缩略图缺失不影响原图，因此只在启动日志里露出来：
+    /// 用户报障「列表灰块」时，这一项能直接对账。
+    pub missing_thumbs: u64,
 }
 
 /// 扫描孤儿文件的目录（相对库根目录）。
@@ -36,10 +41,11 @@ pub(crate) fn is_content_dir(name: &str) -> bool {
 }
 
 impl Library {
-    /// 启动清理：清空 `tmp/` 下的普通文件，再统计孤儿文件。
+    /// 启动清理：清空 `tmp/` 下的普通文件，再统计孤儿文件与缺失缩略图。
     ///
     /// - `tmp/` 不存在时跳过（删除计数为 0）；单个文件删除失败只记录 warn 并继续。
-    /// - 孤儿文件只计数 + 记录日志，不删除。
+    /// - 孤儿文件与缺失缩略图只计数 + 记录日志，不删除（前者阶段 02 提供专门入口，
+    ///   后者可由缩略图 worker 重建）。
     /// - 数据库不可读时返回错误（调用方 `Library::open` 只记录 warn，不影响打开库）。
     pub fn cleanup_startup(&self) -> Result<StartupCleanup, AppError> {
         let tmp_removed = clear_tmp(&self.root().join("tmp"));
@@ -59,9 +65,12 @@ impl Library {
             }
         }
 
+        let missing_thumbs = self.count_missing_thumbs()?;
+
         Ok(StartupCleanup {
             tmp_removed,
             orphans,
+            missing_thumbs,
         })
     }
 }

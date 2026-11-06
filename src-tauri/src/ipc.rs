@@ -598,8 +598,7 @@ pub async fn retention_apply(app: tauri::AppHandle) -> Result<PruneReportDto, Ap
 pub async fn storage_orphans_get(app: tauri::AppHandle) -> Result<OrphanStatsDto, ApiError> {
     run_blocking(app, move |core| {
         let library = core.library().map_err(ApiError::from)?;
-        library
-            .orphans()
+        visrecall_app_core::storage_flow::orphan_stats(library)
             .map(OrphanStatsDto::from)
             .map_err(|err| ApiError::from(&err))
     })
@@ -607,13 +606,14 @@ pub async fn storage_orphans_get(app: tauri::AppHandle) -> Result<OrphanStatsDto
 }
 
 /// 清理孤儿文件：只删 `originals/`、`texts/` 下未被引用的文件。
+///
+/// 不发事件（孤儿文件不属于任何素材），用量变化由前端在返回后重新拉取。
 #[tauri::command]
 #[specta::specta]
 pub async fn storage_orphans_cleanup(app: tauri::AppHandle) -> Result<OrphanStatsDto, ApiError> {
     run_blocking(app, move |core| {
         let library = core.library().map_err(ApiError::from)?;
-        library
-            .cleanup_orphans()
+        visrecall_app_core::storage_flow::cleanup_orphans(library)
             .map(OrphanStatsDto::from)
             .map_err(|err| ApiError::from(&err))
     })

@@ -8,7 +8,7 @@
 
 use std::sync::Mutex;
 
-use visrecall_domain::storage::PruneReport;
+use visrecall_domain::storage::{OrphanStats, PruneReport};
 use visrecall_domain::{now_millis, AppError};
 use visrecall_library::Library;
 
@@ -82,4 +82,27 @@ pub fn check_quota(library: &Library) -> Result<(), AppError> {
         return Err(AppError::StorageFull);
     }
     Ok(())
+}
+
+/// 孤儿统计：`originals/`、`texts/` 下未被引用的文件 + 缺失缩略图。
+///
+/// 统计口径只有一份（`Library::orphans`）；放在这里是为了让「预估」与「清理后的
+/// 对账日志」挨在一起，命令层只做 DTO 映射。
+pub fn orphan_stats(library: &Library) -> Result<OrphanStats, AppError> {
+    library.orphans()
+}
+
+/// 清理孤儿文件，返回实际删除数（含「文件已被手动删除」，计为成功）。
+///
+/// **不发事件**：孤儿文件不属于任何素材，列表不需要刷新；清理会改变用量，由前端
+/// 在命令返回后 `invalidateQueries(usage)` 拉取（P2-R10）。
+pub fn cleanup_orphans(library: &Library) -> Result<OrphanStats, AppError> {
+    let stats = library.cleanup_orphans()?;
+    tracing::info!(
+        removed = stats.files,
+        bytes = stats.bytes,
+        missing_thumbs = stats.missing_thumbs,
+        "orphan cleanup finished"
+    );
+    Ok(stats)
 }

@@ -188,6 +188,47 @@ fn missing_thumb_is_counted_not_deleted() {
 }
 
 #[test]
+fn cleanup_counts_only_files_present_at_scan_time() {
+    let (dir, lib) = library();
+    let first = write_file(dir.path(), "originals/images/2026/11/a.png", 32);
+    write_file(dir.path(), "originals/images/2026/11/b.png", 16);
+
+    // 用户在资源管理器里先删掉了一个：清理按**扫描结果**计数（这个文件已经不在
+    // 计划里），不会报「统计 2 个、清理 1 个」之外的差额。
+    // 「扫描后、删除前被删掉」的竞态由 `NotFound => 计为成功` 分支兜住，无法
+    // 在单线程测试里确定性复现。
+    fs::remove_file(&first).unwrap();
+
+    let cleaned = lib.cleanup_orphans().unwrap();
+    assert_eq!(cleaned.files, 1);
+    assert_eq!(cleaned.bytes, 16);
+    assert!(walk(&dir.path().join("originals")).is_empty());
+    // 再清一次：没有可删的，返回全 0（幂等）。
+    assert_eq!(lib.cleanup_orphans().unwrap().files, 0);
+}
+
+#[test]
+fn startup_cleanup_reports_missing_thumbs() {
+    let (dir, lib) = library();
+    let thumb = write_file(dir.path(), "thumbs/a.png", 8);
+    write_file(dir.path(), "originals/images/2026/11/a.png", 8);
+    let item = lib
+        .insert_item(new_item(1, "originals/images/2026/11/a.png"))
+        .unwrap();
+    lib.update_status(&item.id, ItemStatus::Ready, Some("thumbs/a.png"))
+        .unwrap();
+    write_file(dir.path(), "tmp/pending.tmp", 4);
+    fs::remove_file(&thumb).unwrap();
+
+    let cleanup = lib.cleanup_startup().unwrap();
+    // 启动清理的口径与孤儿统计一致：缺失缩略图只报告、不删除、不阻塞打开库。
+    assert_eq!(cleanup.missing_thumbs, 1);
+    assert_eq!(cleanup.tmp_removed, 1);
+    assert_eq!(cleanup.orphans, 0);
+    assert_eq!(lib.orphans().unwrap().missing_thumbs, 1);
+}
+
+#[test]
 fn cleanup_never_touches_database_or_library_meta() {
     let (dir, lib) = library();
     lib.insert_item(new_item(1, "originals/images/2026/11/a.png"))

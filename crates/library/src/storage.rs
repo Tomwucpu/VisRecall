@@ -179,7 +179,9 @@ impl Library {
     }
 
     /// `thumb_path` 指向不存在文件的素材数（可重建，不提供删除入口）。
-    fn count_missing_thumbs(&self) -> Result<u64, AppError> {
+    ///
+    /// 启动清理（`cleanup`）与孤儿统计（`orphans`）共用同一口径。
+    pub(crate) fn count_missing_thumbs(&self) -> Result<u64, AppError> {
         let conn = self.conn()?;
         let mut stmt = conn
             .prepare("SELECT thumb_path FROM items WHERE thumb_path IS NOT NULL")

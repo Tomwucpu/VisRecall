@@ -1283,15 +1283,15 @@ cargo test -p visrecall-app-core --test relocate_flow
 - Consumes: `Library::orphans/cleanup_orphans`
 - Produces: `storage_orphans_get` / `storage_orphans_cleanup` 完整行为
 
-- [ ] **Step 1: 计数与清理**
+- [x] **Step 1: 计数与清理**
 
 `orphans()` 已实现（Task 6）；这里补「清理后发 `items_reset`? 不需要」——孤儿文件不属于任何素材，清理后不需要刷新列表，但**用量会变**，因此发 `items_pruned { count: 0 }` 不合适；直接让前端在命令返回后 `invalidateQueries(usage)`。
 
-- [ ] **Step 2: 启动日志**
+- [x] **Step 2: 启动日志**
 
 `Library::open` 的启动清理日志增加 `missing_thumbs` 字段，便于用户报障时对账。
 
-- [ ] **Step 3: 测试**
+- [x] **Step 3: 测试**
 
 - 孤儿清理只删未引用文件，已引用文件保留。
 - 清理返回实际删除数（含「文件已被手动删除」时计为成功）。
