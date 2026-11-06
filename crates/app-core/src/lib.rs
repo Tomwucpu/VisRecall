@@ -7,6 +7,7 @@ pub mod capture_flow;
 pub mod detail;
 pub mod events;
 pub mod import_flow;
+pub mod storage_flow;
 pub mod thumbnail;
 
 pub use app::{AppCore, SettingsPatchInput};
@@ -20,6 +21,7 @@ pub use events::{
     ItemUpdatedEvent, NullEventSink, RecordingSink,
 };
 pub use import_flow::ImportFlow;
+pub use storage_flow::{check_quota, prune_expired};
 pub use thumbnail::{generate_thumbnail, load_thumb_bytes};
 pub use visrecall_domain::AppError;
 pub use visrecall_library::paths::AppPaths;

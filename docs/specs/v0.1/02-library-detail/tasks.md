@@ -1066,7 +1066,7 @@ cargo test -p visrecall-app-core
 - Consumes: `Library::usage` / `capacity_bytes` / `list_expired` / `delete_item`、`EventSink`
 - Produces: `UsageProbe` 注入点；`storage_flow::prune_expired(library, sink) -> PruneReport`；`storage_flow::check_quota(library) -> Result<(), AppError>`
 
-- [ ] **Step 1: 容量门禁**
+- [x] **Step 1: 容量门禁**
 
 在 `check_free_space` 之后加：
 
@@ -1080,7 +1080,7 @@ if let Some(used) = (self.usage_probe)(library) {
 
 `usage_probe` 默认实现 `|lib| lib.usage().ok().map(|u| u.used_bytes)`；测试注入固定值。注意：容量门禁在**抓帧前**执行，失败路径与现有 `StorageFull` 一致（托盘 tooltip + 事件）。
 
-- [ ] **Step 2: 保留清理**
+- [x] **Step 2: 保留清理**
 
 ```rust
 pub fn prune_expired(library: &Library, sink: &dyn EventSink) -> PruneReport {
@@ -1092,11 +1092,11 @@ pub fn prune_expired(library: &Library, sink: &dyn EventSink) -> PruneReport {
 }
 ```
 
-- [ ] **Step 3: 启动清理**
+- [x] **Step 3: 启动清理**
 
 `AppCore::start_runtime` 成功后，`spawn_blocking` 调 `prune_expired`；失败只 `warn`。用 `Mutex<()>` 与迁移闸门互斥（`Busy`）。
 
-- [ ] **Step 4: 测试**
+- [x] **Step 4: 测试**
 
 - `retention = None` 时 `prune_expired` 删除 0 条（关键防呆：默认值不得清库）。
 - 3 条过期 + 2 条未过期 → 删 3，事件 `items_pruned { count: 3 }` 只发一次。

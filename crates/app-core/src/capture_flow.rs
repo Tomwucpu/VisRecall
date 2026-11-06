@@ -43,6 +43,12 @@ use crate::thumbnail;
 /// 开始捕获所需的最低可用空间（design §12：<2GB 拒绝新捕获，保留浏览）。
 pub const MIN_FREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
+/// 库已用字节数的探测点。
+///
+/// 用闭包注入而不是直接调 `Library::usage()`：测试要在不造 50GB 数据的前提下覆盖
+/// 「已用 ≥ 容量」这条分支（design §6.7）。
+pub type UsageProbe = Arc<dyn Fn(&Library) -> Option<u64> + Send + Sync>;
+
 /// 自有窗口（主窗口等）在抓帧期间隐藏、结束后恢复。
 ///
 /// 生产实现是 `src-tauri` 的 `MainWindowVisibility`；测试用 [`NoopWindowVisibility`]。
@@ -159,6 +165,8 @@ pub struct CaptureCoordinator {
     visibility: Arc<dyn WindowVisibility>,
     sink: Arc<dyn EventSink>,
     free_space: FreeSpaceProbe,
+    /// 库已用字节数；容量软配额用它判定是否拒绝新捕获。
+    usage: UsageProbe,
     /// 显示器枚举；测试注入固定的显示器集合，生产实现是 [`enumerate_displays`]。
     displays: DisplayProbe,
     /// 是否有会话正在进行（`start` 占位 → 覆盖层结束 / `start` 失败时清除）。
@@ -199,6 +207,7 @@ impl CaptureCoordinator {
             visibility,
             sink,
             free_space: Arc::new(files::free_space_bytes),
+            usage: Arc::new(|library| library.usage().ok().map(|usage| usage.used_bytes)),
             displays: Arc::new(enumerate_displays),
             session_active: AtomicBool::new(false),
         }
@@ -208,6 +217,13 @@ impl CaptureCoordinator {
     #[doc(hidden)]
     pub fn with_free_space_probe(mut self, probe: FreeSpaceProbe) -> Self {
         self.free_space = probe;
+        self
+    }
+
+    /// 替换用量探测（测试专用）。
+    #[doc(hidden)]
+    pub fn with_usage_probe(mut self, probe: UsageProbe) -> Self {
+        self.usage = probe;
         self
     }
 
@@ -250,6 +266,19 @@ impl CaptureCoordinator {
                 warn!(free_bytes = free, "free space below capture threshold");
                 let err = AppError::StorageFull;
                 // 未隐藏窗口：只清标志，不调用 `show_own_windows`。
+                self.clear_session();
+                self.emit_failed(&err);
+                return Err(err);
+            }
+        }
+
+        // 容量软配额：与磁盘剩余空间是两道独立的门。容量是「这个库的上限」，
+        // 已用 ≥ 容量时拒绝新捕获，但**不自动删除任何素材**（P2-R07）。
+        if let Some(used) = (self.usage)(&self.library) {
+            let capacity = self.library.capacity_bytes();
+            if used >= capacity {
+                warn!(used, capacity, "library usage reached its capacity");
+                let err = AppError::StorageFull;
                 self.clear_session();
                 self.emit_failed(&err);
                 return Err(err);
@@ -952,6 +981,16 @@ mod tests {
     }
 
     fn fixture(grabber: Arc<FakeGrabber>, overlay: Arc<FakeOverlay>, free: u64) -> Fixture {
+        fixture_with_usage(grabber, overlay, free, 0)
+    }
+
+    /// 与 [`fixture`] 相同，但注入固定的「库已用字节数」。
+    fn fixture_with_usage(
+        grabber: Arc<FakeGrabber>,
+        overlay: Arc<FakeOverlay>,
+        free: u64,
+        used: u64,
+    ) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let library = Arc::new(Library::open(dir.path().to_path_buf()).unwrap());
         let visibility = Arc::new(FakeVisibility::default());
@@ -965,7 +1004,9 @@ mod tests {
             sink.clone(),
         )
         .with_free_space_probe(Arc::new(move |_path: &Path| Ok(free)))
-        .with_display_probe(Arc::new(|| Ok(fake_displays())));
+        .with_display_probe(Arc::new(|| Ok(fake_displays())))
+        // 默认用例注入 0 字节用量：容量门禁只在新用例里生效。
+        .with_usage_probe(Arc::new(move |_library: &Library| Some(used)));
         Fixture {
             _dir: dir,
             coordinator,
@@ -984,6 +1025,47 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// 容量软配额：注入「已用 ≥ 容量」时同样拒绝，且不进入抓帧（P2-R07）。
+    #[test]
+    fn usage_at_capacity_rejects_capture_before_hiding() {
+        // 默认容量 50 GiB；`>=` 即拒绝（等于容量也算满）。
+        const CAPACITY: u64 = 50 * 1024 * 1024 * 1024;
+
+        for used in [CAPACITY, CAPACITY + 1] {
+            let fixture = fixture_with_usage(
+                FakeGrabber::new(false, false),
+                FakeOverlay::new(false),
+                MIN_FREE_BYTES,
+                used,
+            );
+            let err = fixture
+                .coordinator
+                .start(CaptureTrigger::Hotkey)
+                .unwrap_err();
+            assert!(matches!(err, AppError::StorageFull), "used {used}");
+            assert_eq!(fixture.grabber.calls(), 0);
+            assert_eq!(fixture.visibility.hides(), 0);
+            assert_eq!(
+                event_codes(&fixture.sink),
+                vec![("STORAGE_FULL".to_string(), "storage full".to_string())]
+            );
+        }
+    }
+
+    /// 用量低于容量时照常进入抓帧，说明门禁没有把正常路径挡掉。
+    #[test]
+    fn usage_below_capacity_allows_capture() {
+        let fixture = fixture_with_usage(
+            FakeGrabber::new(false, false),
+            FakeOverlay::new(false),
+            MIN_FREE_BYTES,
+            1024,
+        );
+
+        fixture.coordinator.start(CaptureTrigger::Hotkey).unwrap();
+        assert_eq!(fixture.grabber.calls(), 1);
     }
 
     #[test]

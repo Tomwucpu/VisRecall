@@ -33,7 +33,6 @@ use crate::capture_flow::{
 use crate::detail::{load_detail, ItemDetail};
 use crate::events::{
     AppEvent, AppRecoveredEvent, CaptureFailedEvent, EventSink, HotkeyConflictEvent, ItemEvent,
-    ItemsPrunedEvent,
 };
 use crate::import_flow::ImportFlow;
 
@@ -262,6 +261,8 @@ impl AppCore {
             _overlay: overlay,
         });
         tracing::info!("capture runtime started");
+        // 保留策略在绑定启动之后跑一次：清理失败只记 warn，不阻止启动（P2-R08）。
+        self.spawn_startup_prune();
         Ok(())
     }
 
@@ -555,36 +556,39 @@ impl AppCore {
         let Ok(library) = self.library_required() else {
             return PruneReport::default();
         };
-        let Some(days) = library.retention().days else {
-            return PruneReport::default();
-        };
+        crate::storage_flow::prune_expired(library, self.sink.as_ref())
+    }
 
-        let cutoff = now_millis() - i64::from(days) * 86_400_000;
-        let expired = match library.list_expired(cutoff, 500) {
-            Ok(items) => items,
-            Err(err) => {
-                tracing::warn!(%err, "failed to list expired items");
-                return PruneReport::default();
-            }
+    /// 启动清理：绑定启动完成后在后台线程跑一次保留策略。
+    ///
+    /// 失败只记 `warn`，绝不阻止启动；`days == None` 时函数立刻返回，不会碰库。
+    fn spawn_startup_prune(&self) {
+        let Ok(library) = self.library_required() else {
+            return;
         };
-
-        let mut report = PruneReport::default();
-        for item in expired {
-            match library.delete_item(&item.id) {
-                Ok(_) => report.deleted += 1,
-                Err(err) => {
-                    report.failed += 1;
-                    tracing::warn!(id = %item.id, %err, "failed to prune expired item");
+        if library.retention().days.is_none() {
+            return;
+        }
+        let library = Arc::clone(match &self.library {
+            Ok(library) => library,
+            Err(_) => return,
+        });
+        let sink = Arc::clone(&self.sink);
+        let spawned = thread::Builder::new()
+            .name("visrecall-retention".into())
+            .spawn(move || {
+                let report = crate::storage_flow::prune_expired(&library, sink.as_ref());
+                if report.failed > 0 {
+                    tracing::warn!(
+                        deleted = report.deleted,
+                        failed = report.failed,
+                        "startup retention prune finished with failures"
+                    );
                 }
-            }
+            });
+        if let Err(err) = spawned {
+            tracing::warn!(error = %err, "failed to spawn startup retention prune");
         }
-
-        if report.deleted > 0 {
-            self.sink.emit(AppEvent::ItemsPruned(ItemsPrunedEvent {
-                count: report.deleted,
-            }));
-        }
-        report
     }
 
     /// 复制原始内容：图片写 `CF_DIB` + `PNG`，文本/链接写 `CF_UNICODETEXT`。
