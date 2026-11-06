@@ -196,6 +196,8 @@ impl AppCore {
             BallConfig {
                 size: config.ball.size,
                 positions: config.ball.positions.clone(),
+                edge_hide: config.ball.edge_hide,
+                hide_in_fullscreen: config.ball.hide_in_fullscreen,
             },
             shell_tx.clone(),
         );
@@ -1036,7 +1038,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (core, _sink) = open(dir.path());
 
-        let updated = core.update_settings(Some(false), Some(64), None, None, None).unwrap();
+        let updated = core
+            .update_settings(Some(false), Some(64), None, None, None)
+            .unwrap();
         assert!(!updated.ball.enabled);
         assert_eq!(updated.ball.size, 64);
 
@@ -1084,7 +1088,9 @@ mod tests {
         let before = core.config();
 
         for size in [0, 1, MIN_BALL_SIZE - 1, MAX_BALL_SIZE + 1, 4096] {
-            let err = core.update_settings(None, Some(size), None, None, None).unwrap_err();
+            let err = core
+                .update_settings(None, Some(size), None, None, None)
+                .unwrap_err();
             assert!(
                 matches!(err, AppError::InvalidInput(_)),
                 "size {size} should be rejected, got {err:?}"
@@ -1185,11 +1191,13 @@ mod tests {
         let (core, _sink) = open(dir.path());
         assert!(core.ball_enabled());
 
-        core.update_settings(Some(false), None, None, None, None).unwrap();
+        core.update_settings(Some(false), None, None, None, None)
+            .unwrap();
         assert!(!core.ball_enabled());
         assert!(!core.config().ball.enabled);
 
-        core.update_settings(Some(true), None, None, None, None).unwrap();
+        core.update_settings(Some(true), None, None, None, None)
+            .unwrap();
         assert!(core.ball_enabled());
     }
 

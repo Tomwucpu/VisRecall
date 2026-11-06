@@ -24,7 +24,7 @@ use std::ptr::{addr_of_mut, null_mut};
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{bounded, Sender};
 use tracing::{debug, error, info, trace, warn};
@@ -46,31 +46,40 @@ use windows::Win32::Graphics::GdiPlus::{
     GdipCreateBitmapFromScan0, GdipCreateFont, GdipCreateFontFamilyFromName, GdipCreatePen1,
     GdipCreateSolidFill, GdipCreateStringFormat, GdipDeleteBrush, GdipDeleteFont,
     GdipDeleteFontFamily, GdipDeleteGraphics, GdipDeletePen, GdipDeleteStringFormat,
-    GdipDisposeImage, GdipDrawEllipse, GdipDrawString, GdipFillEllipse,
-    GdipGetImageGraphicsContext, GdipGraphicsClear, GdipSetSmoothingMode, GdipSetStringFormatAlign,
-    GdipSetStringFormatLineAlign, GdiplusShutdown, GdiplusStartup, GdiplusStartupInput, GpBitmap,
-    GpBrush, GpFont, GpFontFamily, GpGraphics, GpImage, GpPen, GpSolidFill, GpStringFormat, RectF,
-    SmoothingModeAntiAlias, StringAlignmentCenter, UnitPixel,
+    GdipDisposeImage, GdipDrawEllipse, GdipDrawRectangle, GdipDrawString, GdipFillEllipse,
+    GdipFillRectangle, GdipGetImageGraphicsContext, GdipGraphicsClear, GdipSetSmoothingMode,
+    GdipSetStringFormatAlign, GdipSetStringFormatLineAlign, GdiplusShutdown, GdiplusStartup,
+    GdiplusStartupInput, GpBitmap, GpBrush, GpFont, GpFontFamily, GpGraphics, GpImage, GpPen,
+    GpSolidFill, GpStringFormat, RectF, SmoothingModeAntiAlias, StringAlignmentCenter, UnitPixel,
 };
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Ole::{OleInitialize, OleUninitialize};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, VK_LBUTTON,
+    GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+    VK_LBUTTON,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW,
-    GetWindowLongPtrW, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassW,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage,
+    GetWindowLongPtrW, KillTimer, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassW,
+    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage,
     UnregisterClassW, UpdateLayeredWindow, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, IDC_ARROW, MSG,
     SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE,
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ULW_ALPHA, WM_APP, WM_CAPTURECHANGED, WM_CLOSE,
-    WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WNDCLASSW, WS_EX_LAYERED,
+    WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::drop_target::{DropRegistration, DropVisual, WM_BALL_DROP_VISUAL};
+
+pub mod state;
+
 use crate::{CaptureTrigger, ShellEvent};
+pub use state::{
+    clamp_size, BallAction, BallEdge, BallEvent, BallSettings, BallStateMachine, BallVisual,
+    BALL_SIZE_OPTIONS, COLLAPSE_DELAY_MS, EDGE_SNAP_PX, EXPAND_DELAY_MS, FULLSCREEN_TICKS,
+    RETRACT_DELAY_MS, STRIP_HIT_PADDING, STRIP_THICKNESS,
+};
 
 /// 悬浮球窗口类名（`FindWindowW("VisRecallBall")` 可用于排查）。
 pub const BALL_CLASS_NAME: &str = "VisRecallBall";
@@ -94,6 +103,35 @@ const DEFAULT_MARGIN: i32 = 24;
 const DRAG_THRESHOLD: i32 = 4;
 /// 切换可见性的窗口消息（`SendMessageW` 同步处理，见模块文档）。
 const WM_BALL_SET_VISIBLE: u32 = WM_APP + 1;
+/// 尺寸热更新：`wparam` = 新边长。
+///
+/// 取值避开 `WM_APP + 1`（可见性）与 `WM_APP + 2`（OLE 拖放视觉，见 `drop_target`）。
+const WM_BALL_SET_SIZE: u32 = WM_APP + 10;
+/// 设置补丁：`wparam` 打包 size / edge_hide / hide_in_fullscreen。
+const WM_BALL_APPLY_SETTINGS: u32 = WM_APP + 11;
+
+/// `WM_MOUSELEAVE`：`windows` crate 未导出该常量，按 `winuser.h` 定义。
+const WM_MOUSELEAVE: u32 = 0x02A3;
+
+/// 状态机截止时间（收起/展开/回缩）的定时器。
+const TIMER_STATE: usize = 1;
+/// 全屏检测的 1s 采样定时器。
+const TIMER_FULLSCREEN: usize = 2;
+
+/// 打包 `BallSettings` 到 `wparam`：低 16 位尺寸，第 16/17 位两个开关。
+fn pack_settings(settings: BallSettings) -> usize {
+    (settings.size as usize & 0xFFFF)
+        | ((settings.edge_hide as usize) << 16)
+        | ((settings.hide_in_fullscreen as usize) << 17)
+}
+
+fn unpack_settings(packed: usize) -> BallSettings {
+    BallSettings {
+        size: (packed & 0xFFFF) as u32,
+        edge_hide: packed & (1 << 16) != 0,
+        hide_in_fullscreen: packed & (1 << 17) != 0,
+    }
+}
 /// GDI+ `PixelFormat32bppPARGB`：预乘 alpha 与 `UpdateLayeredWindow` 的输入一致。
 ///
 /// 值来自 `gdipluspixelformats.h`：
@@ -110,6 +148,10 @@ pub struct BallConfig {
     pub size: u32,
     /// 显示器 id → 归一化中心坐标，用于恢复上次位置。
     pub positions: HashMap<String, (f32, f32)>,
+    /// 贴边收起（P2-R10）。
+    pub edge_hide: bool,
+    /// 全屏时自动隐藏（P2-R10）。
+    pub hide_in_fullscreen: bool,
 }
 
 impl Default for BallConfig {
@@ -117,6 +159,8 @@ impl Default for BallConfig {
         Self {
             size: DEFAULT_BALL_SIZE,
             positions: HashMap::new(),
+            edge_hide: true,
+            hide_in_fullscreen: true,
         }
     }
 }
@@ -153,6 +197,38 @@ impl BallHandle {
                 Some(WPARAM(usize::from(visible))),
                 Some(LPARAM(0)),
             );
+        }
+    }
+
+    /// 热更新直径：保持中心点并夹回工作区（P2-R10）。
+    pub fn set_size(&self, size: u32) {
+        self.post(WM_BALL_SET_SIZE, size as usize);
+    }
+
+    /// 应用悬浮球设置（尺寸 + 贴边收起 + 全屏隐藏）；同值不会造成多余重绘。
+    pub fn apply_settings(&self, settings: BallSettings) {
+        self.post(WM_BALL_APPLY_SETTINGS, pack_settings(settings));
+    }
+
+    fn post(&self, message: u32, payload: usize) {
+        let raw = self.hwnd.load(Ordering::SeqCst);
+        if raw == 0 {
+            debug!(
+                message,
+                "floating ball window unavailable; settings change ignored"
+            );
+            return;
+        }
+        // SAFETY: `hwnd` 属于本进程的悬浮球线程；窗口已销毁时投递失败只记日志。
+        if let Err(err) = unsafe {
+            PostMessageW(
+                Some(HWND(raw as *mut c_void)),
+                message,
+                WPARAM(payload),
+                LPARAM(0),
+            )
+        } {
+            warn!(message, error = %err, "failed to post message to the floating ball");
         }
     }
 
@@ -452,6 +528,19 @@ fn run_ball_window(
 
     // 窗口状态放在 `RefCell` 后：`SetWindowPos`/`ShowWindow` 可能同步重入 wndproc，
     // 每次一律短借用，绝不把可变引用跨越窗口 API 调用（M-7）。
+    let machine = BallStateMachine::new(
+        BallSettings {
+            size,
+            edge_hide: config.edge_hide,
+            hide_in_fullscreen: config.hide_in_fullscreen,
+        },
+        PhysicalPoint {
+            x: position.x + size as i32 / 2,
+            y: position.y + size as i32 / 2,
+        },
+        work_area_for(&displays, position, size),
+        0,
+    );
     let drop_visual = Arc::new(Mutex::new(DropVisual::default()));
     let drop_events = events.clone();
     let state = Box::new(RefCell::new(BallWindowState {
@@ -464,6 +553,10 @@ fn run_ball_window(
         hwnd_slot: Arc::clone(&hwnd_slot),
         drop_visual: Arc::clone(&drop_visual),
         drop_target: None,
+        machine,
+        started: Instant::now(),
+        fullscreen: false,
+        tracking_leave: false,
     }));
     let state_ptr = Box::into_raw(state);
 
@@ -479,7 +572,12 @@ fn run_ball_window(
     // SAFETY: 状态由本线程独占，窗口销毁（消息循环退出）之前一直有效。
     unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize) };
 
-    if let Err(err) = render_ball(hwnd, size, position, None, true) {
+    if let Err(err) = render_ball(
+        hwnd,
+        PhysicalRect::new(position.x, position.y, size, size),
+        None,
+        true,
+    ) {
         // SAFETY: 窗口与状态都由本线程管理；销毁窗口后取回状态。
         unsafe {
             let _ = DestroyWindow(hwnd);
@@ -534,6 +632,129 @@ fn run_ball_window(
     Ok(())
 }
 
+/// 球所在显示器的工作区；枚举不到显示器时退回系统的工作区查询。
+fn work_area_for(displays: &[DisplayInfo], position: PhysicalPoint, size: u32) -> PhysicalRect {
+    let center = PhysicalPoint {
+        x: position.x + size as i32 / 2,
+        y: position.y + size as i32 / 2,
+    };
+    if let Some(display) = display_at_or_nearest(displays, center) {
+        return display.work_area;
+    }
+    let mut rect = RECT::default();
+    // SAFETY: 输出指针指向栈上 `RECT`。
+    if unsafe {
+        SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            Some(&mut rect as *mut RECT as *mut c_void),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    }
+    .is_ok()
+    {
+        return PhysicalRect::new(
+            rect.left,
+            rect.top,
+            (rect.right - rect.left).max(1) as u32,
+            (rect.bottom - rect.top).max(1) as u32,
+        );
+    }
+    PhysicalRect::new(0, 0, 1920, 1080)
+}
+
+/// 全屏/演示/独占全屏判定；查询失败按「非全屏」处理（design §6.10）。
+fn is_fullscreen() -> bool {
+    use windows::Win32::UI::Shell::{
+        SHQueryUserNotificationState, QUNS_BUSY, QUNS_PRESENTATION_MODE,
+        QUNS_RUNNING_D3D_FULL_SCREEN,
+    };
+
+    // SAFETY: 无参数查询，不持有任何指针。
+    match unsafe { SHQueryUserNotificationState() } {
+        Ok(state) => matches!(
+            state,
+            QUNS_BUSY | QUNS_PRESENTATION_MODE | QUNS_RUNNING_D3D_FULL_SCREEN
+        ),
+        Err(err) => {
+            trace!(error = %err, "SHQueryUserNotificationState failed; assuming not fullscreen");
+            false
+        }
+    }
+}
+
+/// 把状态机产出的动作落到窗口上。
+fn apply_actions(hwnd: HWND, actions: Vec<BallAction>) {
+    for action in actions {
+        match action {
+            BallAction::Show { rect } => {
+                if let Err(err) = render_ball(hwnd, rect, None, true) {
+                    warn!(error = %err, "failed to render the floating ball");
+                    continue;
+                }
+                move_resize(hwnd, rect);
+                // 长条/球都在「用户希望可见」时才显示；捕获会话期间由可见性开关兜住。
+                if with_state(hwnd, |state| state.visible.load(Ordering::SeqCst)).unwrap_or(false) {
+                    // SAFETY: `hwnd` 属于本线程；显示不激活窗口。
+                    unsafe {
+                        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                    }
+                }
+                let _ = with_state_mut(hwnd, |state| {
+                    state.position = PhysicalPoint {
+                        x: rect.x,
+                        y: rect.y,
+                    };
+                    state.size = rect.width;
+                });
+            }
+            BallAction::Hide => {
+                // SAFETY: `hwnd` 属于本线程。
+                unsafe {
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                }
+            }
+            // 尺寸变化已经体现在 `Show` 的矩形里，单靠 Resize 不重绘。
+            BallAction::Resize { .. } => {}
+            BallAction::ScheduleTimer { after_ms } => {
+                // SAFETY: 同一个 id 重复 SetTimer 会覆盖上一个超时，正是「只保留最近一次」的语义。
+                unsafe {
+                    SetTimer(
+                        Some(hwnd),
+                        TIMER_STATE,
+                        after_ms.min(u64::from(u32::MAX)) as u32,
+                        None,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// 移动并按需改变窗口尺寸（不激活、不改 Z 序）。
+fn move_resize(hwnd: HWND, rect: PhysicalRect) {
+    // SAFETY: `hwnd` 属于本线程。
+    if let Err(err) = unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            rect.x,
+            rect.y,
+            rect.width.max(1) as i32,
+            rect.height.max(1) as i32,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    } {
+        warn!(error = %err, "failed to resize the floating ball window");
+    }
+}
+
+/// 推进状态机一次并落地动作；`now_ms` 由线程起始时刻换算。
+fn advance(hwnd: HWND, event: BallEvent) {
+    let actions = with_state_mut(hwnd, |state| state.machine.handle(event)).unwrap_or_default();
+    apply_actions(hwnd, actions);
+}
+
 /// 窗口消息处理所需的状态；只在悬浮球线程访问，每次消息短借用（见 [`with_state`]）。
 struct BallWindowState {
     /// 配置的球体边长（拖入时按 1.15× 放大，离开后恢复）。
@@ -552,6 +773,14 @@ struct BallWindowState {
     drop_visual: Arc<Mutex<DropVisual>>,
     /// OLE 拖放注册；窗口销毁前释放（`RevokeDragDrop`）。
     drop_target: Option<DropRegistration>,
+    /// 贴边/收起/展开/全屏的纯状态机（见 `ball::state`）。
+    machine: BallStateMachine,
+    /// 线程起始时刻：状态机的时间轴统一用它换算毫秒。
+    started: Instant,
+    /// 最近一次全屏采样结果（`WM_TIMER` 的状态推进要用）。
+    fullscreen: bool,
+    /// 鼠标是否已向系统注册了 `WM_MOUSELEAVE`（避免每次移动都重复注册）。
+    tracking_leave: bool,
 }
 
 /// 拖动进度。
@@ -694,10 +923,6 @@ unsafe extern "system" fn ball_window_proc(
             press_ball(hwnd);
             LRESULT(0)
         }
-        WM_MOUSEMOVE => {
-            drag_ball(hwnd);
-            LRESULT(0)
-        }
         WM_LBUTTONUP => {
             release_ball(hwnd);
             LRESULT(0)
@@ -709,6 +934,29 @@ unsafe extern "system" fn ball_window_proc(
         }
         WM_BALL_SET_VISIBLE => {
             set_ball_visible(hwnd, wparam.0 != 0);
+            LRESULT(0)
+        }
+        WM_BALL_SET_SIZE => {
+            apply_settings_message(hwnd, wparam.0);
+            LRESULT(0)
+        }
+        WM_BALL_APPLY_SETTINGS => {
+            apply_settings_message(hwnd, wparam.0);
+            LRESULT(0)
+        }
+        WM_TIMER => {
+            on_timer(hwnd, wparam.0);
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            on_mouse_move(hwnd);
+            drag_ball(hwnd);
+            LRESULT(0)
+        }
+        WM_MOUSELEAVE => {
+            let _ = with_state_mut(hwnd, |state| state.tracking_leave = false);
+            let now = now_ms(hwnd);
+            advance(hwnd, BallEvent::CursorLeave { now_ms: now });
             LRESULT(0)
         }
         // OLE 回调只写共享视觉状态；实际放大/绘制由本线程在这里完成。
@@ -787,7 +1035,13 @@ fn drag_ball(hwnd: HWND) {
     match update {
         DragUpdate::Move(target) => {
             if move_window(hwnd, target, size) {
-                let _ = with_state_mut(hwnd, |state| state.position = target);
+                let _ = with_state_mut(hwnd, |state| {
+                    state.position = target;
+                    // 拖动过程中同步中心点：松手时状态机拿到的位置才是最后的落点。
+                    state
+                        .machine
+                        .handle(BallEvent::Dragged { position: target });
+                });
             }
         }
         DragUpdate::Cancelled => {
@@ -871,6 +1125,17 @@ fn release_ball(hwnd: HWND) {
         },
     );
     info!(display_id = %target.id, nx, ny, "floating ball moved");
+
+    // 贴边判定与收起定时器交给状态机：`work_area` 用球所在显示器的工作区。
+    let now = now_ms(hwnd);
+    advance(
+        hwnd,
+        BallEvent::Released {
+            position,
+            work_area: target.work_area,
+            now_ms: now,
+        },
+    );
 }
 
 /// 释放鼠标捕获（只影响本线程）；拖动已结束时调用。
@@ -897,7 +1162,127 @@ fn set_ball_visible(hwnd: HWND, visible: bool) {
         let _ = ShowWindow(hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
     }
     flag.store(visible, Ordering::SeqCst);
+    // 全屏采样只在球可见时运行：隐藏期间多一个 1s 定时器只会白烧空闲 CPU。
+    // SAFETY: 同一个 id 重复 `SetTimer` 覆盖旧超时；`KillTimer` 对不存在的定时器无副作用。
+    unsafe {
+        if visible {
+            SetTimer(Some(hwnd), TIMER_FULLSCREEN, 1_000, None);
+        } else {
+            let _ = KillTimer(Some(hwnd), TIMER_FULLSCREEN);
+        }
+    }
+    // 让状态机知道「这次隐藏是会话要的」：全屏恢复时不能把球叫回来。
+    let actions = with_state_mut(hwnd, |state| {
+        state.machine.handle(BallEvent::SessionHidden(!visible))
+    })
+    .unwrap_or_default();
+    if visible {
+        // 会话结束：按当前形态恢复（全屏仍生效时状态机会拒绝）。
+        apply_actions(hwnd, actions);
+    }
     debug!(visible, "floating ball visibility changed");
+}
+
+/// 线程内单调毫秒（状态机的唯一时间源）。
+fn now_ms(hwnd: HWND) -> u64 {
+    with_state(hwnd, |state| state.started.elapsed().as_millis() as u64).unwrap_or(0)
+}
+
+/// 应用尺寸/设置补丁：`WM_BALL_SET_SIZE` 与 `WM_BALL_APPLY_SETTINGS` 共用。
+fn apply_settings_message(hwnd: HWND, payload: usize) {
+    let settings = if payload & (0x3 << 16) == 0 && payload <= u32::MAX as usize {
+        // 只带尺寸的 `WM_BALL_SET_SIZE`：保留其余开关。
+        with_state(hwnd, |state| BallSettings {
+            size: payload as u32,
+            edge_hide: state.machine.settings().edge_hide,
+            hide_in_fullscreen: state.machine.settings().hide_in_fullscreen,
+        })
+        .unwrap_or_default()
+    } else {
+        unpack_settings(payload)
+    };
+
+    advance(hwnd, BallEvent::ConfigChanged { settings });
+    // 尺寸变化后工作区可能不同（跨屏拖动过），顺带刷新一次并重启全屏采样。
+    refresh_work_area(hwnd);
+}
+
+/// 重新计算球所在显示器的工作区，交给状态机。
+fn refresh_work_area(hwnd: HWND) {
+    let Some((position, size)) = with_state(hwnd, |state| (state.position, state.size)) else {
+        return;
+    };
+    let displays = match enumerate_displays() {
+        Ok(displays) => displays,
+        Err(err) => {
+            warn!(error = %err, "display enumeration failed; keeping the previous work area");
+            return;
+        }
+    };
+    let work_area = work_area_for(&displays, position, size);
+    let rect = with_state_mut(hwnd, |state| {
+        state.machine.set_work_area(work_area);
+        state.machine.current_rect()
+    });
+    if let Some(rect) = rect {
+        apply_actions(hwnd, vec![BallAction::Show { rect }]);
+    }
+}
+
+/// `WM_TIMER`：区分状态截止时间与 1s 全屏采样。
+fn on_timer(hwnd: HWND, timer_id: usize) {
+    let now = now_ms(hwnd);
+    match timer_id {
+        TIMER_STATE => {
+            // SAFETY: 与 `SetTimer` 成对；同一 id 的定时器只保留一个。
+            unsafe {
+                let _ = KillTimer(Some(hwnd), TIMER_STATE);
+            }
+            let fullscreen = with_state(hwnd, |state| state.fullscreen).unwrap_or(false);
+            advance(
+                hwnd,
+                BallEvent::Tick {
+                    now_ms: now,
+                    fullscreen,
+                },
+            );
+        }
+        TIMER_FULLSCREEN => {
+            let fullscreen = is_fullscreen();
+            let _ = with_state_mut(hwnd, |state| state.fullscreen = fullscreen);
+            advance(
+                hwnd,
+                BallEvent::Tick {
+                    now_ms: now,
+                    fullscreen,
+                },
+            );
+        }
+        _ => {}
+    }
+}
+
+/// `WM_MOUSEMOVE`：首次进入时注册 `WM_MOUSELEAVE` 并把 `CursorEnter` 交给状态机。
+fn on_mouse_move(hwnd: HWND) {
+    let tracking = with_state(hwnd, |state| state.tracking_leave).unwrap_or(true);
+    if tracking {
+        return;
+    }
+
+    let mut track = TRACKMOUSEEVENT {
+        cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+        dwFlags: TME_LEAVE,
+        hwndTrack: hwnd,
+        dwHoverTime: 0,
+    };
+    // SAFETY: `track` 在调用期间有效；注册失败只是收不到 `WM_MOUSELEAVE`。
+    unsafe {
+        let _ = TrackMouseEvent(&mut track);
+    }
+    let _ = with_state_mut(hwnd, |state| state.tracking_leave = true);
+
+    let now = now_ms(hwnd);
+    advance(hwnd, BallEvent::CursorEnter { now_ms: now });
 }
 
 /// 拖入时球体放大倍数（design §9.1）。
@@ -930,7 +1315,17 @@ fn refresh_drop_visual(hwnd: HWND) {
         None
     };
 
-    if let Err(err) = render_ball(hwnd, target_size, target_position, label, visual.accepted) {
+    if let Err(err) = render_ball(
+        hwnd,
+        PhysicalRect::new(
+            target_position.x,
+            target_position.y,
+            target_size,
+            target_size,
+        ),
+        label,
+        visual.accepted,
+    ) {
         warn!(error = %err, "failed to render the drop visual");
         return;
     }
@@ -1068,8 +1463,7 @@ fn create_ball_window(
 /// 时球体转灰，提示这次拖放不会被接受。
 fn render_ball(
     hwnd: HWND,
-    size: u32,
-    position: PhysicalPoint,
+    rect: PhysicalRect,
     label: Option<&str>,
     accepted: bool,
 ) -> Result<(), AppError> {
@@ -1081,7 +1475,7 @@ fn render_ball(
             WinError::from_thread()
         )));
     }
-    let result = render_with_screen(hwnd, size, position, screen, label, accepted);
+    let result = render_with_screen(hwnd, rect, screen, label, accepted);
     // SAFETY: 与 `GetDC` 成对调用。
     unsafe { ReleaseDC(None, screen) };
     result
@@ -1089,8 +1483,7 @@ fn render_ball(
 
 fn render_with_screen(
     hwnd: HWND,
-    size: u32,
-    position: PhysicalPoint,
+    rect: PhysicalRect,
     screen: HDC,
     label: Option<&str>,
     accepted: bool,
@@ -1104,17 +1497,18 @@ fn render_with_screen(
         )));
     }
 
-    let width = size as i32;
+    let width = rect.width.max(1) as i32;
+    let height = rect.height.max(1) as i32;
     let bitmap_info = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: size_of::<BITMAPINFOHEADER>() as u32,
             biWidth: width,
             // 负高度 = top-down DIB，与 GDI+ 的扫描行序一致。
-            biHeight: -width,
+            biHeight: -height,
             biPlanes: 1,
             biBitCount: 32,
             biCompression: BI_RGB.0,
-            biSizeImage: (width * width * 4) as u32,
+            biSizeImage: (width * height * 4) as u32,
             biXPelsPerMeter: 0,
             biYPelsPerMeter: 0,
             biClrUsed: 0,
@@ -1170,8 +1564,8 @@ fn render_with_screen(
         )));
     }
 
-    let rendered = draw_ball(bits, size, label, accepted)
-        .and_then(|()| present_layered(hwnd, screen, memory, size, position));
+    let rendered = draw_ball(bits, rect, label, accepted)
+        .and_then(|()| present_layered(hwnd, screen, memory, rect));
 
     // SAFETY: 释放顺序为「恢复原对象 → 删除位图 → 删除内存 DC」。
     unsafe {
@@ -1187,11 +1581,12 @@ fn render_with_screen(
 /// 有 `label` 时改为绘制动作文案（拖放反馈）；`accepted == false` 用灰色球体。
 fn draw_ball(
     bits: *mut c_void,
-    size: u32,
+    rect: PhysicalRect,
     label: Option<&str>,
     accepted: bool,
 ) -> Result<(), AppError> {
-    let width = size as i32;
+    let width = rect.width.max(1) as i32;
+    let height = rect.height.max(1) as i32;
     let stride = width * 4;
     let mut bitmap: *mut GpBitmap = null_mut();
     // SAFETY: `bits` 指向 `size × size × 4` 的 DIB 像素，调用期间有效；
@@ -1199,7 +1594,7 @@ fn draw_ball(
     let status = unsafe {
         GdipCreateBitmapFromScan0(
             width,
-            width,
+            height,
             stride,
             PIXEL_FORMAT_32BPP_PARGB,
             Some(bits as *const u8),
@@ -1213,7 +1608,7 @@ fn draw_ball(
         )));
     }
 
-    let painted = paint_ball(bitmap, size, label, accepted);
+    let painted = paint_ball(bitmap, width, height, label, accepted);
     // SAFETY: 位图由上面的调用创建，图形上下文已在 `paint_ball` 内释放。
     unsafe { GdipDisposeImage(bitmap.cast::<GpImage>()) };
     painted
@@ -1222,7 +1617,8 @@ fn draw_ball(
 /// 实际的绘制步骤；GDI+ 对象都在本函数内创建并释放。
 fn paint_ball(
     bitmap: *mut GpBitmap,
-    size: u32,
+    width: i32,
+    height: i32,
     label: Option<&str>,
     accepted: bool,
 ) -> Result<(), AppError> {
@@ -1236,7 +1632,12 @@ fn paint_ball(
         )));
     }
 
-    let edge = size as f32;
+    // 方形 = 球；薄边 = 长条。用宽高比判定形态，渲染层不必知道状态机。
+    let vertical_strip = width < height
+        && u32::try_from(width).unwrap_or(0) <= STRIP_THICKNESS + STRIP_HIT_PADDING * 2;
+    let horizontal_strip = height < width
+        && u32::try_from(height).unwrap_or(0) <= STRIP_THICKNESS + STRIP_HIT_PADDING * 2;
+    let edge = width.min(height) as f32;
     // 拖入反馈：拒绝时球体转灰；接受时保持品牌蓝（放大由窗口尺寸负责）。
     let (body, border) = if accepted {
         (argb(255, 59, 130, 246), argb(255, 37, 99, 235))
@@ -1249,6 +1650,21 @@ fn paint_ball(
         // 清成全透明，否则 UpdateLayeredWindow 会把未初始化像素算进 alpha。
         GdipGraphicsClear(graphics, argb(0, 0, 0, 0));
         GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias);
+
+        if vertical_strip || horizontal_strip {
+            // 长条：5px 厚 + 1px 描边，画在窗口留白之内（留白只用于命中）。
+            let pad = STRIP_HIT_PADDING as f32;
+            let thickness = STRIP_THICKNESS as f32;
+            let (x, y, w, h) = if vertical_strip {
+                (pad, pad, thickness, height as f32 - pad * 2.0)
+            } else {
+                (pad, pad, width as f32 - pad * 2.0, thickness)
+            };
+            fill_rect(graphics, body, x, y, w, h);
+            stroke_rect(graphics, border, 1.0, x, y, w, h);
+            GdipDeleteGraphics(graphics);
+            return Ok(());
+        }
 
         // 阴影：略微下移的半透明黑圆。
         fill_ellipse(
@@ -1384,6 +1800,40 @@ fn fill_ellipse(graphics: *mut GpGraphics, color: u32, x: f32, y: f32, width: f3
     }
 }
 
+/// 填充矩形（长条形态）；创建刷子失败时跳过该图元。
+fn fill_rect(graphics: *mut GpGraphics, color: u32, x: f32, y: f32, width: f32, height: f32) {
+    let mut brush: *mut GpSolidFill = null_mut();
+    // SAFETY: `graphics` 有效；刷子使用后立即删除。
+    unsafe {
+        if GdipCreateSolidFill(color, &mut brush).0 != 0 || brush.is_null() {
+            return;
+        }
+        GdipFillRectangle(graphics, brush.cast::<GpBrush>(), x, y, width, height);
+        GdipDeleteBrush(brush.cast::<GpBrush>());
+    }
+}
+
+/// 描边矩形（长条形态的 1px 边框）；创建画笔失败时跳过该图元。
+fn stroke_rect(
+    graphics: *mut GpGraphics,
+    color: u32,
+    stroke: f32,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+) {
+    let mut pen: *mut GpPen = null_mut();
+    // SAFETY: `graphics` 有效；画笔使用后立即删除。
+    unsafe {
+        if GdipCreatePen1(color, stroke, UnitPixel, &mut pen).0 != 0 || pen.is_null() {
+            return;
+        }
+        GdipDrawRectangle(graphics, pen, x, y, width, height);
+        GdipDeletePen(pen);
+    }
+}
+
 /// 描边椭圆；创建画笔失败时跳过该图元。
 fn stroke_ellipse(
     graphics: *mut GpGraphics,
@@ -1414,17 +1864,16 @@ fn present_layered(
     hwnd: HWND,
     screen: HDC,
     memory: HDC,
-    size: u32,
-    position: PhysicalPoint,
+    rect: PhysicalRect,
 ) -> Result<(), AppError> {
     let destination = POINT {
-        x: position.x,
-        y: position.y,
+        x: rect.x,
+        y: rect.y,
     };
     let source = POINT { x: 0, y: 0 };
     let extent = SIZE {
-        cx: size as i32,
-        cy: size as i32,
+        cx: rect.width.max(1) as i32,
+        cy: rect.height.max(1) as i32,
     };
     let blend = BLENDFUNCTION {
         BlendOp: AC_SRC_OVER as u8,

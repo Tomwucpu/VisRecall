@@ -821,7 +821,10 @@ pub async fn get_item(app: tauri::AppHandle, id: String) -> Result<ItemDto, ApiE
 #[specta::specta]
 pub async fn get_settings(app: tauri::AppHandle) -> Result<SettingsDto, ApiError> {
     run_blocking(app, move |core| {
-        Ok(SettingsDto::from_config(&core.config(), core.library().ok()))
+        Ok(SettingsDto::from_config(
+            &core.config(),
+            core.library().ok(),
+        ))
     })
     .await
 }

@@ -951,7 +951,7 @@ pnpm test -- src/features/settings && pnpm typecheck && pnpm lint
 - Consumes: 既有分层窗口绘制、位置记忆
 - Produces: `BallSettings { size, edge_hide, hide_in_fullscreen, positions }`、`BallStateMachine::{new, handle}`、`BallAction`、`BallHandle::set_size`、`BallHandle::apply_settings`
 
-- [ ] **Step 1: 纯状态机**
+- [x] **Step 1: 纯状态机**
 
 按 `design.md` §6.10 实现。`BallAction`：
 
@@ -967,18 +967,18 @@ pub enum BallAction {
 
 `handle` 只产出动作，不碰窗口；所有时间来自 `now_ms`，可在测试里跳时间。
 
-- [ ] **Step 2: 窗口接线**
+- [x] **Step 2: 窗口接线**
 
 `WM_BALL_SET_SIZE`：重建位图缓存 → `SetWindowPos` 保持中心点（`SWP_NOSENDCHANGING | SWP_NOACTIVATE`）→ 夹回工作区。
 `WM_TIMER`：按 id 分流（收起 / 展开 / 回缩 / 全屏检测）。全屏检测仅在 `BallVisual::Ball | Strip` 时运行；连击 3 次全屏才隐藏，退出立即恢复。
 `WM_MOUSELEAVE`：`TrackMouseEvent` 后投递 `CursorLeave`。
 长条形态命中区：窗口按「长条 5px + 两侧各 6px 透明留白」创建，绘制内缩到留白内，命中由窗口矩形自然覆盖；不使用 `SetWindowRgn`。
 
-- [ ] **Step 3: 配置**
+- [x] **Step 3: 配置**
 
 `config.rs` 的 `BallConfig` 增加 `edge_hide: bool`（默认 true）、`hide_in_fullscreen: bool`（默认 true）、`guide_shown: bool`（默认 false）；`DEFAULT_BALL_SIZE` 保持 48，新增 `BALL_SIZE_OPTIONS: [u32; 3] = [40, 48, 56]`，`update_settings` 只接受这三档（不再是 16..=256）。
 
-- [ ] **Step 4: 测试**
+- [x] **Step 4: 测试**
 
 - 距边缘 12px 松手 + 800ms → `Strip`；13px → 保持 `Ball`。
 - `Strip` 下进入热区 150ms → `Ball`；离开 600ms → `Strip`。

@@ -10,9 +10,10 @@ pub mod hotkey;
 pub mod overlay;
 pub mod selection;
 
+pub use ball::state::{BallEdge, BallSettings, BallStateMachine, BallVisual, BALL_SIZE_OPTIONS};
 pub use ball::{
     clamp_ball_position, spawn_ball_thread, BallConfig, BallHandle, BALL_CLASS_NAME,
-    DEFAULT_BALL_SIZE,
+    DEFAULT_BALL_SIZE, MAX_BALL_SIZE, MIN_BALL_SIZE,
 };
 pub use clipboard::{copy_image_png, copy_text, dib_bytes, utf16_crlf};
 pub use drop_target::DropContent;
