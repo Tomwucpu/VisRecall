@@ -4,6 +4,7 @@
 //! [`ShellEvent`]，悬浮球线程只负责窗口交互，真正的捕获编排由 app-core 完成。
 
 pub mod ball;
+pub mod clipboard;
 pub mod drop_target;
 pub mod hotkey;
 pub mod overlay;
@@ -13,6 +14,7 @@ pub use ball::{
     clamp_ball_position, spawn_ball_thread, BallConfig, BallHandle, BALL_CLASS_NAME,
     DEFAULT_BALL_SIZE,
 };
+pub use clipboard::{copy_image_png, copy_text, dib_bytes, utf16_crlf};
 pub use drop_target::DropContent;
 pub use hotkey::{spawn_hotkey_thread, HotkeyHandle, HotkeySpec};
 pub use overlay::{

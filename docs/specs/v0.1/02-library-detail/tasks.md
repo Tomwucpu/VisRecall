@@ -570,7 +570,7 @@ cargo test -p visrecall
   - `clipboard::copy_image_png(png: &[u8]) -> Result<(), AppError>`
   - `clipboard::copy_text(text: &str) -> Result<(), AppError>`
 
-- [ ] **Step 1: 纯函数**
+- [x] **Step 1: 纯函数**
 
 ```rust
 /// 40 字节 BITMAPINFOHEADER + 自底向上 BGRA 行；不含 BITMAPFILEHEADER。
@@ -601,7 +601,7 @@ pub fn utf16_crlf(text: &str) -> Vec<u16> {
 }
 ```
 
-- [ ] **Step 2: OS 写入**
+- [x] **Step 2: OS 写入**
 
 ```rust
 struct ClipboardGuard;
@@ -632,7 +632,7 @@ fn set_global(format: u32, bytes: &[u8]) -> Result<(), AppError> {
 
 `copy_text`：`utf16_crlf` → 字节切片 → `set_global(CF_UNICODETEXT, ...)`。
 
-- [ ] **Step 3: 测试**
+- [x] **Step 3: 测试**
 
 纯函数：DIB 前 40 字节字段正确（宽高、bitcount、size）；2×2 纯色图的第 41 字节起的第一个像素为左下角像素的 BGRA；`utf16_crlf("a\nb")` 长度为 6（`a \r \n b \0`）。OS 调用标 `#[ignore]`，手工验收执行。
 
