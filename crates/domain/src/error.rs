@@ -18,6 +18,14 @@ pub enum AppError {
     CaptureCancelled,
     #[error("drm protected")]
     DrmProtected,
+    #[error("file missing: {0}")]
+    FileMissing(String),
+    #[error("clipboard busy")]
+    ClipboardBusy,
+    #[error("clipboard failed: {0}")]
+    ClipboardFailed(String),
+    #[error("busy: {0}")]
+    Busy(String),
     #[error("io: {0}")]
     Io(String),
     #[error("database: {0}")]
@@ -37,6 +45,19 @@ mod tests {
         assert_eq!(
             AppError::CaptureFailed("no display".into()).to_string(),
             "capture failed: no display"
+        );
+        assert_eq!(
+            AppError::FileMissing("originals/a.png".into()).to_string(),
+            "file missing: originals/a.png"
+        );
+        assert_eq!(AppError::ClipboardBusy.to_string(), "clipboard busy");
+        assert_eq!(
+            AppError::ClipboardFailed("GlobalAlloc".into()).to_string(),
+            "clipboard failed: GlobalAlloc"
+        );
+        assert_eq!(
+            AppError::Busy("migrating".into()).to_string(),
+            "busy: migrating"
         );
     }
 }

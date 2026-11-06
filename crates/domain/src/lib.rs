@@ -8,6 +8,8 @@ pub mod error;
 pub mod geometry;
 pub mod ids;
 pub mod item;
+pub mod storage;
+pub mod tag;
 pub mod time;
 
 pub use capture::{CapturedImage, DisplayInfo, ForegroundInfo, RawFrame, WindowInfo};
@@ -16,6 +18,11 @@ pub use error::AppError;
 pub use geometry::{PhysicalPoint, PhysicalRect};
 pub use ids::new_item_id;
 pub use item::{Item, ItemKind, ItemStatus, NewItem};
+pub use storage::{
+    OrphanStats, PruneReport, RelocateReport, RetentionPolicy, RetentionPreview, StorageUsage,
+    DEFAULT_CAPACITY_GB, MAX_CAPACITY_GB, MAX_RETENTION_DAYS, MIN_CAPACITY_GB, MIN_RETENTION_DAYS,
+};
+pub use tag::{hue_for, normalize_tag_name, ItemTag, Tag, TagSource, MAX_TAG_CHARS, TAG_HUES};
 pub use time::now_millis;
 
 pub fn version() -> &'static str {

@@ -141,7 +141,7 @@ cargo clippy -p visrecall-library --all-targets -- -D warnings
 - Consumes: 无
 - Produces: `Tag` / `TagSource` / `ItemTag` / `normalize_tag_name` / `hue_for` / `StorageUsage` / `RetentionPolicy` / `OrphanStats` / `RelocateReport` / 4 个新错误变体
 
-- [ ] **Step 1: 标签类型与规范化**
+- [x] **Step 1: 标签类型与规范化**
 
 ```rust
 pub const TAG_HUES: [&str; 7] = ["ochre", "slate", "jade", "ash", "indigo", "plum", "paper"];
@@ -172,11 +172,11 @@ pub fn hue_for(name: &str) -> &'static str {
 }
 ```
 
-- [ ] **Step 2: 存储类型**
+- [x] **Step 2: 存储类型**
 
 按 `design.md` §4.4 写 `StorageUsage` / `RetentionPolicy` / `OrphanStats` / `RelocateReport`，全部 `Clone, Debug, PartialEq, Eq, Serialize, Deserialize`。
 
-- [ ] **Step 3: 错误码**
+- [x] **Step 3: 错误码**
 
 ```rust
 #[error("file missing: {0}")]       FileMissing(String),
@@ -187,7 +187,7 @@ pub fn hue_for(name: &str) -> &'static str {
 
 `error.rs` 的 `display_messages_are_stable` 补 4 条断言；`src-tauri/src/ipc.rs` 的映射与测试本任务先不改（Task 10 统一改）。
 
-- [ ] **Step 4: 测试**
+- [x] **Step 4: 测试**
 
 `normalize_tag_name`：`"  a   b  "` → `"a b"`；空串/全空白/33 个字符/含 `\u{7}` 全部拒绝；`hue_for` 对同一名称稳定、对 1000 个不同名称至少命中 5 个不同令牌。
 
