@@ -219,7 +219,7 @@ cargo clippy -p visrecall-domain --all-targets -- -D warnings
   - `Library::tag_rename(tag_id, name) -> Result<(), AppError>`
   - `Library::tag_delete(tag_id) -> Result<u64, AppError>`（返回解除的关联数）
 
-- [ ] **Step 1: 实现查询**
+- [x] **Step 1: 实现查询**
 
 ```sql
 -- tags_list
@@ -235,7 +235,7 @@ WHERE it.item_id = ?1 ORDER BY it.created_at ASC;
 
 `ItemTag.item_count` 在按素材查询时填 0；`hue` 由 `hue_for(&tag.name)` 填。
 
-- [ ] **Step 2: 实现写入（严格按 design §6.3 的事务边界）**
+- [x] **Step 2: 实现写入（严格按 design §6.3 的事务边界）**
 
 `tag_add` 必须先 `get_item` 校验素材存在（否则外键报错会变成 `DATABASE`，前端无法区分）；同名查找用 `WHERE name = ?1 COLLATE NOCASE`；插入关联用 `INSERT OR IGNORE`，已存在时仍返回现有 chip。
 
@@ -243,11 +243,11 @@ WHERE it.item_id = ?1 ORDER BY it.created_at ASC;
 
 `tag_rename` 与 `tag_delete` 对不存在的 id 返回 `NOT_FOUND`；改名撞唯一索引时把 `rusqlite::Error::SqliteFailure` 的 `ConstraintViolation` 映射为 `InvalidInput("tag name already exists")`。
 
-- [ ] **Step 3: 事件由调用方发（本任务不发）**
+- [x] **Step 3: 事件由调用方发（本任务不发）**
 
 库层只返回结果，`app-core` 负责 `item_tags_updated` / `tags_changed`（Task 10）。
 
-- [ ] **Step 4: 测试**
+- [x] **Step 4: 测试**
 
 - 添加同名标签到两条素材 → `tags` 只有 1 行，`item_tags` 有 2 行。
 - `"Work"` 与 `"work"` 复用同一条标签。
