@@ -12,6 +12,7 @@ pub mod migrations;
 pub mod paths;
 pub mod purge;
 pub mod settings_kv;
+pub mod storage;
 pub mod tags;
 
 pub use cleanup::StartupCleanup;

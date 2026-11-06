@@ -5,13 +5,12 @@
 //! `originals/` 与 `texts/` 中的孤儿文件只计数并记录日志，不自动删除
 //! （阶段 02 提供清理入口，P1-R10）。
 
-use std::collections::HashSet;
 use std::fs;
 use std::path::{Component, Path};
 
 use visrecall_domain::AppError;
 
-use crate::db::{db_error, Library};
+use crate::db::Library;
 
 /// 启动清理结果。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -64,23 +63,6 @@ impl Library {
             tmp_removed,
             orphans,
         })
-    }
-
-    /// `items.original_path` 的集合，统一成 `/` 分隔的相对路径。
-    fn referenced_original_paths(&self) -> Result<HashSet<String>, AppError> {
-        let conn = self.conn()?;
-        let mut stmt = conn
-            .prepare("SELECT original_path FROM items")
-            .map_err(db_error)?;
-        let rows = stmt
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(db_error)?;
-
-        let mut paths = HashSet::new();
-        for row in rows {
-            paths.insert(normalize_db_path(&row.map_err(db_error)?));
-        }
-        Ok(paths)
     }
 }
 

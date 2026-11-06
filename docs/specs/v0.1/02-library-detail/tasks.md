@@ -399,22 +399,22 @@ cargo test -p visrecall-library --test purge_db
   - `Library::cleanup_orphans() -> Result<OrphanStats, AppError>`
   - `Library::checkpoint() -> Result<(), AppError>`
 
-- [ ] **Step 1: 目录遍历（与 cleanup 共用）**
+- [x] **Step 1: 目录遍历（与 cleanup 共用）**
 
 ```rust
 pub(crate) fn walk_files(base: &Path) -> Vec<PathBuf>;      // 从 cleanup.rs 移出并改为 pub(crate)
 pub(crate) fn dir_size(files: &[PathBuf]) -> u64;
 ```
 
-- [ ] **Step 2: 用量**
+- [x] **Step 2: 用量**
 
 `used = originals + texts + thumbs + visrecall.db + visrecall.db-wal`；`item_count = count_items()`。`-wal` 不存在时按 0 计。
 
-- [ ] **Step 3: 策略读写与校验**
+- [x] **Step 3: 策略读写与校验**
 
 `capacity_gb` 1..=4096，`retention_days` `None | 1..=3650`；越界 `InvalidInput`，且**先校验再写库**。
 
-- [ ] **Step 4: 孤儿**
+- [x] **Step 4: 孤儿**
 
 `orphans()`：`originals`、`texts` 的文件集合减去 `items.original_path` 集合；`thumbs` 只统计「`thumb_path` 指向不存在文件」的数量，放进 `OrphanStats.missing_thumbs`。
 
@@ -424,7 +424,7 @@ pub(crate) fn dir_size(files: &[PathBuf]) -> u64;
 
 实现上不由调用方传目录：把根集合写成常量，新增目录必须改这一处常量，避免以后被误扩展。
 
-- [ ] **Step 5: checkpoint**
+- [x] **Step 5: checkpoint**
 
 ```rust
 pub fn checkpoint(&self) -> Result<(), AppError> {
@@ -440,7 +440,7 @@ pub fn checkpoint(&self) -> Result<(), AppError> {
 
 必须用 `query_row` 读第一列，不能用 `execute_batch`：后者拿不到 `busy` 计数，部分 checkpoint 会被当成成功——那正是「复制出一个缺帧的库」的入口。
 
-- [ ] **Step 6: 测试**
+- [x] **Step 6: 测试**
 
 - 写入 3 个文件 + 1 条素材，`usage().used_bytes` 与手工求和一致；`item_count = 1`。
 - 容量 0 / 4097 被拒；4096 成功。
