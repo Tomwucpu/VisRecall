@@ -4869,6 +4869,7 @@ dependencies = [
  "encoding_rs",
  "image",
  "reqwest",
+ "rusqlite",
  "rustls",
  "serde",
  "serde_json",

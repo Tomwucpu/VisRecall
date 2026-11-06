@@ -11,6 +11,7 @@ pub mod items;
 pub mod migrations;
 pub mod paths;
 pub mod purge;
+pub mod relocate;
 pub mod settings_kv;
 pub mod storage;
 pub mod tags;

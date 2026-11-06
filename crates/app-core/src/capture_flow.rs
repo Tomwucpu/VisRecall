@@ -20,7 +20,7 @@ use std::fs;
 use std::io::Write;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use image::codecs::png::PngEncoder;
@@ -167,6 +167,11 @@ pub struct CaptureCoordinator {
     free_space: FreeSpaceProbe,
     /// 库已用字节数；容量软配额用它判定是否拒绝新捕获。
     usage: UsageProbe,
+    /// 迁移/待重启闸门；`None` 表示没有闸门（测试与阶段 01 路径）。
+    ///
+    /// 这里是**纵深防御**：主检查在捕获循环的事件分发处（覆盖 `CaptureRequest` 与
+    /// `Drop` 两条写入口），但将来新增入口若绕过循环，这道检查仍会挡住。
+    gate: Option<Arc<AtomicU8>>,
     /// 显示器枚举；测试注入固定的显示器集合，生产实现是 [`enumerate_displays`]。
     displays: DisplayProbe,
     /// 是否有会话正在进行（`start` 占位 → 覆盖层结束 / `start` 失败时清除）。
@@ -208,6 +213,7 @@ impl CaptureCoordinator {
             sink,
             free_space: Arc::new(files::free_space_bytes),
             usage: Arc::new(|library| library.usage().ok().map(|usage| usage.used_bytes)),
+            gate: None,
             displays: Arc::new(enumerate_displays),
             session_active: AtomicBool::new(false),
         }
@@ -217,6 +223,12 @@ impl CaptureCoordinator {
     #[doc(hidden)]
     pub fn with_free_space_probe(mut self, probe: FreeSpaceProbe) -> Self {
         self.free_space = probe;
+        self
+    }
+
+    /// 接上迁移闸门（`AppCore::start_runtime` 里注入）。
+    pub fn with_gate(mut self, gate: Arc<AtomicU8>) -> Self {
+        self.gate = Some(gate);
         self
     }
 
@@ -260,6 +272,18 @@ impl CaptureCoordinator {
     /// [`Self::clear_session`]），否则后续捕获会被重入保护永久忽略。
     fn run_session(&self, trigger: CaptureTrigger) -> Result<(), AppError> {
         info!(?trigger, "capture starting");
+
+        // 迁移/待重启期间一律拒绝，且用 `BUSY` 而不是「内部错误」。
+        // 判定与文案来自 `app::gate_rejection`：主检查在捕获循环的分发处，这里是
+        // 纵深防御（新入口若绕过循环仍然被挡住）。
+        if let Some(gate) = &self.gate {
+            if let Some(err) = crate::app::gate_rejection(gate) {
+                warn!(error = %err, "capture rejected by the relocation gate");
+                self.clear_session();
+                self.emit_failed(&err);
+                return Err(err);
+            }
+        }
 
         if let Some(free) = self.check_free_space() {
             if free < MIN_FREE_BYTES {
@@ -495,7 +519,11 @@ impl CaptureCoordinator {
         self.emit_failed(err);
     }
 
-    fn emit_failed(&self, err: &AppError) {
+    /// 把错误按 `capture_failed` 上报（码由 [`capture_failed_code`] 决定）。
+    ///
+    /// 公开是因为捕获循环的前置检查（迁移闸门拒绝）也走这条路径：错误码与文案
+    /// 必须和会话内失败完全一致，否则前端要按两套码分支。
+    pub fn emit_failed(&self, err: &AppError) {
         self.sink.emit(AppEvent::CaptureFailed(CaptureFailedEvent {
             code: capture_failed_code(err).to_string(),
             message: err.to_string(),

@@ -620,20 +620,29 @@ pub async fn storage_orphans_cleanup(app: tauri::AppHandle) -> Result<OrphanStat
     .await
 }
 
-/// 库位置迁移。
+/// 库位置迁移：校验目标 → 停运行时 → checkpoint → 复制 → 校验 → 写 config。
 ///
-/// 迁移行为（目标校验、复制、校验、写 config、闸门）在 Task 18 落地；此处先保留命令
-/// 签名，让前端契约与 `bindings.ts` 一次定型，调用时明确返回 `BUSY` 而不是「命令不存在」。
+/// 成功后 `config.json` 已指向新目录，但**当前进程仍用旧库**，必须重启才生效
+/// （不实现热切换）；因此在返回 `restartRequired = true` 的同时闸门停在
+/// `RestartPending`，期间的捕获/拖放都会被 `BUSY` 拒绝。
+///
+/// 迁移是分钟级的重 IO，必须离开主线程：`run_blocking` 里做的 `spawn_blocking`。
 #[tauri::command]
 #[specta::specta]
 pub async fn storage_relocate(
-    _app: tauri::AppHandle,
-    _path: String,
+    app: tauri::AppHandle,
+    path: String,
 ) -> Result<RelocateResultDto, ApiError> {
-    Err(ApiError::new(
-        "BUSY",
-        "storage relocation is not available yet",
-    ))
+    run_blocking(app, move |core| {
+        let target = std::path::PathBuf::from(&path);
+        core.relocate_library(target)
+            .map(|result| RelocateResultDto {
+                restart_required: result.restart_required,
+                new_root: result.new_root,
+            })
+            .map_err(|err| ApiError::from(&err))
+    })
+    .await
 }
 
 /// 目录选择器：由 Rust 侧调用 dialog 插件，前端只拿到路径字符串。

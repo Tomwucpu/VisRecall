@@ -10,7 +10,10 @@ pub mod import_flow;
 pub mod storage_flow;
 pub mod thumbnail;
 
-pub use app::{AppCore, SettingsPatchInput};
+pub use app::{
+    gate_message, gate_rejection, handle_shell_event, AppCore, CaptureGate, RelocateResult,
+    SettingsPatchInput,
+};
 pub use capture_flow::{
     persist_capture, CaptureCoordinator, NoopWindowVisibility, OverlayPresenter, WindowVisibility,
     MIN_FREE_BYTES,

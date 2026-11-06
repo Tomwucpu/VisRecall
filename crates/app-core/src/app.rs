@@ -6,7 +6,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 
@@ -35,6 +35,57 @@ use crate::events::{
     AppEvent, AppRecoveredEvent, CaptureFailedEvent, EventSink, HotkeyConflictEvent, ItemEvent,
 };
 use crate::import_flow::ImportFlow;
+
+/// 长任务闸门：迁移与「迁移完成待重启」期间拒绝捕获。
+///
+/// 用 `AtomicU8` 存：`restart_required` 直接由它派生，不另设布尔量，避免两个状态漂移。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptureGate {
+    Idle = 0,
+    Relocating = 1,
+    RestartPending = 2,
+}
+
+impl CaptureGate {
+    pub fn from_u8(value: u8) -> CaptureGate {
+        match value {
+            1 => CaptureGate::Relocating,
+            2 => CaptureGate::RestartPending,
+            _ => CaptureGate::Idle,
+        }
+    }
+
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+}
+
+/// 闸门拒绝捕获时的唯一文案来源（捕获循环与 `preflight` 共用，不复制文案）。
+pub fn gate_message(gate: CaptureGate) -> Option<&'static str> {
+    match gate {
+        CaptureGate::Idle => None,
+        CaptureGate::Relocating => Some("库正在迁移，捕获已暂停"),
+        CaptureGate::RestartPending => Some("库已迁移，请重启后再捕获"),
+    }
+}
+
+/// 闸门判定：`None` 表示放行，`Some` 是可直接上报的 `Busy`。
+///
+/// 捕获循环（主检查）、`CaptureCoordinator`（纵深防御）与集成测试共用这一处，
+/// 保证「什么状态下拒绝、拒绝时说什么」只有一份定义。
+pub fn gate_rejection(gate: &AtomicU8) -> Option<AppError> {
+    gate_message(CaptureGate::from_u8(gate.load(Ordering::SeqCst)))
+        .map(|message| AppError::Busy(message.to_string()))
+}
+
+/// 迁移结果：`restart_required` 恒为 `true`（不实现热切换）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelocateResult {
+    pub restart_required: bool,
+    pub new_root: String,
+    pub files_copied: u64,
+    pub bytes_copied: u64,
+}
 
 /// 设置补丁：`None` 表示「不改这个字段」。
 ///
@@ -71,6 +122,8 @@ pub struct AppCore {
     ///
     /// 放 `Arc` 后共享：[`AppVisibility`] 在会话结束恢复球之前要检查它（M-3）。
     ball_enabled: Arc<AtomicBool>,
+    /// 长任务闸门（迁移 / 待重启）；捕获循环与 `preflight` 都读它。
+    gate: Arc<AtomicU8>,
 }
 
 /// 捕获运行时的线程句柄与通道。
@@ -143,6 +196,7 @@ impl AppCore {
             main_visibility: visibility,
             ball: Arc::new(Mutex::new(None)),
             ball_enabled: Arc::new(AtomicBool::new(ball_enabled)),
+            gate: Arc::new(AtomicU8::new(CaptureGate::Idle.as_u8())),
         }
     }
 
@@ -162,10 +216,44 @@ impl AppCore {
     /// 库目录：优先取已打开的库根目录，库不可用时退回配置里的路径
     /// （便于用户手工检查损坏的库）。
     pub fn library_root(&self) -> PathBuf {
+        // 迁移成功但还没重启时，界面展示的是新路径；「打开库目录」必须与之一致，
+        // 否则用户会打开一个已经不再使用的旧目录（P2-R09）。
+        if self.gate() == CaptureGate::RestartPending {
+            return self.config().library_path;
+        }
         match &self.library {
             Ok(library) => library.root().to_path_buf(),
             Err(_) => self.config().library_path,
         }
+    }
+
+    /// 当前长任务闸门。
+    pub fn gate(&self) -> CaptureGate {
+        CaptureGate::from_u8(self.gate.load(Ordering::SeqCst))
+    }
+
+    /// 设置闸门；`RestartPending` 只能由迁移成功路径写入。
+    pub fn set_gate(&self, gate: CaptureGate) {
+        self.gate.store(gate.as_u8(), Ordering::SeqCst);
+    }
+
+    /// 闸门句柄：捕获循环与 `preflight` 共享同一个 `AtomicU8`。
+    pub fn gate_handle(&self) -> Arc<AtomicU8> {
+        Arc::clone(&self.gate)
+    }
+
+    /// 停止捕获运行时：运行时线程 → 热键线程 → 悬浮球线程。
+    ///
+    /// 三条都要停，原因各不相同（design §6.9.1）：
+    /// - `CaptureRuntime::Drop` 断开 `shell_tx`，捕获循环退出；
+    /// - 热键线程在 spawn 时就捕获了旧的 `Sender`，通道一断，事件永远投不进新循环；
+    /// - 球线程同理，且它的 `Sender` 是 clone，不停会留下一个「能点但投递失败」的球。
+    ///
+    /// 恢复顺序必须是 `start_runtime()` → `start_hotkey()`（后者依赖前者建好的通道）。
+    pub fn stop_runtime(&self) {
+        self.lock_runtime().take();
+        self.lock_hotkey().take();
+        self.lock_ball().take();
     }
 
     /// 当前配置快照；命令层只读取，不直接改写。
@@ -238,7 +326,9 @@ impl AppCore {
             overlay.clone(),
             visibility,
             Arc::clone(&self.sink),
-        );
+        )
+        // 纵深防御：主检查在捕获循环的事件分发处，这里再挡一次（防新入口绕过循环）。
+        .with_gate(self.gate_handle());
         // 拖放导入：`Drop` 事件到达捕获循环后派发到独立工作线程（`spawn_import`），
         // 导入的落盘/转码/联网不会占住捕获事件循环。来源应用用独立探针实例。
         let import = Arc::new(ImportFlow::new(
@@ -250,6 +340,7 @@ impl AppCore {
         spawn_capture_loop(
             coordinator,
             import,
+            self.gate_handle(),
             shell_rx,
             overlay_rx,
             Arc::clone(&self.config),
@@ -620,12 +711,109 @@ impl AppCore {
         }
     }
 
-    /// 是否需要重启才能用新库。
-    ///
-    /// 阶段 02 Task 18 把它接到迁移闸门（`CaptureGate::RestartPending`）；在此之前恒为
-    /// `false`——没有迁移入口，也就不存在待重启状态。
+    /// 是否需要重启才能用新库：直接由闸门派生，不另设布尔量。
     pub fn restart_required(&self) -> bool {
-        false
+        self.gate() == CaptureGate::RestartPending
+    }
+
+    /// 迁移库位置（design §6.9 的顺序即正确性）。
+    ///
+    /// 成功：写 `config.json` → 闸门置 `RestartPending` → 恢复运行时与热键 → 返回
+    /// `restart_required = true`；失败：**不动 config、不删源目录**，闸门回 `Idle`，
+    /// 恢复运行时与热键后返回结构化错误。
+    pub fn relocate_library(&self, target: PathBuf) -> Result<RelocateResult, AppError> {
+        // 1. 闸门：Idle → Relocating（CAS；并发调用返回 Busy）
+        if self
+            .gate
+            .compare_exchange(
+                CaptureGate::Idle.as_u8(),
+                CaptureGate::Relocating.as_u8(),
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_err()
+        {
+            return Err(AppError::Busy("another long task is running".into()));
+        }
+
+        let result = self.relocate_inner(&target);
+
+        match &result {
+            Ok(_) => {
+                // 成功：闸门留在 RestartPending，恢复球与热键（捕获仍被闸门拒绝）。
+                self.set_gate(CaptureGate::RestartPending);
+                if let Err(err) = self.start_runtime() {
+                    tracing::warn!(error = %err, "capture runtime not restored after relocation");
+                }
+                if let Err(err) = self.start_hotkey() {
+                    tracing::warn!(error = %err, "hotkey not restored after relocation");
+                }
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "library relocation failed; keeping the current library");
+                self.set_gate(CaptureGate::Idle);
+                if let Err(err) = self.start_runtime() {
+                    tracing::warn!(error = %err, "capture runtime not restored after failed relocation");
+                }
+                if let Err(err) = self.start_hotkey() {
+                    tracing::warn!(error = %err, "hotkey not restored after failed relocation");
+                }
+            }
+        }
+
+        result
+    }
+
+    fn relocate_inner(&self, target: &Path) -> Result<RelocateResult, AppError> {
+        let library = self.library_required()?;
+        let source_root = library.root().to_path_buf();
+        let usage = library.usage()?;
+
+        // 2. 目标校验（包含「不在源内/源不在目标内」「非空目录」「空间 ≥ 1.1×」）
+        visrecall_library::relocate::validate_target(&source_root, target, usage.used_bytes)?;
+
+        // 3. 停止运行时：先停写入，再 checkpoint。
+        self.stop_runtime();
+
+        // 4. checkpoint：`busy != 0` 即失败，绝不进入复制（会复制出一个缺帧的库）。
+        library.checkpoint()?;
+
+        // 5. 复制（逐文件进度）
+        let progress = |phase: &str, done: u64, total: u64| {
+            self.sink.emit(AppEvent::StorageMigrationProgress(
+                crate::events::MigrationProgressEvent::new(phase, done, total),
+            ));
+        };
+        let report = visrecall_library::relocate::copy_library(&source_root, target, &progress)?;
+
+        // 6. 校验：源库的行数与 library_id 用现有连接读出（不新开连接），
+        //    校验连接只对目标库打开。
+        self.sink.emit(AppEvent::StorageMigrationProgress(
+            crate::events::MigrationProgressEvent::new("verify", 0, 0),
+        ));
+        let items = library.count_items()?;
+        let library_id = read_library_id(&source_root)?;
+        visrecall_library::relocate::verify(target, items, &library_id)?;
+
+        // 7. 写 config（原子替换）。到这一步才改配置：失败不影响原库。
+        {
+            let mut guard = self.lock_config();
+            let mut next = guard.clone();
+            next.library_path = target.to_path_buf();
+            next.save_atomic(&self.paths.config_file)?;
+            *guard = next;
+        }
+
+        self.sink.emit(AppEvent::StorageMigrationProgress(
+            crate::events::MigrationProgressEvent::new("done", 0, 0),
+        ));
+
+        Ok(RelocateResult {
+            restart_required: true,
+            new_root: target.display().to_string(),
+            files_copied: report.files_copied,
+            bytes_copied: report.bytes_copied,
+        })
     }
 
     /// 应用设置补丁（design §6.11 的顺序即正确性）。
@@ -769,6 +957,16 @@ impl AppCore {
     }
 }
 
+/// 读源库的 `library_id`：迁移校验要求目标库与源库是同一个库。
+fn read_library_id(root: &Path) -> Result<String, AppError> {
+    let path = root.join(visrecall_library::paths::LIBRARY_META_FILE);
+    let text = fs::read_to_string(&path)
+        .map_err(|err| AppError::Io(format!("read {}: {err}", path.display())))?;
+    let meta: visrecall_library::LibraryMeta = serde_json::from_str(&text)
+        .map_err(|err| AppError::Io(format!("parse {}: {err}", path.display())))?;
+    Ok(meta.library_id)
+}
+
 /// 文件字节数；不存在或不可读按 0 计（预估只用于展示）。
 fn file_len(path: &Path) -> u64 {
     fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
@@ -895,6 +1093,72 @@ fn spawn_import(import: Arc<ImportFlow>, content: DropContent) -> Result<(), App
         .map_err(|err| AppError::Internal(format!("spawn import worker: {err}")))
 }
 
+/// 捕获循环的事件分发点：处理**一条** shell 事件。
+///
+/// 这里是迁移闸门的**主检查**，因为 `CaptureRequest`（快捷键/悬浮球）与 `Drop`
+/// （拖放到悬浮球）是两条互相独立的写入口：`Drop` 由导入流程处理，不经过
+/// `CaptureCoordinator::start`，只查一处会让「迁移成功后往悬浮球拖一张图」照样写进旧库。
+///
+/// 抽成公开函数是为了让集成测试能在不启动真实窗口线程的前提下断言闸门行为
+/// （`tests/relocate_flow.rs`）。
+pub fn handle_shell_event(
+    coordinator: &CaptureCoordinator,
+    import: Arc<ImportFlow>,
+    gate: &AtomicU8,
+    config: &Mutex<AppConfig>,
+    config_file: &Path,
+    event: ShellEvent,
+) {
+    match event {
+        ShellEvent::CaptureRequest(trigger) => {
+            if let Some(err) = gate_rejection(gate) {
+                tracing::warn!(?trigger, error = %err, "capture request rejected by the gate");
+                // 用 `Busy` 上报 → `capture_failed { code: "BUSY" }`。
+                coordinator.emit_failed(&err);
+                return;
+            }
+            tracing::info!(?trigger, "capture requested");
+            if let Err(err) = coordinator.start(trigger) {
+                tracing::warn!(error = %err, "capture start failed");
+            }
+        }
+        ShellEvent::BallMoved { display_id, nx, ny } => {
+            tracing::info!(
+                display_id = %display_id,
+                nx,
+                ny,
+                "floating ball position reported"
+            );
+            if let Err(err) = store_ball_position(config, config_file, &display_id, nx, ny) {
+                tracing::warn!(
+                    display_id = %display_id,
+                    error = %err,
+                    "failed to persist the floating ball position"
+                );
+            }
+        }
+        ShellEvent::Drop(content) => {
+            if let Some(err) = gate_rejection(gate) {
+                tracing::warn!(error = %err, "drop rejected by the gate");
+                // 导入流程没有 `AppError` 通道，按错误码直传；与 `Busy` 的映射保持一致。
+                import.emit_failed("BUSY", &err.to_string());
+                return;
+            }
+            // I3：导入（落盘/转码/URL 标题 5s 超时）跑在独立的导入
+            // 工作线程上，捕获/覆盖层事件不会排队。这里只负责派发。
+            tracing::info!("drop content received");
+            if let Err(err) = spawn_import(Arc::clone(&import), content) {
+                tracing::warn!(error = %err, "failed to start the drop import");
+                import.emit_failed("INTERNAL", &err.to_string());
+            }
+        }
+        ShellEvent::DropRejected(message) => {
+            tracing::warn!(message = %message, "drop rejected by the shell");
+            import.emit_rejected(&message);
+        }
+    }
+}
+
 /// 捕获循环线程：串行处理快捷键/悬浮球触发、悬浮球位置与覆盖层结果。
 ///
 /// 抓帧与落盘都是同步 IO/CPU 工作，放在专用线程（design §3 的 capture worker），
@@ -908,6 +1172,7 @@ fn spawn_import(import: Arc<ImportFlow>, content: DropContent) -> Result<(), App
 fn spawn_capture_loop(
     coordinator: CaptureCoordinator,
     import: Arc<ImportFlow>,
+    gate: Arc<AtomicU8>,
     shell: Receiver<ShellEvent>,
     overlay: Receiver<OverlayEvent>,
     config: Arc<Mutex<AppConfig>>,
@@ -920,48 +1185,15 @@ fn spawn_capture_loop(
                 let step = guard_session(&coordinator, || {
                     select! {
                         recv(shell) -> message => match message {
-                            Ok(ShellEvent::CaptureRequest(trigger)) => {
-                                tracing::info!(?trigger, "capture requested");
-                                if let Err(err) = coordinator.start(trigger) {
-                                    tracing::warn!(error = %err, "capture start failed");
-                                }
-                                CaptureStep::Continue
-                            }
-                            Ok(ShellEvent::BallMoved { display_id, nx, ny }) => {
-                                tracing::info!(
-                                    display_id = %display_id,
-                                    nx,
-                                    ny,
-                                    "floating ball position reported"
-                                );
-                                if let Err(err) = store_ball_position(
+                            Ok(event) => {
+                                handle_shell_event(
+                                    &coordinator,
+                                    Arc::clone(&import),
+                                    &gate,
                                     &config,
                                     &config_file,
-                                    &display_id,
-                                    nx,
-                                    ny,
-                                ) {
-                                    tracing::warn!(
-                                        display_id = %display_id,
-                                        error = %err,
-                                        "failed to persist the floating ball position"
-                                    );
-                                }
-                                CaptureStep::Continue
-                            }
-                            Ok(ShellEvent::Drop(content)) => {
-                                // I3：导入（落盘/转码/URL 标题 5s 超时）跑在独立的导入
-                                // 工作线程上，捕获/覆盖层事件不会排队。这里只负责派发。
-                                tracing::info!("drop content received");
-                                if let Err(err) = spawn_import(Arc::clone(&import), content) {
-                                    tracing::warn!(error = %err, "failed to start the drop import");
-                                    import.emit_failed("INTERNAL", &err.to_string());
-                                }
-                                CaptureStep::Continue
-                            }
-                            Ok(ShellEvent::DropRejected(message)) => {
-                                tracing::warn!(message = %message, "drop rejected by the shell");
-                                import.emit_rejected(&message);
+                                    event,
+                                );
                                 CaptureStep::Continue
                             }
                             Err(_) => CaptureStep::Exit,
@@ -1423,6 +1655,7 @@ mod tests {
         spawn_capture_loop(
             coordinator,
             import,
+            Arc::new(AtomicU8::new(CaptureGate::Idle.as_u8())),
             shell_rx,
             overlay_rx,
             Arc::new(Mutex::new(AppConfig::default())),

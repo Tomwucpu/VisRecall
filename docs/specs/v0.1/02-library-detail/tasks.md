@@ -1135,7 +1135,7 @@ cargo test -p visrecall-app-core --test capture_flow
   - `AppCore::stop_runtime()`
   - `AppCore::gate() -> CaptureGate`、`AppCore::set_gate(CaptureGate)`
 
-- [ ] **Step 1: 目标校验（组件级比较，不用字符串前缀）**
+- [x] **Step 1: 目标校验（组件级比较，不用字符串前缀）**
 
 ```rust
 fn is_within(child: &Path, parent: &Path) -> bool {
@@ -1147,7 +1147,7 @@ fn is_within(child: &Path, parent: &Path) -> bool {
 
 拒绝条件：非绝对路径；`is_within(dst, src) || is_within(src, dst)`；`dst` 存在且非空；`free_space_bytes(dst) < used * 1.1`。
 
-- [ ] **Step 2: 复制**
+- [x] **Step 2: 复制**
 
 ```rust
 const COPY_ORDER: [&str; 5] = ["library.json", "visrecall.db", "originals", "texts", "thumbs"];
@@ -1179,7 +1179,7 @@ library.checkpoint()?;   // T6 内部判定 busy != 0 → Busy；此处失败即
 
 这里不重复解析 PRAGMA 返回值：判定只有一处（`checkpoint()`），迁移编排只负责「失败就中止、不进复制」。
 
-- [ ] **Step 3: 校验**
+- [x] **Step 3: 校验**
 
 ```rust
 pub fn verify(dst: &Path, expected_items: u64, expected_id: &str) -> Result<(), AppError> {
@@ -1192,7 +1192,7 @@ pub fn verify(dst: &Path, expected_items: u64, expected_id: &str) -> Result<(), 
 }
 ```
 
-- [ ] **Step 4: 编排与捕获闸门**
+- [x] **Step 4: 编排与捕获闸门**
 
 ```rust
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1247,7 +1247,7 @@ AppError::Busy(_) => "BUSY",
 
 `restart_app` 命令直接 `app.restart()`（Tauri 2 `AppHandle::restart`）；`get_app_status` 增加 `restart_required: self.gate() == RestartPending`。
 
-- [ ] **Step 5: 测试**
+- [x] **Step 5: 测试**
 
 - `validate_target`：非绝对路径 / 目标在源内 / 源在目标内 / 目标非空 / 空间不足 全部拒绝；`C:\lib` 与 `C:\lib2` 视为不同（组件比较）。
 - `copy_library` 两次执行：第二次全部跳过，文件数一致。

@@ -34,10 +34,13 @@ export const commands = {
 	/**  清理孤儿文件：只删 `originals/`、`texts/` 下未被引用的文件。 */
 	storageOrphansCleanup: () => __TAURI_INVOKE<OrphanStatsDto>("storage_orphans_cleanup"),
 	/**
-	 *  库位置迁移。
+	 *  库位置迁移：校验目标 → 停运行时 → checkpoint → 复制 → 校验 → 写 config。
 	 * 
-	 *  迁移行为（目标校验、复制、校验、写 config、闸门）在 Task 18 落地；此处先保留命令
-	 *  签名，让前端契约与 `bindings.ts` 一次定型，调用时明确返回 `BUSY` 而不是「命令不存在」。
+	 *  成功后 `config.json` 已指向新目录，但**当前进程仍用旧库**，必须重启才生效
+	 *  （不实现热切换）；因此在返回 `restartRequired = true` 的同时闸门停在
+	 *  `RestartPending`，期间的捕获/拖放都会被 `BUSY` 拒绝。
+	 * 
+	 *  迁移是分钟级的重 IO，必须离开主线程：`run_blocking` 里做的 `spawn_blocking`。
 	 */
 	storageRelocate: (path: string) => __TAURI_INVOKE<RelocateResultDto>("storage_relocate", { path }),
 	/**  立即重启进程；只应在 `restartRequired = true` 时由横幅按钮调用。 */
