@@ -1,6 +1,24 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Sidebar } from "./Sidebar";
+
+const commands = vi.hoisted(() => ({
+  tagsList: vi.fn(async () => [
+    { id: "t1", name: "work", auto: false, hue: "jade", itemCount: 5 },
+    { id: "t2", name: "参考", auto: false, hue: "ochre", itemCount: 2 },
+    { id: "t3", name: "待读", auto: false, hue: "slate", itemCount: 1 },
+  ]),
+  storageUsageGet: vi.fn(async () => ({
+    // 1.2 GiB / 50 GiB
+    usedBytes: Math.round(1.2 * 1024 * 1024 * 1024),
+    capacityBytes: 50 * 1024 * 1024 * 1024,
+    itemCount: 20,
+  })),
+  tagRename: vi.fn(async () => undefined),
+  tagDelete: vi.fn(async () => 3),
+}));
+
+vi.mock("../../lib/bindings", () => ({ commands }));
 
 function renderSidebar(props: Partial<Parameters<typeof Sidebar>[0]> = {}) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -10,6 +28,10 @@ function renderSidebar(props: Partial<Parameters<typeof Sidebar>[0]> = {}) {
     </QueryClientProvider>,
   );
 }
+
+afterEach(() => {
+  vi.clearAllMocks();
+});
 
 test("shows the current view with the loaded count", () => {
   renderSidebar();
@@ -22,11 +44,85 @@ test("shows the current view with the loaded count", () => {
   }
 });
 
-test("shows empty tag and storage states instead of invented numbers", () => {
+test("renders one pill per tag with its item count", async () => {
+  const { container } = renderSidebar();
+
+  await waitFor(() => {
+    expect(container.querySelectorAll(".tag-pill")).toHaveLength(3);
+  });
+  const pills = container.querySelectorAll(".tag-pill");
+  expect(pills[0]).toHaveTextContent("work");
+  expect(pills[0]).toHaveTextContent("5");
+  expect(pills[1]).toHaveTextContent("2");
+  expect(pills[2]).toHaveTextContent("1");
+  // 阶段 03 才做筛选：pill 本身不是按钮。
+  expect(pills[0].tagName).toBe("SPAN");
+});
+
+test("shows usage as used / capacity with a matching bar width", async () => {
+  const { container } = renderSidebar();
+
+  expect(await screen.findByText("已用 1.2 GB / 50.0 GB")).toBeInTheDocument();
+  const bar = await screen.findByRole("progressbar", { name: "存储用量" });
+  // 与组件同一口径：用真实的字节常量算比例，避免浮点误差导致断言不稳。
+  const usedBytes = Math.round(1.2 * 1024 * 1024 * 1024);
+  const capacityBytes = 50 * 1024 * 1024 * 1024;
+  const expected = (usedBytes / capacityBytes) * 100;
+  expect(Number(bar.getAttribute("aria-valuenow"))).toBe(Math.round(expected));
+  expect(container.querySelector(".storage-bar i")).toHaveStyle({
+    width: `${expected}%`,
+  });
+});
+
+test("falls back to a dash when usage cannot be read", async () => {
+  commands.storageUsageGet.mockRejectedValueOnce({ code: "IO", message: "读不到" });
+  const { container } = renderSidebar();
+
+  expect(await screen.findByText("已用 —")).toBeInTheDocument();
+  expect(container.querySelector(".storage-bar i")).toHaveStyle({ width: "0%" });
+});
+
+test("renames a tag through tag_rename", async () => {
   renderSidebar();
 
-  expect(screen.getByText("暂无标签")).toBeInTheDocument();
-  expect(screen.getByText("已用 —")).toBeInTheDocument();
+  await screen.findByText("work");
+  fireEvent.click(screen.getByRole("button", { name: "标签操作 work" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "重命名" }));
+
+  const input = screen.getByLabelText("重命名标签 work");
+  fireEvent.change(input, { target: { value: "job" } });
+  fireEvent.keyDown(input, { key: "Enter" });
+
+  await waitFor(() => {
+    expect(commands.tagRename).toHaveBeenCalledWith("t1", "job");
+  });
+});
+
+test("deletes a tag only after confirming the affected count", async () => {
+  renderSidebar();
+
+  await screen.findByText("work");
+  fireEvent.click(screen.getByRole("button", { name: "标签操作 work" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
+
+  const dialog = await screen.findByRole("dialog");
+  expect(dialog).toHaveTextContent("将影响 5 条素材");
+
+  fireEvent.click(screen.getByRole("button", { name: "删除标签" }));
+  await waitFor(() => {
+    expect(commands.tagDelete).toHaveBeenCalledWith("t1");
+  });
+});
+
+test("cancelling the delete dialog keeps the tag", async () => {
+  renderSidebar();
+
+  await screen.findByText("work");
+  fireEvent.click(screen.getByRole("button", { name: "标签操作 work" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
+  fireEvent.click(await screen.findByRole("button", { name: "取消" }));
+
+  expect(commands.tagDelete).not.toHaveBeenCalled();
 });
 
 test("collapses through the toggle and reports the new state", () => {

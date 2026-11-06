@@ -1,6 +1,11 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { api } from "../../lib/api";
+import { api, type TagChip } from "../../lib/api";
+import { errorMessage } from "../../lib/errors";
+import { formatBytes } from "../../lib/format";
 import { queryKeys } from "../../lib/queryClient";
+import { pushToast } from "../../lib/toast";
+import { ConfirmDialog } from "../common/ConfirmDialog";
 
 type Props = {
   collapsed: boolean;
@@ -16,12 +21,58 @@ type Props = {
  * 属 V0.5（F4.1–F4.2、F4.5–F4.7），按规划 §7 不进 DOM —— 所以这里没有可点的死项：
  * 「全部素材」在当前视图下是静态的当前位置（`aria-current`），不是按钮。
  *
- * 标签云与存储条走 `api` stub：标签为空数组、用量为 null，界面显示「暂无标签」与
- * 「—」而不是编造数字。折叠是纯前端状态（B 键），不落盘。
+ * 标签云与存储条都读真实数据：标签来自 `tags_list`（含每标签素材数），用量来自
+ * `storage_usage_get`。读不到时显示「—」而不是 0 —— 「读不到」与「真的是 0」必须区分。
+ * 折叠是纯前端状态（B 键），不落盘。
  */
 export function Sidebar({ collapsed, onToggle, itemCount }: Props) {
   const tags = useQuery({ queryKey: queryKeys.tags, queryFn: () => api.listTags() });
+  const usage = useQuery({
+    queryKey: queryKeys.usage,
+    queryFn: () => api.getStorageUsage(),
+    // 用量统计要遍历目录，别每次切换都重算（P2-R07 的 150ms 预算留给真正需要时）。
+    staleTime: 30_000,
+  });
+
+  const [menuTagId, setMenuTagId] = useState<string | null>(null);
+  const [renameTagId, setRenameTagId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<TagChip | null>(null);
+
   const tagList = tags.data ?? [];
+
+  const submitRename = async (tagId: string, name: string) => {
+    setRenameTagId(null);
+    const trimmed = name.trim();
+    const original = tagList.find((tag) => tag.id === tagId);
+    if (trimmed === "" || trimmed === original?.name) {
+      return;
+    }
+    try {
+      await api.renameTag(tagId, trimmed);
+    } catch (error) {
+      pushToast(errorMessage(error), "error");
+    }
+  };
+
+  const confirmDelete = async (tag: TagChip) => {
+    setDeleteTarget(null);
+    try {
+      const affected = await api.deleteTag(tag.id);
+      pushToast(`已删除标签「${tag.name}」，解除 ${affected} 条关联`);
+    } catch (error) {
+      pushToast(errorMessage(error), "error");
+    }
+  };
+
+  const usedText =
+    usage.data === undefined
+      ? "已用 —"
+      : `已用 ${formatBytes(usage.data.usedBytes)} / ${formatBytes(usage.data.capacityBytes)}`;
+  const ratio =
+    usage.data === undefined || usage.data.capacityBytes <= 0
+      ? 0
+      : Math.min(usage.data.usedBytes / usage.data.capacityBytes, 1);
 
   return (
     <aside className={`sidebar${collapsed ? " collapsed" : ""}`}>
@@ -96,26 +147,108 @@ export function Sidebar({ collapsed, onToggle, itemCount }: Props) {
             <div className="tag-cloud-empty">暂无标签</div>
           ) : (
             <div className="tag-cloud">
-              {tagList.map((tag) => (
-                <span key={tag.id} className="tag-pill" title="标签筛选待阶段 03 提供">
-                  <span className="hash">#</span>
-                  {tag.name}
-                </span>
-              ))}
+              {tagList.map((tag) =>
+                renameTagId === tag.id ? (
+                  <input
+                    key={tag.id}
+                    className="field tag-input"
+                    autoFocus
+                    value={renameDraft}
+                    aria-label={`重命名标签 ${tag.name}`}
+                    onChange={(event) => setRenameDraft(event.target.value)}
+                    onBlur={() => void submitRename(tag.id, renameDraft)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        void submitRename(tag.id, renameDraft);
+                      }
+                      if (event.key === "Escape") {
+                        event.stopPropagation();
+                        setRenameTagId(null);
+                      }
+                    }}
+                  />
+                ) : (
+                  <span
+                    key={tag.id}
+                    className="tag-pill"
+                    title="阶段 03 支持按标签筛选"
+                    // 阶段 03 才做筛选：这里不给 onClick，避免出现点了没反应的死按钮。
+                  >
+                    <span className="hash">#</span>
+                    {tag.name}
+                    <span className="tag-count">{tag.itemCount}</span>
+                    <button
+                      type="button"
+                      className="tag-more"
+                      aria-label={`标签操作 ${tag.name}`}
+                      title={`标签操作 ${tag.name}`}
+                      onClick={() =>
+                        setMenuTagId((current) => (current === tag.id ? null : tag.id))
+                      }
+                    >
+                      …
+                    </button>
+                    {menuTagId === tag.id && (
+                      <span className="tag-menu" role="menu">
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={() => {
+                            setMenuTagId(null);
+                            setRenameTagId(tag.id);
+                            setRenameDraft(tag.name);
+                          }}
+                        >
+                          重命名
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={() => {
+                            setMenuTagId(null);
+                            setDeleteTarget(tag);
+                          }}
+                        >
+                          删除
+                        </button>
+                      </span>
+                    )}
+                  </span>
+                ),
+              )}
             </div>
           )}
         </div>
       </div>
 
-      <div className="side-foot" title="存储用量待阶段 02 提供">
+      <div className="side-foot" title="用量含 originals/、texts/、thumbs/ 与数据库文件">
         <div className="storage-line">
-          <span>已用 —</span>
-          <span>—</span>
+          <span>{usedText}</span>
+          <span>{usage.data === undefined ? "—" : `${usage.data.itemCount} 条`}</span>
         </div>
-        <div className="storage-bar">
-          <i />
+        <div
+          className="storage-bar"
+          role="progressbar"
+          aria-label="存储用量"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(ratio * 100)}
+        >
+          <i style={{ width: `${ratio * 100}%` }} />
         </div>
       </div>
+
+      {deleteTarget !== null && (
+        <ConfirmDialog
+          title={`删除标签「${deleteTarget.name}」？`}
+          description={`将影响 ${deleteTarget.itemCount} 条素材；标签本身与它的全部关联都会被移除，素材不会删除。`}
+          confirmLabel="删除标签"
+          danger
+          onConfirm={() => void confirmDelete(deleteTarget)}
+          onCancel={() => setDeleteTarget(null)}
+        />
+      )}
     </aside>
   );
 }

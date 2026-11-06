@@ -101,3 +101,33 @@ export function formatRelativeTime(ms: number, now: number = Date.now()): string
   }
   return formatAbsoluteTime(ms);
 }
+
+const BYTE_UNITS = ["B", "KB", "MB", "GB", "TB"] as const;
+
+/**
+ * 字节数 → 人类可读（1024 进制，保留 1 位小数）。
+ *
+ * 界面上的「GB」就是 GiB（`storage.capacity_gb` 也按 GiB 计算），与后端口径一致；
+ * 小于 1 KB 时给整数，避免出现「0.0 B」这种没有信息量的读数。
+ */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) {
+    return "—";
+  }
+  if (bytes < 1024) {
+    return `${Math.round(bytes)} B`;
+  }
+
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < BYTE_UNITS.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  // 1023.95 → 保留 1 位后是 1024.0，需要再进一位单位。
+  if (Number(value.toFixed(1)) >= 1024 && unit < BYTE_UNITS.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(1)} ${BYTE_UNITS[unit]}`;
+}

@@ -863,19 +863,19 @@ pnpm test -- src/features/detail && pnpm typecheck
 - Consumes: `api.listTags`、`api.getStorageUsage`、`api.renameTag`、`api.deleteTag`
 - Produces: 真实标签云 + 用量条
 
-- [ ] **Step 1: 标签云**
+- [x] **Step 1: 标签云**
 
 `useQuery({ queryKey: queryKeys.tags, queryFn: api.listTags })`；渲染 `.tag-pill`，显示 `#name` 与数量；空态沿用 `.tag-cloud-empty`。点击**暂不筛选**（阶段 03），`title="阶段 03 支持按标签筛选"` 且不加 `onClick`，避免死按钮语义。
 
-- [ ] **Step 2: 标签治理入口**
+- [x] **Step 2: 标签治理入口**
 
 hover 时显示省略号按钮 → 小菜单「重命名 / 删除」；重命名用行内输入框，删除用 `ConfirmDialog` 并显示「将影响 N 条素材」。
 
-- [ ] **Step 3: 存储条**
+- [x] **Step 3: 存储条**
 
 `useQuery({ queryKey: queryKeys.usage, queryFn: api.getStorageUsage, staleTime: 30_000 })`；显示 `已用 X / 容量 Y`，进度条宽度 = `min(used/capacity, 1)`；读取中显示「—」。格式化用 `formatBytes`（在 `src/lib/format.ts` 新增，1024 进制，保留 1 位小数）。
 
-- [ ] **Step 4: 测试**
+- [x] **Step 4: 测试**
 
 - 3 个标签渲染 3 个 pill，数量正确。
 - 用量 1.2 GiB / 50 GiB 显示 `1.2 GB / 50 GB`（断言文案与宽度百分比）。

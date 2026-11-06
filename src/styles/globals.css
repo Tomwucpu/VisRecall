@@ -1654,6 +1654,65 @@ kbd {
   font-size: 10px;
 }
 
+.tag-pill {
+  position: relative;
+}
+
+/* 标签云的素材数量与「…」操作入口：默认淡，hover 时出现，避免静态列表太吵。 */
+.tag-pill .tag-count {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--ink-3);
+}
+
+.tag-more {
+  margin-left: -2px;
+  padding: 0 2px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--ink-3);
+  opacity: 0;
+  transition: opacity 0.15s var(--ease);
+}
+
+.tag-pill:hover .tag-more,
+.tag-more:focus-visible {
+  opacity: 1;
+}
+
+.tag-more:hover {
+  color: var(--ink);
+}
+
+.tag-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 5;
+  margin-top: 4px;
+  padding: 3px;
+  display: flex;
+  flex-direction: column;
+  min-width: 88px;
+  border: 1px solid var(--line-2);
+  border-radius: 7px;
+  background: var(--surface);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
+}
+
+.tag-menu button {
+  padding: 5px 8px;
+  text-align: left;
+  font-size: 11.5px;
+  border-radius: 4px;
+  color: var(--ink-2);
+}
+
+.tag-menu button:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+
 .tag-cloud-empty {
   padding: 2px 8px;
   font-size: 11px;
