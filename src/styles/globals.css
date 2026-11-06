@@ -718,6 +718,32 @@ kbd {
   padding: 16px 18px;
 }
 
+/* 库已迁移、待重启：三栏之上的常驻横幅（阶段 02 P2-R09）。
+ * 用 ink 底而非 seal：这不是错误，而是「需要用户动作」的提醒。 */
+.migration-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--ink) 6%, var(--surface));
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.migration-banner .mini-btn {
+  flex: none;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  padding: 3px 8px;
+}
+
+.migration-banner .mini-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .alert-block h2 {
   margin: 0;
   font-size: 13px;

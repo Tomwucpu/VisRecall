@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { commands, type AppStatus } from "../lib/bindings";
+import { api } from "../lib/api";
+import { queryKeys } from "../lib/queryClient";
 import { describeError } from "../lib/errors";
+import { pushToast } from "../lib/toast";
 import { toggleTheme } from "../lib/theme";
 import { subscribeItemEvents } from "../lib/events";
 import { ToastViewport } from "../features/shell/ToastViewport";
@@ -31,24 +35,29 @@ function statusText(state: LoadState): string {
 }
 
 export default function App() {
-  const [state, setState] = useState<LoadState>({ status: "loading" });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [restarting, setRestarting] = useState(false);
   const items = useItems();
 
-  const load = useCallback(async () => {
-    try {
-      const app = await commands.getAppStatus();
-      setState({ status: "ready", app });
-    } catch (error) {
-      setState({ status: "error", message: describeError(error) });
-    }
-  }, []);
+  // 应用状态走查询缓存：迁移后「待重启」横幅要能在刷新界面后仍然出现，
+  // 因此它必须来自可重取的查询，而不是一次性的组件内 state。
+  const statusQuery = useQuery({ queryKey: queryKeys.status, queryFn: api.getStatus });
 
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const state: LoadState = useMemo(() => {
+    if (statusQuery.isPending) {
+      return { status: "loading" };
+    }
+    if (statusQuery.isError) {
+      return { status: "error", message: describeError(statusQuery.error) };
+    }
+    return { status: "ready", app: statusQuery.data };
+  }, [statusQuery.isPending, statusQuery.isError, statusQuery.error, statusQuery.data]);
+
+  const load = useCallback(async () => {
+    await statusQuery.refetch();
+  }, [statusQuery]);
 
   // 新素材/状态变化由后端事件触发缓存失效，列表自动刷新（StrictMode 安全）。
   useEffect(() => subscribeItemEvents(), []);
@@ -113,6 +122,21 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [settingsOpen]);
 
+  // 库已迁移、待重启：横幅常驻，直到用户重启进程（闸门不持久化，重启后自动消失）。
+  const restartRequired = statusQuery.data?.restartRequired === true;
+  const restart = useCallback(async () => {
+    if (restarting) {
+      return;
+    }
+    setRestarting(true);
+    try {
+      await commands.restartApp();
+    } catch (error) {
+      setRestarting(false);
+      pushToast(describeError(error), "error");
+    }
+  }, [restarting]);
+
   const status = statusText(state);
   const countText = items.isPending ? "读取中…" : `找到 ${list.length} 项`;
   const selected = list.find((item) => item.id === selectedId) ?? null;
@@ -124,6 +148,22 @@ export default function App() {
         itemCount={items.isPending ? null : list.length}
         onOpenSettings={() => setSettingsOpen(true)}
       />
+
+      {restartRequired && (
+        <div className="migration-banner" role="status">
+          <span>
+            库已迁移到 {statusQuery.data?.libraryPath}，重启后生效；重启前捕获已暂停。
+          </span>
+          <button
+            type="button"
+            className="mini-btn"
+            onClick={() => void restart()}
+            disabled={restarting}
+          >
+            {restarting ? "正在重启…" : "立即重启"}
+          </button>
+        </div>
+      )}
 
       <div className="workspace">
         <Sidebar

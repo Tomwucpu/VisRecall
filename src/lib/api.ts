@@ -1,96 +1,66 @@
 /**
- * 前端唯一数据出口：真实命令与 stub 都从这里进。
+ * 前端唯一数据出口：所有 IPC 都从这里进，组件不直接调 `commands.*`。
  *
- * 阶段 02 重写 spec 后，只需把本文件里的 stub 逐个换成 `commands.*`，
- * 组件侧零改动 —— 因此每个 stub 都必须与将来真实命令**同签名、同返回类型**。
+ * 阶段 02 起本文件不再有 stub：`api.ts` 里的每个方法都对应一条真实命令，
+ * 类型直接来自 `bindings.ts`（由 `tauri-specta` 生成，不手写）。
  *
- * stub 的两条硬规则：
- *  1. **读**：返回显式的「还没有」空值（`null` / `[]`），绝不编造内容；
- *  2. **写**：抛与真实命令同形的 `ApiError`（`code = "UNSUPPORTED"`），
- *     `message` 直接面向用户，由调用方原样提示。
- *
- * 真实命令现状（2026-11-06，阶段 01）：
- *  - `get_app_status` / `list_items` / `open_library_folder` / `get_item` /
- *    `get_settings` / `update_settings` 已注册；
- *  - 但 `update_settings` 改键一律 `INVALID_INPUT(restart required)`、
- *    `ball_size` 需重启生效 —— 故设置面板的写入仍按 stub 处理（见 settings 组件）。
+ * 两条约定：
+ *  1. 读接口失败走错误码（`ApiError.code`），不把「读不到」伪装成空数据；
+ *  2. 不可恢复操作（删除/清空/清理）的确认词判断在 Rust 侧，前端只负责收集输入。
  */
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   commands,
   type ApiError,
   type AppStatus,
+  type ItemDetailDto,
   type ItemDto,
+  type OrphanStatsDto,
+  type PruneReportDto,
+  type PurgePreview,
+  type RelocateResultDto,
+  type RetentionPreviewDto,
   type SettingsDto,
+  type StorageUsageDto,
+  type TagChipDto,
 } from "./bindings";
 
-export type { ApiError, AppStatus, ItemDto, SettingsDto };
-
-/** stub 专用错误码；UI 只按它判断「能力未接入」，不解析 message。 */
-export const UNSUPPORTED_CODE = "UNSUPPORTED";
-
-function unsupported(message: string): ApiError {
-  return { code: UNSUPPORTED_CODE, message };
-}
-
-export function isUnsupported(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    (error as { code?: unknown }).code === UNSUPPORTED_CODE
-  );
-}
-
-/** 标签 chip：`auto` 为自动标注（左侧「·」与淡色底），`hue` 为令牌名。 */
-export type TagChip = {
-  id: string;
-  name: string;
-  auto: boolean;
-  hue: string | null;
+export type {
+  ApiError,
+  AppStatus,
+  ItemDetailDto,
+  ItemDto,
+  OrphanStatsDto,
+  PruneReportDto,
+  PurgePreview,
+  RelocateResultDto,
+  RetentionPreviewDto,
+  SettingsDto,
+  StorageUsageDto,
+  TagChipDto,
 };
 
-/**
- * 详情增强字段（契约草案 §2）。
- * 都是「按 id 读取」的结果，缺能力时整块为空，界面据此显示占位而不是空白。
- */
-export type DetailExtras = {
-  /** AI 描述（阶段 03，`SUMMARY_UNAVAILABLE` 时也为 null）。 */
-  summary: string | null;
-  /** 文本原文前 2 万字符（阶段 02）。 */
-  bodyText: string | null;
-  /** 原图地址 `visrecall://original/<id>`（阶段 02；缩略图协议已存在）。 */
-  originalUrl: string | null;
-  /** 标签（阶段 02）。 */
-  tags: TagChip[];
+/** 标签 chip：`auto` 为自动标注（左侧「·」与淡色底），`hue` 为色令牌名。 */
+export type TagChip = TagChipDto;
+
+/** 详情增强字段（契约 §2）；缺能力时整块为空，界面据此显示占位而不是空白。 */
+export type DetailExtras = ItemDetailDto["extras"];
+
+export type ItemDetail = ItemDetailDto;
+
+/** 存储用量；读取失败走错误码，界面显示「—」而不是 0。 */
+export type StorageUsage = StorageUsageDto;
+
+/** 迁移进度（`phase ∈ prepare | copy | verify | done`）。 */
+export type MigrationProgress = {
+  phase: string;
+  done: number;
+  total: number;
 };
 
-export type ItemDetail = {
-  /** 真实：`get_item` 的完整 DTO（含 `note`）。 */
-  item: ItemDto;
-  /** stub：阶段 02/03 才有的字段。 */
-  extras: DetailExtras;
-};
-
-/** 存储用量（阶段 02）。 */
-export type StorageUsage = {
-  usedBytes: number;
-  capacityBytes: number;
-  itemCount: number;
-};
-
-const PHASE_02 = "阶段 02";
 const PHASE_03 = "阶段 03";
 
-/**
- * STUB(阶段 02)：详情增强字段。
- * 正文/原图/标签需要新命令，摘要要等阶段 03；在此之前一律返回空值。
- */
-async function stubDetailExtras(_id: string): Promise<DetailExtras> {
-  return { summary: null, bodyText: null, originalUrl: null, tags: [] };
-}
-
 export const api = {
-  // —— 真实命令（阶段 01 既有）——
-
   getStatus: (): Promise<AppStatus> => commands.getAppStatus(),
 
   listItems: (cursor: number | null, limit: number): Promise<ItemDto[]> =>
@@ -100,53 +70,110 @@ export const api = {
 
   getSettings: (): Promise<SettingsDto> => commands.getSettings(),
 
-  /** 真实 `get_item` + stub 增强字段；两者并行，缺失部分不影响基础信息展示。 */
-  async loadDetail(id: string): Promise<ItemDetail> {
-    const [item, extras] = await Promise.all([commands.getItem(id), stubDetailExtras(id)]);
-    return { item, extras };
+  /** 详情：一次 IPC 拿到素材本体 + 原文/原图 URL + 标签。 */
+  loadDetail: (id: string): Promise<ItemDetail> => commands.getItemExt(id),
+
+  /** 备注：300ms 防抖与 10000 字上限由前端保证，后端再独立校验一次。 */
+  saveNote: async (id: string, text: string): Promise<void> => {
+    await commands.noteSet(id, text);
   },
 
-  // —— STUB：阶段 02 / 03 提供；换实现时签名与返回类型不变 ——
+  /** 标签云（含每个标签的素材数量）。 */
+  listTags: (): Promise<TagChip[]> => commands.tagsList(),
 
-  /** STUB(阶段 02)：`note_set` + `item_note_updated { id }`，300ms 防抖、10000 字上限由前端保证。 */
-  async saveNote(_id: string, _text: string): Promise<void> {
-    throw unsupported(`备注保存将在${PHASE_02} 提供`);
+  addTag: (itemId: string, name: string): Promise<TagChip> =>
+    commands.tagAdd(itemId, name),
+
+  /** 解除某条素材与标签的关联（自动标签会写入抑制记录）。 */
+  removeTag: async (itemId: string, tagId: string): Promise<void> => {
+    await commands.tagDetach(itemId, tagId);
   },
 
-  /** STUB(阶段 02)：标签云数据。当前返回空数组 —— 「没有标签」是真实状态。 */
-  async listTags(): Promise<TagChip[]> {
-    return [];
+  renameTag: async (tagId: string, name: string): Promise<void> => {
+    await commands.tagRename(tagId, name);
   },
 
-  /** STUB(阶段 02)：`tag_add`，同名复用、自动标签与手动标签语义由后端定。 */
-  async addTag(_itemId: string, _name: string): Promise<TagChip> {
-    throw unsupported(`标签编辑将在${PHASE_02} 提供`);
+  /** 删除标签并解除其与所有素材的关联，返回受影响的素材数。 */
+  deleteTag: (tagId: string): Promise<number> => commands.tagDelete(tagId),
+
+  /**
+   * 复制原始内容：图片写 `CF_DIB` + `PNG`，文本/链接写 `CF_UNICODETEXT`。
+   *
+   * `kind` 仅为兼容既有调用点的可选参数，后端按库里的 `kind` 自己分支。
+   */
+  copyOriginal: async (itemId: string, _kind?: string): Promise<void> => {
+    await commands.copyItemOriginal(itemId);
   },
 
-  /** STUB(阶段 02)：`CLIPBOARD_BUSY` / `CLIPBOARD_FAILED` / `FILE_MISSING` 由后端给出。 */
-  async copyOriginal(_itemId: string, kind: string): Promise<void> {
-    const label = kind === "image" ? "复制原图" : kind === "link" ? "复制链接" : "复制原文";
-    throw unsupported(`${label}将在${PHASE_02} 提供`);
+  /** 单条彻底删除（原图/缩略图/标签关联/任务一并移除）。 */
+  deleteItem: async (id: string): Promise<void> => {
+    await commands.itemDelete(id);
   },
 
-  /** STUB(阶段 02)：`item_delete`（彻底删除，原图/缩略图/索引一并移除）。 */
-  async deleteItem(_id: string): Promise<void> {
-    throw unsupported(`删除将在${PHASE_02} 提供`);
+  /** 用量：已用 / 容量 / 条数。 */
+  getStorageUsage: (): Promise<StorageUsage> => commands.storageUsageGet(),
+
+  /** 容量（1–4096 GB，软配额）。 */
+  setCapacity: async (gigabytes: number): Promise<void> => {
+    await commands.storageCapacitySet(gigabytes);
   },
 
-  /** STUB(阶段 02)：用量查询。`null` 表示「暂时读不到」，界面显示占位而非 0。 */
-  async getStorageUsage(): Promise<StorageUsage | null> {
-    return null;
+  /** 保留策略；`null` = 永久保留。 */
+  setRetention: async (days: number | null): Promise<void> => {
+    await commands.retentionSet(days);
   },
 
-  /** STUB(阶段 02)：容量设置（1–4096 GB）。 */
-  async setCapacity(_gigabytes: number): Promise<void> {
-    throw unsupported(`容量设置将在${PHASE_02} 提供`);
+  /** 清理预估：会删掉多少条、释放多少字节（保存前必须让用户看到）。 */
+  getRetentionPreview: (days: number | null): Promise<RetentionPreviewDto> =>
+    commands.retentionPreview(days),
+
+  /** 按已保存的策略立即清理，返回成功/失败条数。 */
+  applyRetention: (): Promise<PruneReportDto> => commands.retentionApply(),
+
+  /** 全库清空所需的确认信息（条数 + 确认词都由后端给）。 */
+  getPurgePreview: (): Promise<PurgePreview> => commands.libraryPurgePreview(),
+
+  /** 全库清空；确认词不匹配时后端返回 `INVALID_INPUT`。 */
+  purgeLibrary: async (confirm: string): Promise<void> => {
+    await commands.libraryPurge(confirm);
   },
 
-  /** STUB(阶段 02)：保留策略，`null` 为永久保留。 */
-  async setRetention(_days: number | null): Promise<void> {
-    throw unsupported(`保留策略将在${PHASE_02} 提供`);
+  /** 孤儿文件统计（只统计 `originals/`、`texts/`）。 */
+  getOrphans: (): Promise<OrphanStatsDto> => commands.storageOrphansGet(),
+
+  /** 清理孤儿文件，返回实际删除数与字节数。 */
+  cleanupOrphans: (): Promise<OrphanStatsDto> => commands.storageOrphansCleanup(),
+
+  /** 迁移库位置；成功后必须重启才生效。 */
+  relocateStorage: (path: string): Promise<RelocateResultDto> =>
+    commands.storageRelocate(path),
+
+  /** 订阅迁移进度；返回退订函数。 */
+  subscribeMigration(onProgress: (progress: MigrationProgress) => void): () => void {
+    let disposed = false;
+    let unlisten: UnlistenFn | null = null;
+
+    listen<MigrationProgress>("storage_migration_progress", (event) => {
+      if (!disposed) {
+        onProgress(event.payload);
+      }
+    })
+      .then((fn) => {
+        if (disposed) {
+          fn();
+        } else {
+          unlisten = fn;
+        }
+      })
+      .catch((error: unknown) => {
+        console.error("listen storage_migration_progress failed", error);
+      });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+      unlisten = null;
+    };
   },
 };
 

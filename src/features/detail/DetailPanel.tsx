@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { api, isUnsupported, SUMMARY_PLACEHOLDER, type TagChip } from "../../lib/api";
+import { api, SUMMARY_PLACEHOLDER, type TagChip } from "../../lib/api";
 import { errorMessage } from "../../lib/errors";
 import { formatAbsoluteTime, formatRelativeTime, kindLabel, statusLabel } from "../../lib/format";
 import { queryKeys } from "../../lib/queryClient";
@@ -16,7 +16,7 @@ type Props = {
 const NOTE_LIMIT = 10_000;
 const NOTE_DEBOUNCE_MS = 300;
 
-type SaveState = "idle" | "saving" | "saved" | "unsupported";
+type SaveState = "idle" | "saving" | "saved" | "error";
 
 function copyLabelOf(kind: string): string {
   if (kind === "image") return "复制原图";
@@ -46,8 +46,6 @@ export function DetailPanel({ item, onClose }: Props) {
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pending = useRef<string | null>(null);
   const savedText = useRef<string>("");
-  // 一旦确认后端未接入备注写入，就不再重复打 IPC（避免每次输入都弹错）。
-  const noteBlocked = useRef(false);
 
   // 换素材时重置全部本地状态，避免上一条的备注/草稿串到下一条。
   useEffect(() => {
@@ -58,7 +56,6 @@ export function DetailPanel({ item, onClose }: Props) {
     setConfirmOpen(false);
     pending.current = null;
     savedText.current = "";
-    noteBlocked.current = false;
     if (timer.current !== null) {
       clearTimeout(timer.current);
       timer.current = null;
@@ -75,7 +72,7 @@ export function DetailPanel({ item, onClose }: Props) {
 
   const flushNote = useCallback(
     async (text: string) => {
-      if (noteBlocked.current || text === savedText.current) {
+      if (text === savedText.current) {
         return;
       }
       setSaveState("saving");
@@ -84,12 +81,8 @@ export function DetailPanel({ item, onClose }: Props) {
         savedText.current = text;
         setSaveState("saved");
       } catch (error) {
-        if (isUnsupported(error)) {
-          noteBlocked.current = true;
-          setSaveState("unsupported");
-          return;
-        }
-        setSaveState("idle");
+        // 失败时不回滚用户输入：文本还在输入框里，用户可以直接重试。
+        setSaveState("error");
         pushToast(errorMessage(error), "error");
       }
     },
@@ -98,9 +91,6 @@ export function DetailPanel({ item, onClose }: Props) {
 
   const scheduleSave = useCallback(
     (text: string) => {
-      if (noteBlocked.current) {
-        return;
-      }
       pending.current = text;
       if (timer.current !== null) {
         clearTimeout(timer.current);
@@ -136,7 +126,7 @@ export function DetailPanel({ item, onClose }: Props) {
     // 上限阻止：超出部分直接不接受，而不是存进去再报错。
     const next = value.length > NOTE_LIMIT ? value.slice(0, NOTE_LIMIT) : value;
     setNote(next);
-    setSaveState((current) => (current === "unsupported" ? current : "idle"));
+    setSaveState("idle");
     scheduleSave(next);
   };
 
@@ -200,8 +190,8 @@ export function DetailPanel({ item, onClose }: Props) {
       ? "保存中…"
       : saveState === "saved"
         ? "已保存"
-        : saveState === "unsupported"
-          ? "待阶段 02 提供 · 仅本地草稿"
+        : saveState === "error"
+          ? "保存失败 · 文本未丢失"
           : "行内编辑 · 自动保存";
 
   return (

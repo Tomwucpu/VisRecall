@@ -741,7 +741,7 @@ git diff --stat src/lib/bindings.ts
 - Consumes: `commands.*`（Task 10 生成）
 - Produces: 无 stub 的 `api`；`subscribeAppEvents()` 按事件分派失效范围
 
-- [ ] **Step 1: 删除 stub**
+- [x] **Step 1: 删除 stub**
 
 删除 `UNSUPPORTED_CODE`、`unsupported()`、`isUnsupported()`、`stubDetailExtras`、`PHASE_02`；`loadDetail` 直接 `commands.getItemExt(id)`；`saveNote`/`addTag`/`deleteItem`/`copyOriginal`/`setCapacity`/`setRetention` 直接调命令；`listTags`/`getStorageUsage` 返回真实数据。
 
@@ -749,7 +749,7 @@ git diff --stat src/lib/bindings.ts
 
 `SUMMARY_PLACEHOLDER` 保留（阶段 03 前唯一的摘要文案）。
 
-- [ ] **Step 2: 查询键**
+- [x] **Step 2: 查询键**
 
 ```ts
 export const queryKeys = {
@@ -763,7 +763,7 @@ export const queryKeys = {
 };
 ```
 
-- [ ] **Step 3: 事件分派**
+- [x] **Step 3: 事件分派**
 
 ```ts
 const RESET_ITEMS = ["item_created", "item_updated", "item_deleted", "items_reset", "items_pruned"] as const;
@@ -780,12 +780,12 @@ export function subscribeAppEvents(client: QueryClient = queryClient): () => voi
 
 保留 `subscribeItemEvents` 作为薄封装（`App.tsx` 已引用），内部改为调用 `subscribeAppEvents` 的列表部分，避免改动 `App.tsx` 的订阅位置。
 
-- [ ] **Step 4: 测试**
+- [x] **Step 4: 测试**
 
 `api.test.ts`：每条命令断言调用了对应 `commands.*` 且参数正确（mock `@tauri-apps/api/core` 的 `invoke`）。
 `events.test.ts`：用 `vi.mock` 触发各事件名，断言只失效预期键（例如 `item_note_updated` 不得重置 `items`）。
 
-- [ ] **Step 5: 迁移待重启横幅**
+- [x] **Step 5: 迁移待重启横幅**
 
 `getStatus()` 的类型来自生成的 `AppStatus`（新增 `restartRequired: boolean`）。`App.tsx` 用 `useQuery({ queryKey: queryKeys.status, queryFn: api.getStatus })` 读取，`restartRequired === true` 时在三栏之上渲染常驻横幅：
 

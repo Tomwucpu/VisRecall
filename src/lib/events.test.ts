@@ -1,15 +1,15 @@
 import { QueryClient } from "@tanstack/react-query";
-import { subscribeItemEvents } from "./events";
+import { subscribeAppEvents, subscribeItemEvents } from "./events";
 
 // 把 Tauri 的 `listen` 换成可观测的假实现：记录订阅名与处理器，退订可断言。
 const mocks = vi.hoisted(() => ({
   listen: vi.fn(),
   unlisten: vi.fn(),
-  handlers: [] as { name: string; handler: () => void }[],
+  handlers: [] as { name: string; handler: (event: { payload: unknown }) => void }[],
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: (name: string, handler: () => void) => {
+  listen: (name: string, handler: (event: { payload: unknown }) => void) => {
     mocks.handlers.push({ name, handler });
     return mocks.listen(name, handler);
   },
@@ -34,24 +34,109 @@ function makeClient() {
   return { client, reset, invalidate };
 }
 
-test("resets the items query on item events instead of invalidating pages", async () => {
+/** 触发所有同名处理器：StrictMode 场景下会同时存在「已退订」与「有效」两份。 */
+function emit(name: string, payload: unknown = {}) {
+  for (const entry of mocks.handlers.filter((item) => item.name === name)) {
+    entry.handler({ payload });
+  }
+}
+
+test("subscribes to all eight phase 02 events", async () => {
+  const { client } = makeClient();
+  const cleanup = subscribeAppEvents(client);
+  await flush();
+
+  expect(mocks.listen.mock.calls.map(([name]) => name)).toEqual([
+    "item_created",
+    "item_updated",
+    "item_deleted",
+    "items_reset",
+    "items_pruned",
+    "item_note_updated",
+    "item_tags_updated",
+    "tags_changed",
+  ]);
+
+  cleanup();
+  expect(mocks.unlisten).toHaveBeenCalledTimes(8);
+});
+
+test("list events reset the items query and refresh usage", async () => {
+  const { client, reset, invalidate } = makeClient();
+  const cleanup = subscribeAppEvents(client);
+  await flush();
+
+  emit("item_created");
+  expect(reset).toHaveBeenCalledWith({ queryKey: ["items"] });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["usage"] });
+
+  reset.mockClear();
+  invalidate.mockClear();
+  emit("items_pruned", { count: 3 });
+  expect(reset).toHaveBeenCalledWith({ queryKey: ["items"] });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["usage"] });
+  // 清理可能把某些标签的素材删光，标签云也要重取。
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["tags"] });
+
+  cleanup();
+});
+
+test("note update only invalidates that detail", async () => {
+  const { client, reset, invalidate } = makeClient();
+  const cleanup = subscribeAppEvents(client);
+  await flush();
+
+  emit("item_note_updated", { id: "abc" });
+
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["detail", "abc"] });
+  // 备注变化不得重置列表：否则用户正在浏览的列表会跳动。
+  expect(reset).not.toHaveBeenCalled();
+
+  cleanup();
+});
+
+test("tag events invalidate the detail and the tag cloud", async () => {
+  const { client, invalidate } = makeClient();
+  const cleanup = subscribeAppEvents(client);
+  await flush();
+
+  emit("item_tags_updated", { id: "abc" });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["detail", "abc"] });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["tags"] });
+
+  invalidate.mockClear();
+  emit("tags_changed");
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["tags"] });
+  expect(invalidate).toHaveBeenCalledTimes(1);
+
+  cleanup();
+});
+
+test("note event without an id is ignored", async () => {
+  const { client, invalidate } = makeClient();
+  const cleanup = subscribeAppEvents(client);
+  await flush();
+
+  emit("item_note_updated", {});
+  expect(invalidate).not.toHaveBeenCalled();
+
+  cleanup();
+});
+
+test("subscribeItemEvents keeps the phase 01 list-only behaviour", async () => {
   const { client, reset, invalidate } = makeClient();
   const cleanup = subscribeItemEvents(client);
   await flush();
 
-  expect(mocks.listen).toHaveBeenCalledTimes(2);
-  expect(mocks.listen.mock.calls.map(([name]) => name)).toEqual([
-    "item_created",
-    "item_updated",
-  ]);
-
-  mocks.handlers.find((entry) => entry.name === "item_created")?.handler();
-  expect(reset).toHaveBeenCalledTimes(1);
+  expect(mocks.listen).toHaveBeenCalledTimes(5);
+  emit("item_created");
   expect(reset).toHaveBeenCalledWith({ queryKey: ["items"] });
-  expect(invalidate).not.toHaveBeenCalled();
+  // 新素材会改变用量，但不应动标签云。
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["usage"] });
+  expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["tags"] });
 
   cleanup();
-  expect(mocks.unlisten).toHaveBeenCalledTimes(2);
+  expect(mocks.unlisten).toHaveBeenCalledTimes(5);
 });
 
 test("strict-mode remount does not leave duplicate listeners", async () => {
@@ -62,18 +147,13 @@ test("strict-mode remount does not leave duplicate listeners", async () => {
   const cleanup = subscribeItemEvents(client);
   await flush();
 
-  // 第一次挂载的两个在途订阅在解析后立即退订；第二次的保持有效。
-  expect(mocks.unlisten).toHaveBeenCalledTimes(2);
-  expect(mocks.listen).toHaveBeenCalledTimes(4);
+  // 第一次挂载的五个在途订阅在解析后立即退订；第二次的保持有效。
+  expect(mocks.unlisten).toHaveBeenCalledTimes(5);
+  expect(mocks.listen).toHaveBeenCalledTimes(10);
 
-  // 已清理的处理器不再触发重置，只有第二次挂载的那一个生效。
-  for (const { name, handler } of mocks.handlers) {
-    if (name === "item_created") {
-      handler();
-    }
-  }
+  emit("item_created");
   expect(reset).toHaveBeenCalledTimes(1);
 
   cleanup();
-  expect(mocks.unlisten).toHaveBeenCalledTimes(4);
+  expect(mocks.unlisten).toHaveBeenCalledTimes(10);
 });

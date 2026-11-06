@@ -6,6 +6,9 @@ export const queryKeys = {
   detail: (id: string) => ["detail", id] as const,
   settings: ["settings"] as const,
   tags: ["tags"] as const,
+  usage: ["usage"] as const,
+  orphans: ["orphans"] as const,
+  status: ["status"] as const,
 };
 
 /**
