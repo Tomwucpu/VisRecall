@@ -458,6 +458,18 @@ mod tests {
     use super::*;
     use crate::events::RecordingSink;
 
+    /// 并发峰值（[`test_metrics::peak`]）是**进程级**的静态量：`run_job` 除了被 worker
+    /// 线程调用，`panicking_sink_still_marks_the_item_failed` 也会在测试线程上直接调用。
+    /// 两个用例并行时峰值会变成 3，与 worker 池的容量断言无关。互斥执行后，峰值只反映
+    /// worker 池本身。
+    static METRIC_LOCK: Mutex<()> = Mutex::new(());
+
+    fn metric_guard() -> std::sync::MutexGuard<'static, ()> {
+        METRIC_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
     fn write_png(path: &Path, width: u32, height: u32) {
         RgbaImage::from_pixel(width, height, Rgba([10, 20, 30, 255]))
             .save(path)
@@ -616,6 +628,7 @@ mod tests {
     /// 批量派发仍受 [`THUMB_WORKERS`] 约束：同时执行的绘图不超过 worker 数，且全部完成。
     #[test]
     fn concurrent_jobs_never_exceed_the_worker_count() {
+        let _serial = metric_guard();
         let dir = tempfile::tempdir().unwrap();
         let library = Arc::new(Library::open(dir.path().join("library")).unwrap());
         let original = dir.path().join("batch.png");
@@ -695,6 +708,8 @@ mod tests {
             original_path: relative.to_string(),
         };
         // `catch_unwind` 会打印 panic 信息；测试只关心兜底结果。
+        // 与并发峰值断言互斥：这条 `run_job` 不走 worker 池，会让进程级峰值偏大。
+        let _serial = metric_guard();
         run_job(&job);
 
         let stored = library.get_item(id).unwrap().unwrap();
