@@ -32,6 +32,9 @@ pub const THUMB_MAX_EDGE: u32 = 480;
 /// 缩略图目录（相对库根）；`Library` 打开时已建好。
 pub const THUMB_DIR: &str = "thumbs";
 
+/// 原图目录（相对库根）。
+pub const ORIGINAL_DIR: &str = "originals";
+
 /// 缩略图 worker 线程数（有界并发上限）。
 ///
 /// 捕获一次只有一张；导入一批最多 20 张，两个 worker 让峰值解码内存止步于两张原图，
@@ -48,8 +51,12 @@ pub fn thumb_relative_path(item_id: &str) -> String {
 
 /// `thumb_path` 是否指向 `thumbs/` 下的文件（纵深防御：库被改坏也不读 `texts/` 等）。
 fn is_thumb_relative(thumb: &str) -> bool {
-    thumb
-        .strip_prefix(THUMB_DIR)
+    is_under_dir(thumb, THUMB_DIR)
+}
+
+/// 相对路径是否位于 `dir` 目录下（`dir/...`），且不含反斜杠。
+fn is_under_dir(path: &str, dir: &str) -> bool {
+    path.strip_prefix(dir)
         .and_then(|rest| rest.strip_prefix('/'))
         .is_some_and(|name| !name.is_empty() && !name.contains('\\'))
 }
@@ -120,6 +127,64 @@ pub fn load_thumb_bytes(library: &Library, item_id: &str) -> Result<Vec<u8>, App
         std::io::ErrorKind::NotFound => AppError::NotFound,
         _ => AppError::Io(format!("read {thumb}: {err}")),
     })
+}
+
+/// 读取素材原图的字节与 MIME（资源协议 `visrecall://original/<id>` 用）。
+///
+/// 语义与 [`load_thumb_bytes`] 同构：
+/// - 素材不存在 → `NOT_FOUND`；
+/// - 非图片素材（文本/链接）→ `INVALID_INPUT`（协议层 400，不读出文本内容）；
+/// - `original_path` 不在 `originals/` 下 → `INVALID_INPUT`（纵深防御）；
+/// - 文件已丢失 → `NOT_FOUND`（协议层 404，前端显示「原图文件缺失」占位）。
+///
+/// 只返回原尺寸字节：不实现 `?max=` 缩放参数（D2-08），预览由 WebView 按容器缩放。
+pub fn load_original_bytes(
+    library: &Library,
+    item_id: &str,
+) -> Result<(Vec<u8>, &'static str), AppError> {
+    let item = library.get_item(item_id)?.ok_or(AppError::NotFound)?;
+    if item.kind != ItemKind::Image {
+        return Err(AppError::InvalidInput(format!(
+            "item {item_id} is not an image"
+        )));
+    }
+
+    // 纵深防御：协议只服务原图，库里的路径再坏也不能读到 `texts/` 等其他库内文件。
+    if !is_under_dir(&item.original_path, ORIGINAL_DIR) {
+        return Err(AppError::InvalidInput(format!(
+            "original path is not under {ORIGINAL_DIR}/: {}",
+            item.original_path
+        )));
+    }
+
+    let path = library
+        .relative_to_root(&item.original_path)
+        .map_err(|err| match err {
+            AppError::InvalidInput(detail) => AppError::InvalidInput(detail),
+            _ => AppError::NotFound,
+        })?;
+    let bytes = fs::read(&path).map_err(|err| match err.kind() {
+        std::io::ErrorKind::NotFound => AppError::NotFound,
+        _ => AppError::Io(format!("read {}: {err}", item.original_path)),
+    })?;
+
+    Ok((bytes, image_mime(&item.original_path)))
+}
+
+/// 按扩展名给出 `Content-Type`；未知扩展名按二进制流返回。
+fn image_mime(path: &str) -> &'static str {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        _ => "application/octet-stream",
+    }
 }
 
 /// 一张缩略图的生成任务：库、事件发送端、素材 id 与库内相对原图路径。

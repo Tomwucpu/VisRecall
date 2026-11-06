@@ -522,11 +522,11 @@ cargo test -p visrecall-app-core --test detail_extras
 - Consumes: `Library::get_item`、`relative_to_root`
 - Produces: `GET|HEAD /original/<id>` 返回原图字节；`ORIGINAL_PREFIX = "original"`
 
-- [ ] **Step 1: 泛化路径解析**
+- [x] **Step 1: 泛化路径解析**
 
 把 `parse_thumb_request_path` 改成 `parse_asset_request_path(path) -> Result<(AssetKind, &str), ProtocolError>`，`AssetKind::{Thumb, Original}`；只接受 `/<prefix>/<id>` 两段，id 规则复用 `is_valid_item_id`。保留 `parse_thumb_request_path` 作为薄封装，避免既有测试大改。
 
-- [ ] **Step 2: 读取原图**
+- [x] **Step 2: 读取原图**
 
 ```rust
 pub fn load_original_bytes(library: &Library, item_id: &str) -> Result<(Vec<u8>, &'static str), AppError>;
@@ -534,11 +534,11 @@ pub fn load_original_bytes(library: &Library, item_id: &str) -> Result<(Vec<u8>,
 
 按 `items.kind`：`Image` 读 `original_path`，扩展名映射 `png→image/png`、`jpg/jpeg→image/jpeg`、`webp→image/webp`、`gif→image/gif`、其他→`application/octet-stream`；非图片素材返回 `InvalidInput`（协议转 400）。纵深防御：`original_path` 必须以 `originals/` 开头，否则 `InvalidInput`。
 
-- [ ] **Step 3: 响应**
+- [x] **Step 3: 响应**
 
 沿用缩略图分支：GET/HEAD、`immutable` 缓存头、错误不缓存；`Content-Type` 用上一步的 MIME。
 
-- [ ] **Step 4: 测试**
+- [x] **Step 4: 测试**
 
 - `/original/<id>` 返回 200 + `image/png`；`/original/../config.json`、`/original/a.png`、`/original/a/b` 全部 400。
 - `thumb_path` 指向 `texts/` 的素材走 `/original/<id>` 返回 400（不读出文本）。
