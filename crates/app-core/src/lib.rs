@@ -4,6 +4,7 @@
 
 pub mod app;
 pub mod capture_flow;
+pub mod detail;
 pub mod events;
 pub mod import_flow;
 pub mod thumbnail;
@@ -13,6 +14,7 @@ pub use capture_flow::{
     persist_capture, CaptureCoordinator, NoopWindowVisibility, OverlayPresenter, WindowVisibility,
     MIN_FREE_BYTES,
 };
+pub use detail::{load_detail, DetailExtras, ItemDetail, BODY_TEXT_LIMIT};
 pub use events::{
     AppEvent, AppRecoveredEvent, CaptureFailedEvent, EventSink, HotkeyConflictEvent, ItemEvent,
     ItemUpdatedEvent, NullEventSink, RecordingSink,

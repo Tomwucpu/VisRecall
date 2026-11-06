@@ -471,7 +471,7 @@ cargo test -p visrecall-library --test storage_db
 - Consumes: `Library::get_item` / `tags_for_item` / `root`
 - Produces: `detail::load_detail(library, id) -> Result<ItemDetail, AppError>`，`ItemDetail { item: Item, extras: DetailExtras }`
 
-- [ ] **Step 1: 原文读取与按字符截断**
+- [x] **Step 1: 原文读取与按字符截断**
 
 ```rust
 pub const BODY_TEXT_LIMIT: usize = 20_000;
@@ -490,11 +490,11 @@ fn read_body_text(library: &Library, item: &Item) -> Option<String> {
 
 `nth(BODY_TEXT_LIMIT)` 返回第 20001 个字符的位置，`&text[..byte_idx]` 恰为前 20000 个字符。
 
-- [ ] **Step 2: 原图 URL 与标签**
+- [x] **Step 2: 原图 URL 与标签**
 
 `original_url` 仅在 `ItemKind::Image` 时返回 `format!("visrecall://original/{}", item.id)`；标签来自 `tags_for_item`，`auto` 取 `origin == TagSource::Auto`。
 
-- [ ] **Step 3: 测试**
+- [x] **Step 3: 测试**
 
 - 文本 19999 字 → 无截断标记；20000 字 → 无标记；20001 字 → 有标记且长度为 20000 + 标记。
 - 截断点前后放 emoji：`…a😀` + 剩余 → 输出以完整 emoji 结尾，不出现替换字符 `�`。

@@ -514,6 +514,11 @@ fn capture_failed_code(err: &AppError) -> &'static str {
         AppError::CaptureFailed(_) => "CAPTURE_FAILED",
         AppError::CaptureCancelled => "CAPTURE_CANCELLED",
         AppError::DrmProtected => "DRM_PROTECTED",
+        AppError::FileMissing(_) => "FILE_MISSING",
+        AppError::ClipboardBusy => "CLIPBOARD_BUSY",
+        AppError::ClipboardFailed(_) => "CLIPBOARD_FAILED",
+        // 迁移/清理闸门拒绝捕获时必须是 BUSY，否则前端会显示成「内部错误」。
+        AppError::Busy(_) => "BUSY",
         AppError::Io(_) => "IO",
         AppError::Database(_) => "DATABASE",
         AppError::Internal(_) => "INTERNAL",
