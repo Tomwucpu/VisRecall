@@ -11,6 +11,10 @@ dist/
 # tauri generated
 src-tauri/gen/
 
+# ide（JetBrains 本地状态：workspace.xml、JDK 探测结果等，逐人不同）
+.idea/
+*.iml
+
 # logs
 *.log
 logs/

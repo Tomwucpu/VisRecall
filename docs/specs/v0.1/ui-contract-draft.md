@@ -1,6 +1,6 @@
 # UI 前置阶段 · 前后端接口契约草案
 
-> 状态：草案（2026-11-06，UI 前置阶段 T4–T8 产出）
+> 状态：**已被 `02-library-detail/design.md` §5 取代（2026-11-06）**。实现以阶段 02 spec 为准；本文与实现的差异清单见 `02-library-detail/design.md` §5.4（保留本文作为 UI 前置阶段的历史产物与 stub 设计依据）。
 > 用途：重写 `02-library-detail` spec 时，`design.md` 的接口章节直接引用本文，避免二次设计。
 > 口径：本文描述的是**目标形态**。当前实现里凡标 `STUB` 的，都在 `src/lib/api.ts` 有同签名占位，
 > 换实现时组件零改动。类型以 TS 表述，并标注它在 `visrecall_domain` 里的对应方向。
