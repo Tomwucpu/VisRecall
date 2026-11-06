@@ -25,6 +25,9 @@ export type ItemCardData = {
 
 type Props = {
   item: ItemCardData;
+  /** 有回调时卡片才可点、可聚焦；没有回调时保持纯展示（测试与列表预览）。 */
+  onOpen?: (item: ItemCardData) => void;
+  selected?: boolean;
 };
 
 /** 只有「待解析 / 失败」用印章色强调，其余状态保持中性徽标。 */
@@ -37,7 +40,7 @@ function badgeClass(status: string): string {
 }
 
 /** 单张素材卡：缩略图（无图时占位）、状态徽标、标题与来源/时间元信息。 */
-export function ItemCard({ item }: Props) {
+export function ItemCard({ item, onOpen, selected = false }: Props) {
   const kind = kindLabel(item.kind);
   const title = item.sourceTitle ?? "未命名来源";
   const hasTime = Number.isFinite(item.capturedAt);
@@ -54,12 +57,27 @@ export function ItemCard({ item }: Props) {
   const thumbSrc = item.thumbUrl !== null && !failed ? item.thumbUrl : null;
   const busy = item.status === "parsing" || item.status === "pending";
   const hueStyle = { "--hue": item.hue ?? "var(--hue-ash)" } as CSSProperties;
+  const interactive = onOpen !== undefined;
 
   return (
     <article
-      className={`card${busy ? " is-pending" : ""}`}
+      className={`card${busy ? " is-pending" : ""}${selected ? " selected" : ""}`}
       data-item-id={item.id}
       title={item.sourceTitle ?? undefined}
+      role={interactive ? "button" : undefined}
+      tabIndex={interactive ? 0 : undefined}
+      aria-pressed={interactive ? selected : undefined}
+      onClick={interactive ? () => onOpen(item) : undefined}
+      onKeyDown={
+        interactive
+          ? (event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onOpen(item);
+              }
+            }
+          : undefined
+      }
     >
       <div className="card-thumb">
         {thumbSrc !== null ? (

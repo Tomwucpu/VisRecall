@@ -9,6 +9,9 @@ type Props = {
   isFetchingNextPage: boolean;
   onLoadMore: () => void;
   onRetry: () => void;
+  /** 打开详情；不传时卡片不可交互。 */
+  onOpen?: (item: ItemCardData) => void;
+  selectedId?: string | null;
 };
 
 /**
@@ -24,6 +27,8 @@ export function ItemGrid({
   isFetchingNextPage,
   onLoadMore,
   onRetry,
+  onOpen,
+  selectedId = null,
 }: Props) {
   if (isPending) {
     return <p className="hint">正在加载素材…</p>;
@@ -56,7 +61,7 @@ export function ItemGrid({
       <ul className="grid">
         {items.map((item) => (
           <li key={item.id} className="grid-cell">
-            <ItemCard item={item} />
+            <ItemCard item={item} onOpen={onOpen} selected={item.id === selectedId} />
           </li>
         ))}
       </ul>

@@ -7,9 +7,10 @@ test("shows the version and only the shortcuts that actually work", () => {
   expect(screen.getByText("本地索引已就绪")).toBeInTheDocument();
   expect(screen.getByText("v0.1.0")).toBeInTheDocument();
   expect(screen.getByText("T")).toBeInTheDocument();
+  expect(screen.getByText("B")).toBeInTheDocument();
 
-  // T7 之前键盘绑定不存在，状态栏不能提示按了没反应的键。
-  for (const hint of ["Enter", "Ctrl", "B", "↑"]) {
+  // Ctrl K 属阶段 03，↑↓ / Enter 未实现：状态栏不能提示按了没反应的键。
+  for (const hint of ["Enter", "Ctrl", "↑"]) {
     expect(screen.queryByText(hint)).not.toBeInTheDocument();
   }
 });

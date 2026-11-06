@@ -7,8 +7,8 @@ type Props = {
 
 /**
  * 状态栏：左侧库状态，右侧只列**已实现**的快捷键。
- * 原型里的 `↑↓ / Enter / Ctrl K / B` 分别属于 T7、T6 与阶段 03，未实现前不出现，
- * 避免出现按了没反应的假提示。
+ * 原型里的 `↑↓ / Enter` 属 T7 的列表导航（本轮未做），`Ctrl K` 属阶段 03 搜索，
+ * 两者都不出现，避免给出按了没反应的提示。
  */
 export function StatusBar({ status, version }: Props) {
   return (
@@ -19,6 +19,9 @@ export function StatusBar({ status, version }: Props) {
       </div>
       <div className="status-right">
         {version !== null && <span>v{version}</span>}
+        <span>
+          <kbd>B</kbd> 侧栏
+        </span>
         <span>
           <kbd>T</kbd> 主题
         </span>

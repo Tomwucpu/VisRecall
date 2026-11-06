@@ -15,6 +15,8 @@ type Props = {
   status: string;
   /** 已加载素材数；`null` 表示列表尚未就绪。 */
   itemCount: number | null;
+  /** 打开设置弹窗（T5）。 */
+  onOpenSettings: () => void;
 };
 
 type WindowAction = "minimize" | "toggleMaximize" | "close";
@@ -28,7 +30,7 @@ async function runWindowAction(action: WindowAction): Promise<void> {
   }
 }
 
-export function TitleBar({ status, itemCount }: Props) {
+export function TitleBar({ status, itemCount, onOpenSettings }: Props) {
   const { theme, toggle } = useTheme();
   const countText = itemCount === null ? "素材读取中" : `${itemCount} 条素材`;
 
@@ -92,6 +94,29 @@ export function TitleBar({ status, itemCount }: Props) {
               <path d="M20 14.5A8.5 8.5 0 019.5 4a8.5 8.5 0 1010.5 10.5z" strokeLinejoin="round" />
             </svg>
           )}
+        </button>
+
+        <button
+          type="button"
+          className="icon-btn"
+          onClick={onOpenSettings}
+          title="设置"
+          aria-label="设置"
+        >
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+          >
+            <path d="M4 7h10M18 7h2M4 12h4M12 12h8M4 17h9M17 17h3" />
+            <circle cx="16" cy="7" r="1.6" />
+            <circle cx="10" cy="12" r="1.6" />
+            <circle cx="15" cy="17" r="1.6" />
+          </svg>
         </button>
 
         <div className="win-controls">
