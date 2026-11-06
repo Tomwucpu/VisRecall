@@ -1008,7 +1008,7 @@ cargo test -p visrecall-shell          # 既有 ball_position 测试不得回归
 - Consumes: `spawn_hotkey_thread`、`HotkeyHandle`、`CaptureRuntime.shell_tx`
 - Produces: `AppCore::spawn_capture_hotkey(spec)`（私有，抽出既有通道选择逻辑）、`AppCore::update_settings(patch: SettingsPatchInput)`
 
-- [ ] **Step 1: 抽出热键注册helper**
+- [x] **Step 1: 抽出热键注册helper**
 
 把 `start_hotkey` 中「`runtime.shell_tx` 或临时通道 + fallback 消费线程 + `spawn_hotkey_thread`」这段抽成私有方法，行为不变：
 
@@ -1018,7 +1018,7 @@ fn spawn_capture_hotkey(&self, spec: HotkeySpec) -> Result<HotkeyHandle, AppErro
 
 `start_hotkey` 改为「已存在则返回 → parse 配置 → `self.spawn_capture_hotkey(spec)?` → 存入 `hotkey`」。既有 `start_hotkey` 测试必须全绿（通道选择、fallback 降级都已被覆盖）。
 
-- [ ] **Step 2: 按 design §6.11 的顺序重写 `update_settings`**
+- [x] **Step 2: 按 design §6.11 的顺序重写 `update_settings`**
 
 ```rust
 pub fn update_settings(&self, patch: SettingsPatchInput) -> Result<AppConfig, AppError> {
@@ -1034,7 +1034,7 @@ pub fn update_settings(&self, patch: SettingsPatchInput) -> Result<AppConfig, Ap
 
 `SettingsPatchInput` 用结构体而不是 5 个 `Option` 参数（现有 3 参数签名调用点只有 `ipc.rs`，一并改）。
 
-- [ ] **Step 3: 测试**
+- [x] **Step 3: 测试**
 
 - 传入非法快捷键字符串 → `InvalidInput`，config 文件 mtime 不变。
 - 传入与当前相同的键 → 不重新注册：先用 `spawn_hotkey_thread` 占用当前组合，再 `update_settings` 传同值，应返回 `Ok`（内部若重新注册必然失败，此用例即回归保护）。

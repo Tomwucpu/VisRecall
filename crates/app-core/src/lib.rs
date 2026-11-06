@@ -9,7 +9,7 @@ pub mod events;
 pub mod import_flow;
 pub mod thumbnail;
 
-pub use app::AppCore;
+pub use app::{AppCore, SettingsPatchInput};
 pub use capture_flow::{
     persist_capture, CaptureCoordinator, NoopWindowVisibility, OverlayPresenter, WindowVisibility,
     MIN_FREE_BYTES,

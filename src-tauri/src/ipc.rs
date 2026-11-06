@@ -837,13 +837,13 @@ pub async fn update_settings(
 ) -> Result<SettingsDto, ApiError> {
     run_blocking(app, move |core| {
         let config = core
-            .update_settings(
-                patch.ball_enabled,
-                patch.ball_size,
-                patch.capture_hotkey,
-                patch.ball_edge_hide,
-                patch.hide_in_fullscreen,
-            )
+            .update_settings(visrecall_app_core::SettingsPatchInput {
+                ball_enabled: patch.ball_enabled,
+                ball_size: patch.ball_size,
+                capture_hotkey: patch.capture_hotkey,
+                ball_edge_hide: patch.ball_edge_hide,
+                hide_in_fullscreen: patch.hide_in_fullscreen,
+            })
             .map_err(|err| ApiError::from(&err))?;
         Ok(SettingsDto::from_config(&config, core.library().ok()))
     })

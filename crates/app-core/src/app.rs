@@ -21,7 +21,7 @@ use visrecall_domain::{now_millis, AppError, ItemKind};
 use visrecall_library::paths::AppPaths;
 use visrecall_library::{AppConfig, Library};
 use visrecall_shell::ball::{
-    spawn_ball_thread, BallConfig, BallHandle, MAX_BALL_SIZE, MIN_BALL_SIZE,
+    spawn_ball_thread, BallConfig, BallHandle, BallSettings, BALL_SIZE_OPTIONS,
 };
 use visrecall_shell::hotkey::{spawn_hotkey_thread, HotkeyHandle, HotkeySpec};
 use visrecall_shell::overlay::{spawn_overlay_thread, OverlayHandle};
@@ -36,6 +36,19 @@ use crate::events::{
     ItemsPrunedEvent,
 };
 use crate::import_flow::ImportFlow;
+
+/// 设置补丁：`None` 表示「不改这个字段」。
+///
+/// 用结构体而不是 5 个 `Option` 参数：调用点只有一处（`ipc.rs`），但字段会继续增加
+/// （阶段 03 的模型配置），逐个位置参数化会让调用方难以看出漏了哪个字段。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SettingsPatchInput {
+    pub ball_enabled: Option<bool>,
+    pub ball_size: Option<u32>,
+    pub capture_hotkey: Option<String>,
+    pub ball_edge_hide: Option<bool>,
+    pub hide_in_fullscreen: Option<bool>,
+}
 
 /// Tauri 托管的应用状态。
 pub struct AppCore {
@@ -321,15 +334,7 @@ impl AppCore {
             }
         };
 
-        let (fallback_tx, fallback_rx) = crossbeam_channel::unbounded();
-        let runtime_tx = self
-            .lock_runtime()
-            .as_ref()
-            .map(|runtime| runtime.shell_tx.clone());
-        let uses_runtime = runtime_tx.is_some();
-        let tx = runtime_tx.unwrap_or(fallback_tx);
-
-        let handle = match spawn_hotkey_thread(spec, tx) {
+        let handle = match self.spawn_capture_hotkey(spec) {
             Ok(handle) => handle,
             Err(err) => {
                 tracing::error!(hotkey = %spec, error = %err, "failed to register capture hotkey");
@@ -338,12 +343,29 @@ impl AppCore {
             }
         };
 
-        if !uses_runtime {
-            self.spawn_shell_event_consumer(spec, fallback_rx);
-        }
         *self.lock_hotkey() = Some(handle);
         tracing::info!(hotkey = %spec, "capture hotkey started");
         Ok(())
+    }
+
+    /// 注册一个热键线程：有捕获运行时就走它的通道，否则建临时通道 + 降级消费者。
+    ///
+    /// 启动与热重载共用这一条路径——两处各写一遍必然漂移（例如热重载忘了挂
+    /// `CAPTURE_UNAVAILABLE` 消费者，用户就会看到「按了键没反应」）。
+    fn spawn_capture_hotkey(&self, spec: HotkeySpec) -> Result<HotkeyHandle, AppError> {
+        let (fallback_tx, fallback_rx) = crossbeam_channel::unbounded();
+        let runtime_tx = self
+            .lock_runtime()
+            .as_ref()
+            .map(|runtime| runtime.shell_tx.clone());
+        let uses_runtime = runtime_tx.is_some();
+        let tx = runtime_tx.unwrap_or(fallback_tx);
+
+        let handle = spawn_hotkey_thread(spec, tx)?;
+        if !uses_runtime {
+            self.spawn_shell_event_consumer(spec, fallback_rx);
+        }
+        Ok(handle)
     }
 
     /// 未启动运行时（例如库打不开）的临时消费者：不触发捕获，但把
@@ -402,72 +424,6 @@ impl AppCore {
             .emit(AppEvent::HotkeyConflict(HotkeyConflictEvent {
                 message: err.to_string(),
             }));
-    }
-
-    /// 应用设置补丁：先写盘再更新内存，避免写失败后内存与磁盘不一致。
-    ///
-    /// 阶段 01 不支持快捷键热重载：`capture_hotkey` 与当前值不同时整体拒绝
-    /// （不保存任何字段，保留旧值）。`ball_enabled` 会立即同步到悬浮球线程；
-    /// `ball_size` 必须在壳层支持的 `16..=256` 内，越界整体拒绝（不落盘）；
-    /// 范围内的变更需要重启才能生效（阶段 01 不重建窗口）。
-    pub fn update_settings(
-        &self,
-        ball_enabled: Option<bool>,
-        ball_size: Option<u32>,
-        capture_hotkey: Option<String>,
-        ball_edge_hide: Option<bool>,
-        hide_in_fullscreen: Option<bool>,
-    ) -> Result<AppConfig, AppError> {
-        let mut guard = self.lock_config();
-
-        if let Some(hotkey) = capture_hotkey.as_deref() {
-            if hotkey != guard.hotkeys.capture {
-                return Err(AppError::InvalidInput("restart required".into()));
-            }
-        }
-        if let Some(size) = ball_size {
-            // 与壳层的夹取范围一致：越界时宁可拒绝，也不要「存下来但显示不同」。
-            if !(MIN_BALL_SIZE..=MAX_BALL_SIZE).contains(&size) {
-                return Err(AppError::InvalidInput(format!(
-                    "ball size must be between {MIN_BALL_SIZE} and {MAX_BALL_SIZE}"
-                )));
-            }
-        }
-
-        let mut next = guard.clone();
-        if let Some(enabled) = ball_enabled {
-            next.ball.enabled = enabled;
-        }
-        if let Some(size) = ball_size {
-            next.ball.size = size;
-        }
-        if let Some(edge_hide) = ball_edge_hide {
-            next.ball.edge_hide = edge_hide;
-        }
-        if let Some(hide) = hide_in_fullscreen {
-            next.ball.hide_in_fullscreen = hide;
-        }
-
-        let changed_visibility = ball_enabled.is_some() && next.ball.enabled != guard.ball.enabled;
-        let changed_size = next.ball.size != guard.ball.size;
-
-        next.save_atomic(&self.paths.config_file)?;
-        *guard = next.clone();
-        // 先释放配置锁再碰悬浮球线程，避免两把锁的持有顺序与捕获循环相反。
-        drop(guard);
-
-        if changed_visibility {
-            self.apply_ball_visibility(next.ball.enabled);
-        }
-        if changed_size {
-            tracing::warn!(
-                size = next.ball.size,
-                "floating ball size change requires a restart (phase 01 does not rebuild it)"
-            );
-        }
-
-        tracing::info!(config = %self.paths.config_file.display(), "settings saved");
-        Ok(next)
     }
 
     /// 全库清空要求的确认词；判断在 Rust 侧，前端不得硬编码。
@@ -666,6 +622,121 @@ impl AppCore {
     /// `false`——没有迁移入口，也就不存在待重启状态。
     pub fn restart_required(&self) -> bool {
         false
+    }
+
+    /// 应用设置补丁（design §6.11 的顺序即正确性）。
+    ///
+    /// 1. 先校验（尺寸三档、快捷键 parse）——不落盘、不改内存；
+    /// 2. 若换键：**先起新线程**（注册失败 → `INVALID_INPUT`，旧句柄仍有效）；
+    /// 3. 落盘（失败 → 停掉新线程，返回 IO，内存不变）；
+    /// 4. 更新内存配置；
+    /// 5. 换键成功才停旧线程并存入新句柄，同时发 `HotkeyRestored` 清托盘冲突提示；
+    /// 6. 悬浮球：可见性、尺寸、贴边/全屏开关立即生效。
+    pub fn update_settings(&self, patch: SettingsPatchInput) -> Result<AppConfig, AppError> {
+        // 1. 校验
+        let new_spec = match patch.capture_hotkey.as_deref() {
+            Some(text) => Some(HotkeySpec::parse(text)?),
+            None => None,
+        };
+        if let Some(size) = patch.ball_size {
+            if !BALL_SIZE_OPTIONS.contains(&size) {
+                return Err(AppError::InvalidInput(format!(
+                    "ball size must be one of {BALL_SIZE_OPTIONS:?}"
+                )));
+            }
+        }
+
+        // 2. 换键：先起新线程。已有线程时两个不同组合键可以同时注册，
+        //    因此这一步不会与旧线程冲突；反序会在注册失败瞬间丢掉唯一可用的快捷键。
+        let current_spec = self.lock_hotkey().as_ref().map(|handle| handle.spec());
+        let mut pending_hotkey = None;
+        if let (Some(spec), Some(current)) = (new_spec.as_ref(), current_spec.as_ref()) {
+            if spec != current {
+                pending_hotkey = Some(self.spawn_capture_hotkey(*spec)?);
+            }
+        }
+
+        // 3. 落盘：失败要把已经注册的新线程停掉，否则会留下一个「配置文件里没有」的热键。
+        let mut next = {
+            let guard = self.lock_config();
+            let mut next = guard.clone();
+            if let Some(enabled) = patch.ball_enabled {
+                next.ball.enabled = enabled;
+            }
+            if let Some(size) = patch.ball_size {
+                next.ball.size = size;
+            }
+            if let Some(edge_hide) = patch.ball_edge_hide {
+                next.ball.edge_hide = edge_hide;
+            }
+            if let Some(hide) = patch.hide_in_fullscreen {
+                next.ball.hide_in_fullscreen = hide;
+            }
+            if new_spec.is_some() {
+                // 用规范化后的写法落盘，避免 "ctrl+shift+s" 与 "Ctrl+Shift+S" 交替出现。
+                next.hotkeys.capture = new_spec
+                    .as_ref()
+                    .map(HotkeySpec::format)
+                    .unwrap_or_else(|| guard.hotkeys.capture.clone());
+            }
+
+            if let Err(err) = next.save_atomic(&self.paths.config_file) {
+                drop(pending_hotkey);
+                return Err(err);
+            }
+            next
+        };
+
+        // 4. 更新内存（配置锁只在这段持有）
+        let previous = {
+            let mut guard = self.lock_config();
+            let previous = guard.clone();
+            *guard = next.clone();
+            previous
+        };
+
+        // 5. 换键：停旧线程、存新句柄。配置锁已释放，避免与捕获循环的落盘形成反向持锁。
+        if let Some(handle) = pending_hotkey {
+            let old = self.lock_hotkey().replace(handle);
+            drop(old);
+            self.sink.emit(AppEvent::HotkeyRestored);
+            tracing::info!(hotkey = %next.hotkeys.capture, "capture hotkey reloaded");
+        }
+
+        // 6. 悬浮球：可见性、尺寸与显示开关都立即生效
+        if next.ball.enabled != previous.ball.enabled {
+            self.apply_ball_visibility(next.ball.enabled);
+        }
+        let ball_changed = next.ball.size != previous.ball.size
+            || next.ball.edge_hide != previous.ball.edge_hide
+            || next.ball.hide_in_fullscreen != previous.ball.hide_in_fullscreen;
+        if ball_changed {
+            let settings = BallSettings {
+                size: next.ball.size,
+                edge_hide: next.ball.edge_hide,
+                hide_in_fullscreen: next.ball.hide_in_fullscreen,
+            };
+            if let Some(ball) = self.lock_ball().as_ref() {
+                ball.apply_settings(settings);
+            }
+        }
+
+        tracing::info!(config = %self.paths.config_file.display(), "settings saved");
+        // `next` 在这里已经被克隆进内存；返回值用于命令层回填前端缓存。
+        next = self.config();
+        Ok(next)
+    }
+
+    /// 测试/诊断：当前热键线程的组合键。
+    #[doc(hidden)]
+    pub fn hotkey_spec_for_test(&self) -> Option<HotkeySpec> {
+        self.lock_hotkey().as_ref().map(|handle| handle.spec())
+    }
+
+    /// 测试/诊断：悬浮球句柄是否在位（迁移后必须恢复）。
+    #[doc(hidden)]
+    pub fn ball_present_for_test(&self) -> bool {
+        self.lock_ball().is_some()
     }
 
     fn lock_config(&self) -> MutexGuard<'_, AppConfig> {
@@ -1039,33 +1110,40 @@ mod tests {
         let (core, _sink) = open(dir.path());
 
         let updated = core
-            .update_settings(Some(false), Some(64), None, None, None)
+            .update_settings(SettingsPatchInput {
+                ball_enabled: Some(false),
+                ball_size: Some(56),
+                ..SettingsPatchInput::default()
+            })
             .unwrap();
         assert!(!updated.ball.enabled);
-        assert_eq!(updated.ball.size, 64);
+        assert_eq!(updated.ball.size, 56);
 
         let reloaded = AppConfig::load_or_default(&core.paths().config_file);
         assert!(!reloaded.ball.enabled);
-        assert_eq!(reloaded.ball.size, 64);
+        assert_eq!(reloaded.ball.size, 56);
     }
 
+    /// 热键线程未启动时（库不可用/未 start_hotkey）改键只写配置，等下次 `start_hotkey` 生效。
     #[test]
-    fn update_settings_rejects_hotkey_change_without_saving() {
+    fn update_settings_persists_hotkey_when_no_thread_is_running() {
         let dir = tempfile::tempdir().unwrap();
         let (core, _sink) = open(dir.path());
-        let before = core.config();
+        assert!(core.hotkey_spec_for_test().is_none());
 
-        let err = core
-            .update_settings(Some(false), Some(64), Some("Ctrl+Alt+X".into()), None, None)
-            .unwrap_err();
-        assert!(matches!(err, AppError::InvalidInput(_)));
-        assert_eq!(err.to_string(), "invalid input: restart required");
+        let updated = core
+            .update_settings(SettingsPatchInput {
+                ball_enabled: Some(false),
+                ball_size: Some(56),
+                capture_hotkey: Some("Ctrl+Alt+X".into()),
+                ..SettingsPatchInput::default()
+            })
+            .unwrap();
+        assert_eq!(updated.hotkeys.capture, "Ctrl+Alt+X");
+        assert!(!updated.ball.enabled);
 
-        // 整个补丁被拒绝：球的字段也没有写入。
-        let after = core.config();
-        assert_eq!(after.ball, before.ball);
         let reloaded = AppConfig::load_or_default(&core.paths().config_file);
-        assert_eq!(reloaded.ball, before.ball);
+        assert_eq!(reloaded.hotkeys.capture, "Ctrl+Alt+X");
     }
 
     #[test]
@@ -1075,31 +1153,33 @@ mod tests {
         let hotkey = core.config().hotkeys.capture;
 
         let updated = core
-            .update_settings(Some(true), Some(56), Some(hotkey), None, None)
+            .update_settings(SettingsPatchInput {
+                ball_enabled: Some(true),
+                ball_size: Some(56),
+                capture_hotkey: Some(hotkey),
+                ..SettingsPatchInput::default()
+            })
             .unwrap();
         assert_eq!(updated.ball.size, 56);
     }
 
-    /// Task 15 fix：`ball_size` 必须在壳层支持的 `16..=256` 内，越界整体拒绝且不落盘。
+    /// `ball_size` 只接受三档（P2-R10）；其他值整体拒绝且不落盘。
     #[test]
-    fn update_settings_rejects_out_of_range_ball_size() {
+    fn update_settings_rejects_unsupported_ball_size() {
         let dir = tempfile::tempdir().unwrap();
         let (core, _sink) = open(dir.path());
         let before = core.config();
 
-        for size in [0, 1, MIN_BALL_SIZE - 1, MAX_BALL_SIZE + 1, 4096] {
+        for size in [0, 1, 16, 41, 256, 4096] {
             let err = core
-                .update_settings(None, Some(size), None, None, None)
+                .update_settings(SettingsPatchInput {
+                    ball_size: Some(size),
+                    ..SettingsPatchInput::default()
+                })
                 .unwrap_err();
             assert!(
                 matches!(err, AppError::InvalidInput(_)),
                 "size {size} should be rejected, got {err:?}"
-            );
-            assert_eq!(
-                err.to_string(),
-                format!(
-                    "invalid input: ball size must be between {MIN_BALL_SIZE} and {MAX_BALL_SIZE}"
-                )
             );
         }
 
@@ -1108,15 +1188,16 @@ mod tests {
         let reloaded = AppConfig::load_or_default(&core.paths().config_file);
         assert_eq!(reloaded.ball.size, before.ball.size);
 
-        // 边界值可用。
-        let updated = core
-            .update_settings(None, Some(MIN_BALL_SIZE), None, None, None)
-            .unwrap();
-        assert_eq!(updated.ball.size, MIN_BALL_SIZE);
-        let updated = core
-            .update_settings(None, Some(MAX_BALL_SIZE), None, None, None)
-            .unwrap();
-        assert_eq!(updated.ball.size, MAX_BALL_SIZE);
+        // 三档都可用。
+        for size in BALL_SIZE_OPTIONS {
+            let updated = core
+                .update_settings(SettingsPatchInput {
+                    ball_size: Some(size),
+                    ..SettingsPatchInput::default()
+                })
+                .unwrap();
+            assert_eq!(updated.ball.size, size);
+        }
     }
 
     /// 记录调用次数的假主窗口可见性实现。
@@ -1191,13 +1272,19 @@ mod tests {
         let (core, _sink) = open(dir.path());
         assert!(core.ball_enabled());
 
-        core.update_settings(Some(false), None, None, None, None)
-            .unwrap();
+        core.update_settings(SettingsPatchInput {
+            ball_enabled: Some(false),
+            ..SettingsPatchInput::default()
+        })
+        .unwrap();
         assert!(!core.ball_enabled());
         assert!(!core.config().ball.enabled);
 
-        core.update_settings(Some(true), None, None, None, None)
-            .unwrap();
+        core.update_settings(SettingsPatchInput {
+            ball_enabled: Some(true),
+            ..SettingsPatchInput::default()
+        })
+        .unwrap();
         assert!(core.ball_enabled());
     }
 
