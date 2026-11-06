@@ -904,12 +904,12 @@ pnpm test -- src/features/shell && pnpm typecheck
 - Consumes: `api.getSettings`、`commands.updateSettings`、`api.setCapacity`、`api.setRetention`、`api.getRetentionPreview`、`api.applyRetention`、`api.getPurgePreview`、`api.purgeLibrary`、`api.getOrphans`、`api.cleanupOrphans`、`api.relocateStorage`
 - Produces: 所有设置项可写
 
-- [ ] **Step 1: 捕获 pane**
+- [x] **Step 1: 捕获 pane**
 
 快捷键改为「修改」按钮 → 输入态捕获组合键（`keydown` 拼 `Ctrl/Alt/Shift/Meta + Key`）→ 调 `updateSettings({ captureHotkey })`；`INVALID_INPUT` 时在行内显示后端 message，保持输入态。
 悬浮球三档按钮与开关启用，改动立即 `updateSettings`；失败 Toast 并回滚选中态。新增两个开关：贴边收起、全屏隐藏。
 
-- [ ] **Step 2: 存储 pane**
+- [x] **Step 2: 存储 pane**
 
 容量输入框（数字，1–4096）失焦提交；保留策略分段控件选天数后先 `getRetentionPreview(days)`，弹确认「将移除 X 条 / 释放 Y」，确认后 `setRetention`；「立即清理」调 `applyRetention` 并展示 `deleted/failed`。
 「更换」需要目录选择：**用 Rust 侧 `tauri-plugin-dialog`（`DialogExt::file().pick_folder()`）暴露一条 `pick_directory() -> Option<String>` 命令**，而不是前端直调插件——这样不必新增前端依赖与 capability 权限，路径也保持「只在 Rust 侧流转」的既有约定（与 `open_library_folder` 一致）。选择后调 `relocateStorage(path)`，进度用 `listen("storage_migration_progress")` 驱动进度条，成功后展示「已迁移到 X，重启后生效」。
@@ -921,7 +921,7 @@ pnpm test -- src/features/shell && pnpm typecheck
 请勿单独删除或移动；原图与文本位于 originals/ 与 texts/，可直接用系统工具查看。
 ```
 
-- [ ] **Step 3: 测试**
+- [x] **Step 3: 测试**
 
 - 改快捷键成功后调用 `updateSettings` 且显示新键。
 - 后端返回 `INVALID_INPUT` 时显示错误文案、不改显示值。

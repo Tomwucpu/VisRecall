@@ -10,9 +10,9 @@ export const commands = {
 	openLibraryFolder: () => __TAURI_INVOKE<null>("open_library_folder"),
 	listItems: (cursor: number | null, limit: number) => __TAURI_INVOKE<ItemDto_Serialize[]>("list_items", { cursor, limit }),
 	getItem: (id: string) => __TAURI_INVOKE<ItemDto_Serialize>("get_item", { id }),
-	/**  只读内存配置：命令在主线程执行，但不碰磁盘。 */
-	getSettings: () => __TAURI_INVOKE<SettingsDto>("get_settings"),
-	updateSettings: (patch: SettingsPatch_Deserialize) => __TAURI_INVOKE<SettingsDto>("update_settings", { patch }),
+	/**  读取设置：内存配置 + 库内策略（后者要读 SQLite，因此放到阻塞线程）。 */
+	getSettings: () => __TAURI_INVOKE<SettingsDto_Serialize>("get_settings"),
+	updateSettings: (patch: SettingsPatch_Deserialize) => __TAURI_INVOKE<SettingsDto_Serialize>("update_settings", { patch }),
 	getItemExt: (id: string) => __TAURI_INVOKE<ItemDetailDto_Serialize>("get_item_ext", { id }),
 	noteSet: (id: string, text: string) => __TAURI_INVOKE<null>("note_set", { id, text }),
 	tagsList: () => __TAURI_INVOKE<TagChipDto_Serialize[]>("tags_list"),
@@ -42,6 +42,13 @@ export const commands = {
 	storageRelocate: (path: string) => __TAURI_INVOKE<RelocateResultDto>("storage_relocate", { path }),
 	/**  立即重启进程；只应在 `restartRequired = true` 时由横幅按钮调用。 */
 	restartApp: () => __TAURI_INVOKE<null>("restart_app"),
+	/**
+	 *  目录选择器：由 Rust 侧调用 dialog 插件，前端只拿到路径字符串。
+	 * 
+	 *  这样不必给前端开放文件系统权限或新增 capability——与 `open_library_folder`
+	 *  的「路径只在 Rust 侧流转」约定一致。用户取消返回 `None`。
+	 */
+	pickDirectory: () => __TAURI_INVOKE<string | null>("pick_directory"),
 };
 
 /* Types */
@@ -166,11 +173,36 @@ export type RetentionPreviewDto = {
 	bytes: number,
 };
 
-export type SettingsDto = {
+export type SettingsDto = SettingsDto_Serialize | SettingsDto_Deserialize;
+
+export type SettingsDto_Deserialize = {
 	libraryPath: string,
 	captureHotkey: string,
 	ballEnabled: boolean,
 	ballSize: number,
+	/**  贴边收起开关。 */
+	ballEdgeHide: boolean,
+	/**  全屏自动隐藏开关。 */
+	hideInFullscreen: boolean,
+	/**  库里保存的容量（GiB）；库不可用时为默认值。 */
+	capacityGb: number,
+	/**  库里保存的保留天数；`null` 为永久保留。 */
+	retentionDays?: number | null,
+};
+
+export type SettingsDto_Serialize = {
+	libraryPath: string,
+	captureHotkey: string,
+	ballEnabled: boolean,
+	ballSize: number,
+	/**  贴边收起开关。 */
+	ballEdgeHide: boolean,
+	/**  全屏自动隐藏开关。 */
+	hideInFullscreen: boolean,
+	/**  库里保存的容量（GiB）；库不可用时为默认值。 */
+	capacityGb: number,
+	/**  库里保存的保留天数；`null` 为永久保留。 */
+	retentionDays: number | null,
 };
 
 export type SettingsPatch = SettingsPatch_Serialize | SettingsPatch_Deserialize;
@@ -179,12 +211,20 @@ export type SettingsPatch_Deserialize = {
 	ballEnabled?: boolean | null,
 	ballSize?: number | null,
 	captureHotkey?: string | null,
+	/**  贴边收起；`None` 表示不改。 */
+	ballEdgeHide?: boolean | null,
+	/**  全屏自动隐藏；`None` 表示不改。 */
+	hideInFullscreen?: boolean | null,
 };
 
 export type SettingsPatch_Serialize = {
 	ballEnabled: boolean | null,
 	ballSize: number | null,
 	captureHotkey: string | null,
+	/**  贴边收起；`None` 表示不改。 */
+	ballEdgeHide: boolean | null,
+	/**  全屏自动隐藏；`None` 表示不改。 */
+	hideInFullscreen: boolean | null,
 };
 
 /**  存储用量快照。 */

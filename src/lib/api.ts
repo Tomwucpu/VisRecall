@@ -21,6 +21,7 @@ import {
   type RelocateResultDto,
   type RetentionPreviewDto,
   type SettingsDto,
+  type SettingsPatch,
   type StorageUsageDto,
   type TagChipDto,
 } from "./bindings";
@@ -36,6 +37,7 @@ export type {
   RelocateResultDto,
   RetentionPreviewDto,
   SettingsDto,
+  SettingsPatch,
   StorageUsageDto,
   TagChipDto,
 };
@@ -69,6 +71,13 @@ export const api = {
   openLibraryFolder: (): Promise<null> => commands.openLibraryFolder(),
 
   getSettings: (): Promise<SettingsDto> => commands.getSettings(),
+
+  /** 设置补丁：只有显式给出的字段会被修改（`null` 表示不改）。 */
+  updateSettings: (patch: SettingsPatch): Promise<SettingsDto> =>
+    commands.updateSettings(patch),
+
+  /** 目录选择器：对话框在 Rust 侧弹出，前端只拿到路径。取消返回 `null`。 */
+  pickDirectory: (): Promise<string | null> => commands.pickDirectory(),
 
   /** 详情：一次 IPC 拿到素材本体 + 原文/原图 URL + 标签。 */
   loadDetail: (id: string): Promise<ItemDetail> => commands.getItemExt(id),

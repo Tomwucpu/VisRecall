@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
-use visrecall_app_core::{AppCore, AppError, EventSink};
+use visrecall_app_core::{AppCore, AppError, EventSink, Library};
 use visrecall_domain::storage::{OrphanStats, PruneReport, RetentionPreview, StorageUsage};
 use visrecall_domain::tag::{ItemTag, TagSource};
 
@@ -127,6 +127,14 @@ pub struct SettingsDto {
     pub capture_hotkey: String,
     pub ball_enabled: bool,
     pub ball_size: u32,
+    /// 贴边收起开关。
+    pub ball_edge_hide: bool,
+    /// 全屏自动隐藏开关。
+    pub hide_in_fullscreen: bool,
+    /// 库里保存的容量（GiB）；库不可用时为默认值。
+    pub capacity_gb: u32,
+    /// 库里保存的保留天数；`null` 为永久保留。
+    pub retention_days: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, specta::Type)]
@@ -135,15 +143,33 @@ pub struct SettingsPatch {
     pub ball_enabled: Option<bool>,
     pub ball_size: Option<u32>,
     pub capture_hotkey: Option<String>,
+    /// 贴边收起；`None` 表示不改。
+    pub ball_edge_hide: Option<bool>,
+    /// 全屏自动隐藏；`None` 表示不改。
+    pub hide_in_fullscreen: Option<bool>,
 }
 
 impl SettingsDto {
-    fn from_config(config: &visrecall_app_core::AppConfig) -> SettingsDto {
+    /// 配置类字段来自 `config.json`，策略类字段（容量/保留天数）来自库内 `settings` 表
+    /// —— 后者属于「这个库」，同一条命令一起返回，设置页才不需要额外的读取命令。
+    fn from_config(
+        config: &visrecall_app_core::AppConfig,
+        library: Option<&Library>,
+    ) -> SettingsDto {
+        let capacity_gb = library
+            .map(|library| (library.capacity_bytes() / (1024 * 1024 * 1024)) as u32)
+            .unwrap_or(visrecall_domain::storage::DEFAULT_CAPACITY_GB);
+        let retention_days = library.and_then(|library| library.retention().days);
+
         SettingsDto {
             library_path: config.library_path.display().to_string(),
             capture_hotkey: config.hotkeys.capture.clone(),
             ball_enabled: config.ball.enabled,
             ball_size: config.ball.size,
+            ball_edge_hide: config.ball.edge_hide,
+            hide_in_fullscreen: config.ball.hide_in_fullscreen,
+            capacity_gb,
+            retention_days,
         }
     }
 }
@@ -610,6 +636,35 @@ pub async fn storage_relocate(
     ))
 }
 
+/// 目录选择器：由 Rust 侧调用 dialog 插件，前端只拿到路径字符串。
+///
+/// 这样不必给前端开放文件系统权限或新增 capability——与 `open_library_folder`
+/// 的「路径只在 Rust 侧流转」约定一致。用户取消返回 `None`。
+#[tauri::command]
+#[specta::specta]
+pub async fn pick_directory(app: tauri::AppHandle) -> Result<Option<String>, ApiError> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.dialog().file().pick_folder(move |folder| {
+        let _ = tx.send(folder);
+    });
+
+    // `pick_folder` 不返回「是否成功打开」，因此给等待加一个上限：对话框若因
+    // 平台原因没有起来，回调永远不会到达，不能让 blocking 线程永久挂住。
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        rx.recv_timeout(std::time::Duration::from_secs(600))
+            .ok()
+            .flatten()
+    })
+    .await
+    .map_err(|err| ApiError::new("INTERNAL", format!("blocking task failed: {err}")))?;
+
+    Ok(picked
+        .and_then(|path| path.into_path().ok())
+        .map(|path| path.display().to_string()))
+}
+
 /// 立即重启进程；只应在 `restartRequired = true` 时由横幅按钮调用。
 #[tauri::command]
 #[specta::specta]
@@ -646,7 +701,8 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             storage_orphans_get,
             storage_orphans_cleanup,
             storage_relocate,
-            restart_app
+            restart_app,
+            pick_directory
         ])
         // 前端用 try/catch 处理 `ApiError`，而不是每处解包 `{ status }`。
         .error_handling(tauri_specta::ErrorHandlingMode::Throw)
@@ -760,11 +816,14 @@ pub async fn get_item(app: tauri::AppHandle, id: String) -> Result<ItemDto, ApiE
     .await
 }
 
-/// 只读内存配置：命令在主线程执行，但不碰磁盘。
+/// 读取设置：内存配置 + 库内策略（后者要读 SQLite，因此放到阻塞线程）。
 #[tauri::command]
 #[specta::specta]
-pub fn get_settings(core: tauri::State<'_, AppCore>) -> SettingsDto {
-    SettingsDto::from_config(&core.config())
+pub async fn get_settings(app: tauri::AppHandle) -> Result<SettingsDto, ApiError> {
+    run_blocking(app, move |core| {
+        Ok(SettingsDto::from_config(&core.config(), core.library().ok()))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -775,9 +834,15 @@ pub async fn update_settings(
 ) -> Result<SettingsDto, ApiError> {
     run_blocking(app, move |core| {
         let config = core
-            .update_settings(patch.ball_enabled, patch.ball_size, patch.capture_hotkey)
+            .update_settings(
+                patch.ball_enabled,
+                patch.ball_size,
+                patch.capture_hotkey,
+                patch.ball_edge_hide,
+                patch.hide_in_fullscreen,
+            )
             .map_err(|err| ApiError::from(&err))?;
-        Ok(SettingsDto::from_config(&config))
+        Ok(SettingsDto::from_config(&config, core.library().ok()))
     })
     .await
 }

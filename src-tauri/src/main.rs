@@ -38,6 +38,8 @@ fn main() {
             window_lifecycle::show_main_window(app);
         }))
         .plugin(tauri_plugin_opener::init())
+        // 目录选择器只在 Rust 侧使用（`pick_directory`），不向前端暴露插件能力。
+        .plugin(tauri_plugin_dialog::init())
         // 缩略图资源协议（design §11.3）：Windows 上实际地址为
         // `http://visrecall.localhost/thumb/<id>`，只服务 `thumbs/` 下的文件。
         .register_uri_scheme_protocol(protocol::SCHEME, protocol::handler)

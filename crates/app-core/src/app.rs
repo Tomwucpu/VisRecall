@@ -413,6 +413,8 @@ impl AppCore {
         ball_enabled: Option<bool>,
         ball_size: Option<u32>,
         capture_hotkey: Option<String>,
+        ball_edge_hide: Option<bool>,
+        hide_in_fullscreen: Option<bool>,
     ) -> Result<AppConfig, AppError> {
         let mut guard = self.lock_config();
 
@@ -436,6 +438,12 @@ impl AppCore {
         }
         if let Some(size) = ball_size {
             next.ball.size = size;
+        }
+        if let Some(edge_hide) = ball_edge_hide {
+            next.ball.edge_hide = edge_hide;
+        }
+        if let Some(hide) = hide_in_fullscreen {
+            next.ball.hide_in_fullscreen = hide;
         }
 
         let changed_visibility = ball_enabled.is_some() && next.ball.enabled != guard.ball.enabled;
@@ -1028,7 +1036,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (core, _sink) = open(dir.path());
 
-        let updated = core.update_settings(Some(false), Some(64), None).unwrap();
+        let updated = core.update_settings(Some(false), Some(64), None, None, None).unwrap();
         assert!(!updated.ball.enabled);
         assert_eq!(updated.ball.size, 64);
 
@@ -1044,7 +1052,7 @@ mod tests {
         let before = core.config();
 
         let err = core
-            .update_settings(Some(false), Some(64), Some("Ctrl+Alt+X".into()))
+            .update_settings(Some(false), Some(64), Some("Ctrl+Alt+X".into()), None, None)
             .unwrap_err();
         assert!(matches!(err, AppError::InvalidInput(_)));
         assert_eq!(err.to_string(), "invalid input: restart required");
@@ -1063,7 +1071,7 @@ mod tests {
         let hotkey = core.config().hotkeys.capture;
 
         let updated = core
-            .update_settings(Some(true), Some(56), Some(hotkey))
+            .update_settings(Some(true), Some(56), Some(hotkey), None, None)
             .unwrap();
         assert_eq!(updated.ball.size, 56);
     }
@@ -1076,7 +1084,7 @@ mod tests {
         let before = core.config();
 
         for size in [0, 1, MIN_BALL_SIZE - 1, MAX_BALL_SIZE + 1, 4096] {
-            let err = core.update_settings(None, Some(size), None).unwrap_err();
+            let err = core.update_settings(None, Some(size), None, None, None).unwrap_err();
             assert!(
                 matches!(err, AppError::InvalidInput(_)),
                 "size {size} should be rejected, got {err:?}"
@@ -1096,11 +1104,11 @@ mod tests {
 
         // 边界值可用。
         let updated = core
-            .update_settings(None, Some(MIN_BALL_SIZE), None)
+            .update_settings(None, Some(MIN_BALL_SIZE), None, None, None)
             .unwrap();
         assert_eq!(updated.ball.size, MIN_BALL_SIZE);
         let updated = core
-            .update_settings(None, Some(MAX_BALL_SIZE), None)
+            .update_settings(None, Some(MAX_BALL_SIZE), None, None, None)
             .unwrap();
         assert_eq!(updated.ball.size, MAX_BALL_SIZE);
     }
@@ -1177,11 +1185,11 @@ mod tests {
         let (core, _sink) = open(dir.path());
         assert!(core.ball_enabled());
 
-        core.update_settings(Some(false), None, None).unwrap();
+        core.update_settings(Some(false), None, None, None, None).unwrap();
         assert!(!core.ball_enabled());
         assert!(!core.config().ball.enabled);
 
-        core.update_settings(Some(true), None, None).unwrap();
+        core.update_settings(Some(true), None, None, None, None).unwrap();
         assert!(core.ball_enabled());
     }
 

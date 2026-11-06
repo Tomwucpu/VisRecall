@@ -38,6 +38,12 @@ pub struct BallConfig {
     pub enabled: bool,
     pub size: u32,
     pub positions: HashMap<String, (f32, f32)>,
+    /// 贴边收起：距工作区边缘 ≤12px 松手后收成长条。
+    pub edge_hide: bool,
+    /// 全屏/演示/独占全屏时自动隐藏。
+    pub hide_in_fullscreen: bool,
+    /// 首次运行引导是否已展示过（一次性提示）。
+    pub guide_shown: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -81,6 +87,9 @@ impl Default for BallConfig {
             enabled: true,
             size: DEFAULT_BALL_SIZE,
             positions: HashMap::new(),
+            edge_hide: true,
+            hide_in_fullscreen: true,
+            guide_shown: false,
         }
     }
 }

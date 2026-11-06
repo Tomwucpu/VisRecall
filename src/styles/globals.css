@@ -1898,3 +1898,23 @@ html.theming *::after {
 
 /* 窗口 min_inner_size 已是 860×560（D-UI-1），不再需要 ≤880 的强制窄栏：
    那条规则会把侧栏压到 56px 却不加 .collapsed，文字被挤成竖排。窄屏交给用户按 B 折叠。 */
+
+/* 危险区：默认折叠，展开后才显示不可恢复操作（P2-R06）。 */
+.danger-zone {
+  margin-top: 18px;
+  padding: 10px 12px;
+  border: 1px dashed color-mix(in srgb, var(--seal) 40%, transparent);
+  border-radius: 8px;
+}
+
+.danger-zone > summary {
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: var(--seal);
+}
+
+.danger-zone[open] > summary {
+  margin-bottom: 8px;
+}
