@@ -5,6 +5,9 @@ import { EmptyState } from "../features/library/EmptyState";
 import { ItemGrid } from "../features/library/ItemGrid";
 import type { ItemCardData } from "../features/library/ItemCard";
 import { useItems } from "../features/library/useItems";
+import { Sidebar } from "../features/shell/Sidebar";
+import { StatusBar } from "../features/shell/StatusBar";
+import { TitleBar } from "../features/shell/TitleBar";
 
 type LoadState =
   | { status: "loading" }
@@ -22,9 +25,19 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** 库状态文案：标题栏与状态栏共用，保证两处不会说两套话。 */
+function statusText(state: LoadState): string {
+  if (state.status === "loading") {
+    return "正在读取库状态";
+  }
+  if (state.status === "error") {
+    return "库状态读取失败";
+  }
+  return state.app.libraryOk ? "本地索引已就绪" : "库路径不可用";
+}
+
 export default function App() {
   const [state, setState] = useState<LoadState>({ status: "loading" });
-  const [opening, setOpening] = useState(false);
   const items = useItems();
 
   const load = useCallback(async () => {
@@ -43,22 +56,6 @@ export default function App() {
   // 新素材/状态变化由后端事件触发缓存失效，列表自动刷新（StrictMode 安全）。
   useEffect(() => subscribeItemEvents(), []);
 
-  const openLibraryFolder = async () => {
-    setOpening(true);
-    try {
-      await commands.openLibraryFolder();
-    } catch (error) {
-      setState({ status: "error", message: describeError(error) });
-    } finally {
-      setOpening(false);
-    }
-  };
-
-  const refreshAll = () => {
-    void load();
-    void items.refetch();
-  };
-
   // 事件失效会整段重取；按 id 去重，避免重复键。
   const loaded = new Map<string, ItemCardData>();
   for (const page of items.data?.pages ?? []) {
@@ -68,75 +65,83 @@ export default function App() {
   }
   const list = [...loaded.values()];
 
-  const busy = items.isFetching && !items.isFetchingNextPage;
-  const countText = list.length > 0 ? `已加载 ${list.length} 条` : "";
+  const status = statusText(state);
+  const countText = items.isPending ? "读取中…" : `找到 ${list.length} 项`;
 
   return (
-    <main className="app-shell">
-      <header className="app-header">
-        <div>
-          <h1>目记 VisRecall</h1>
-          <p className="app-subtitle">捕获闭环 · 阶段 01</p>
-        </div>
-        <div className="app-actions">
-          <button type="button" disabled={opening} onClick={() => void openLibraryFolder()}>
-            {opening ? "正在打开…" : "打开库目录"}
-          </button>
-          <button type="button" onClick={refreshAll}>
-            刷新
-          </button>
-        </div>
-      </header>
+    <div className="app">
+      <TitleBar status={status} itemCount={items.isPending ? null : list.length} />
 
-      {state.status === "loading" && <p className="app-hint">正在加载应用状态…</p>}
+      <div className="workspace">
+        <Sidebar />
 
-      {state.status === "error" && (
-        <section className="app-card app-card-error" role="alert">
-          <h2>无法读取应用状态</h2>
-          <p>{state.message}</p>
-          <button type="button" onClick={() => void load()}>
-            重试
-          </button>
-        </section>
-      )}
+        <main className="main">
+          <div className="main-head">
+            <div className="crumbs">
+              <span>素材库</span>
+              <span className="sep">/</span>
+              <span className="here">全部素材</span>
+            </div>
+            <div className="result-bar">
+              <div className="result-title">
+                <h1>全部素材</h1>
+                <span className="n">{countText}</span>
+              </div>
+            </div>
+          </div>
 
-      {state.status === "ready" && (
-        <dl className="app-meta app-meta-inline">
-          <dt>版本</dt>
-          <dd>{state.app.version}</dd>
-          <dt>库路径</dt>
-          <dd title={state.app.libraryPath}>{state.app.libraryPath}</dd>
-          <dt>库状态</dt>
-          <dd className={state.app.libraryOk ? "app-ok" : "app-bad"}>
-            {state.app.libraryOk ? "正常" : "无法打开"}
-          </dd>
-        </dl>
-      )}
+          <div className="grid-scroll">
+            {state.status === "error" && (
+              <div className="alert" role="alert">
+                <span>无法读取应用状态：{state.message}</span>
+                <button type="button" className="mini-btn" onClick={() => void load()}>
+                  重试
+                </button>
+              </div>
+            )}
 
-      <section className="library">
-        <div className="library-toolbar">
-          <h2>素材</h2>
-          {countText && <span className="library-count">{countText}</span>}
-          {busy && <span className="library-refreshing">更新中…</span>}
-        </div>
+            {!items.isPending && !items.isError && list.length === 0 ? (
+              <EmptyState />
+            ) : (
+              <ItemGrid
+                items={list}
+                isPending={items.isPending}
+                isError={items.isError}
+                errorMessage={items.error ? describeError(items.error) : null}
+                hasNextPage={items.hasNextPage}
+                isFetchingNextPage={items.isFetchingNextPage}
+                onLoadMore={() => void items.fetchNextPage()}
+                onRetry={() => void items.refetch()}
+              />
+            )}
+          </div>
+        </main>
 
-        {!items.isPending && !items.isError && list.length === 0 ? (
-          <EmptyState />
-        ) : (
-          <ItemGrid
-            items={list}
-            isPending={items.isPending}
-            isError={items.isError}
-            errorMessage={items.error ? describeError(items.error) : null}
-            hasNextPage={items.hasNextPage}
-            isFetchingNextPage={items.isFetchingNextPage}
-            onLoadMore={() => void items.fetchNextPage()}
-            onRetry={() => void items.refetch()}
-          />
-        )}
-      </section>
+        {/* 详情列：T4 接入真实内容，当前只保留列与空态。 */}
+        <aside className="detail">
+          <div className="detail-head">
+            <span className="label">详情</span>
+            <span className="label">—</span>
+          </div>
+          <div className="detail-empty">
+            <div className="ring">
+              <svg
+                width="15"
+                height="15"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.4"
+              >
+                <path d="M5 12h14" strokeLinecap="round" />
+              </svg>
+            </div>
+            <span className="detail-empty-text">从中间选一条素材</span>
+          </div>
+        </aside>
+      </div>
 
-      <footer className="app-footer">关闭窗口后应用仍在托盘运行。</footer>
-    </main>
+      <StatusBar status={status} version={state.status === "ready" ? state.app.version : null} />
+    </div>
   );
 }

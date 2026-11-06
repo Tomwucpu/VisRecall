@@ -22,15 +22,15 @@ export class ErrorBoundary extends Component<Props, State> {
     }
 
     return (
-      <main className="app-shell">
-        <section className="app-card app-card-error" role="alert">
+      <div className="crash">
+        <div className="alert alert-block" role="alert">
           <h2>界面渲染失败</h2>
           <p>{error.message}</p>
-          <button type="button" onClick={() => window.location.reload()}>
+          <button type="button" className="mini-btn" onClick={() => window.location.reload()}>
             重新加载
           </button>
-        </section>
-      </main>
+        </div>
+      </div>
     );
   }
 }

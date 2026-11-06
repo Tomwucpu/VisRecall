@@ -79,10 +79,18 @@ fn show_main_window_on_main(app: &AppHandle) {
 
 fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     // 开发态由 Tauri 把 App("index.html") 解析到 devUrl，生产态解析到打包资源。
+    //
+    // 窗口形态是 D-UI-1 的一部分：主窗口由这里按需创建（`tauri.conf.json` 不声明
+    // `app.windows`，否则启动即建 WebView2，破坏「冷启动只驻留托盘」），所以
+    // `decorations/shadow/resizable` 只能落在 builder 上，改配置不生效。
+    // 自绘标题栏需要无系统边框；阴影与缩放保留；Win10 无系统圆角，方角观感已接受。
     WebviewWindowBuilder::new(app, MAIN_LABEL, WebviewUrl::App("index.html".into()))
         .title(MAIN_TITLE)
         .inner_size(MAIN_WIDTH, MAIN_HEIGHT)
         .min_inner_size(MAIN_MIN_WIDTH, MAIN_MIN_HEIGHT)
+        .decorations(false)
+        .shadow(true)
+        .resizable(true)
         .center()
         .build()
 }

@@ -1,0 +1,125 @@
+/*
+ * 设计令牌（唯一真源）：逐项对齐 docs/prototype/index.html 的 `:root` / `[data-theme="dark"]`。
+ *
+ * 主题解析规则（D-UI-2）：
+ *   1. 未设置 `data-theme` 时由 CSS 自身跟随系统 `prefers-color-scheme`，
+ *      首帧即为正确配色，不会出现「先亮后暗」的闪烁；
+ *   2. JS 启动后把解析结果写到 `data-theme`，显式选择优先于系统；
+ *   3. 选择「跟随系统」时移除 `data-theme`，回到规则 1。
+ *
+ * 字体（D-UI-3）：全部为系统字体栈回退，不打包 woff2，缺失的字族自动跳到下一个。
+ */
+
+:root {
+  /* 排版 */
+  --sans: "Inter", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+  --mono: "JetBrains Mono", "SF Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+
+  /* 明色主题（默认） */
+  --bg: #eceae4;
+  --frame: #fbfbf8;
+  --surface: #ffffff;
+  --surface-2: #f5f5f0;
+  --surface-3: #edede7;
+  --ink: #151514;
+  --ink-2: #5c5c56;
+  --ink-3: #93938b;
+  --line: rgba(21, 21, 20, 0.085);
+  --line-2: rgba(21, 21, 20, 0.17);
+  --hover: rgba(21, 21, 20, 0.045);
+  --active: rgba(21, 21, 20, 0.08);
+  --thumb: #efeee8;
+  --elevated: #ffffff;
+  --inv-bg: #151514;
+  --inv-ink: #fbfbf8;
+  --shadow-app: 0 30px 80px -40px rgba(21, 21, 20, 0.35), 0 2px 6px rgba(21, 21, 20, 0.05);
+  --shadow-md: 0 14px 40px -22px rgba(21, 21, 20, 0.35);
+  --shadow-lg: 0 30px 70px -30px rgba(21, 21, 20, 0.45);
+  --radius: 10px;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  /* 水墨点缀色：低饱和，仅用于极小面积 */
+  --seal: #a84236;
+  --hue-ochre: #a9702f;
+  --hue-slate: #4d6d85;
+  --hue-jade: #4d6b5b;
+  --hue-ash: #8a8a84;
+  --hue-indigo: #46506b;
+  --hue-plum: #665470;
+  --hue-paper: #a9a69c;
+
+  color-scheme: light;
+}
+
+/* 未显式选「亮色」时跟随系统（含 JS 尚未执行的窗口首帧）。 */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f0f0f;
+    --frame: #161616;
+    --surface: #2b2b2b;
+    --surface-2: #303030;
+    --surface-3: #383838;
+    --ink: #f2f2ee;
+    --ink-2: #adada6;
+    --ink-3: #7d7d77;
+    --line: rgba(255, 255, 255, 0.085);
+    --line-2: rgba(255, 255, 255, 0.16);
+    --hover: rgba(255, 255, 255, 0.06);
+    --active: rgba(255, 255, 255, 0.11);
+    --thumb: #242424;
+    --elevated: #1e1e1e;
+    --inv-bg: #f2f2ee;
+    --inv-ink: #1a1a1a;
+    --shadow-app: 0 40px 100px -50px rgba(0, 0, 0, 0.75), 0 2px 8px rgba(0, 0, 0, 0.35);
+    --shadow-md: 0 18px 46px -24px rgba(0, 0, 0, 0.6);
+    --shadow-lg: 0 34px 80px -30px rgba(0, 0, 0, 0.7);
+    --seal: #c96154;
+    --hue-ochre: #c08a4a;
+    --hue-slate: #6f93ac;
+    --hue-jade: #6f9382;
+    --hue-ash: #9a9a92;
+    --hue-indigo: #7a86a8;
+    --hue-plum: #8d7a99;
+    --hue-paper: #c6c3b8;
+
+    color-scheme: dark;
+  }
+}
+
+/*
+ * 手动选定暗色：与系统无关，直接生效。
+ * 本块必须与上方 `prefers-color-scheme: dark` 块逐项一致（唯一差别是触发条件），
+ * 改动令牌时两处同步。
+ */
+[data-theme="dark"] {
+  --bg: #0f0f0f;
+  --frame: #161616;
+  --surface: #2b2b2b;
+  --surface-2: #303030;
+  --surface-3: #383838;
+  --ink: #f2f2ee;
+  --ink-2: #adada6;
+  --ink-3: #7d7d77;
+  --line: rgba(255, 255, 255, 0.085);
+  --line-2: rgba(255, 255, 255, 0.16);
+  --hover: rgba(255, 255, 255, 0.06);
+  --active: rgba(255, 255, 255, 0.11);
+  --thumb: #242424;
+  --elevated: #1e1e1e;
+  --inv-bg: #f2f2ee;
+  --inv-ink: #1a1a1a;
+  --shadow-app: 0 40px 100px -50px rgba(0, 0, 0, 0.75), 0 2px 8px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 18px 46px -24px rgba(0, 0, 0, 0.6);
+  --shadow-lg: 0 34px 80px -30px rgba(0, 0, 0, 0.7);
+  --seal: #c96154;
+  --hue-ochre: #c08a4a;
+  --hue-slate: #6f93ac;
+  --hue-jade: #6f9382;
+  --hue-ash: #9a9a92;
+  --hue-indigo: #7a86a8;
+  --hue-plum: #8d7a99;
+  --hue-paper: #c6c3b8;
+
+  color-scheme: dark;
+}

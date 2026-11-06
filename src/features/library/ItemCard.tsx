@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import {
   formatAbsoluteTime,
   formatRelativeTime,
@@ -16,13 +16,27 @@ export type ItemCardData = {
   sourceApp: string | null;
   sourceTitle: string | null;
   thumbUrl: string | null;
+  /**
+   * hue-dot 的取色令牌（如 `var(--hue-ochre)`）。
+   * 阶段 03 由视觉属性提供；当前一律缺省，落到 `--hue-ash` 中性灰。
+   */
+  hue?: string | null;
 };
 
 type Props = {
   item: ItemCardData;
 };
 
-/** 单张素材卡：缩略图（无图时占位）、状态徽标、来源与相对时间。 */
+/** 只有「待解析 / 失败」用印章色强调，其余状态保持中性徽标。 */
+function badgeClass(status: string): string {
+  const tone = statusTone(status);
+  if (tone === "pending" || tone === "failed") {
+    return `badge ${tone}`;
+  }
+  return "badge";
+}
+
+/** 单张素材卡：缩略图（无图时占位）、状态徽标、标题与来源/时间元信息。 */
 export function ItemCard({ item }: Props) {
   const kind = kindLabel(item.kind);
   const title = item.sourceTitle ?? "未命名来源";
@@ -38,13 +52,18 @@ export function ItemCard({ item }: Props) {
   }, [item.thumbUrl]);
 
   const thumbSrc = item.thumbUrl !== null && !failed ? item.thumbUrl : null;
+  const busy = item.status === "parsing" || item.status === "pending";
+  const hueStyle = { "--hue": item.hue ?? "var(--hue-ash)" } as CSSProperties;
 
   return (
-    <article className="item-card" data-item-id={item.id} title={item.sourceTitle ?? undefined}>
-      <div className={`item-thumb item-thumb-${item.kind}`}>
+    <article
+      className={`card${busy ? " is-pending" : ""}`}
+      data-item-id={item.id}
+      title={item.sourceTitle ?? undefined}
+    >
+      <div className="card-thumb">
         {thumbSrc !== null ? (
           <img
-            className="item-thumb-img"
             src={thumbSrc}
             alt={`${kind}素材缩略图`}
             loading="lazy"
@@ -53,20 +72,25 @@ export function ItemCard({ item }: Props) {
             onError={() => setFailed(true)}
           />
         ) : (
-          <span className="item-thumb-placeholder">{kind}</span>
+          <span className="thumb-fallback">{kind}</span>
         )}
+        {busy && <span className="shimmer" />}
+        <span className={badgeClass(item.status)}>{statusLabel(item.status)}</span>
       </div>
-      <div className="item-body">
-        <div className="item-badges">
-          <span className={`item-status item-status-${statusTone(item.status)}`}>
-            {statusLabel(item.status)}
-          </span>
-          <span className="item-kind">{kind}</span>
-        </div>
-        <p className="item-title">{title}</p>
-        <div className="item-meta">
-          <span className="item-source">{item.sourceApp ?? "未知来源"}</span>
-          <time className="item-time" dateTime={isoTime} title={formatAbsoluteTime(item.capturedAt)}>
+
+      <div className="card-body">
+        <h3 className="card-title">{title}</h3>
+        <div className="card-meta">
+          <i className="hue-dot" style={hueStyle} />
+          <span className="card-kind">{kind}</span>
+          {item.sourceApp !== null && (
+            <>
+              <span className="dot" />
+              <span className="card-source">{item.sourceApp}</span>
+            </>
+          )}
+          <span className="dot" />
+          <time className="card-time" dateTime={isoTime} title={formatAbsoluteTime(item.capturedAt)}>
             {timeText}
           </time>
         </div>
