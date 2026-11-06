@@ -275,7 +275,7 @@ cargo test -p visrecall-library --test tags_db
 - Consumes: `items.note`
 - Produces: `Library::set_note(id, text)`、`Library::loading_note(id)`、`Library::count_items()`、`Library::list_expired(cutoff, limit)`
 
-- [ ] **Step 1: `set_note`**
+- [x] **Step 1: `set_note`**
 
 ```rust
 pub const MAX_NOTE_CHARS: usize = 10_000;
@@ -288,7 +288,7 @@ pub fn set_note(&self, id: &str, text: &str) -> Result<(), AppError> {
 }
 ```
 
-- [ ] **Step 2: 计数与过期选取**
+- [x] **Step 2: 计数与过期选取**
 
 ```rust
 pub fn count_items(&self) -> Result<u64, AppError>;
@@ -298,7 +298,7 @@ pub fn list_expired(&self, cutoff: i64, limit: u32) -> Result<Vec<Item>, AppErro
 
 `list_expired` 按 `captured_at ASC, rowid ASC` 排序，`limit` clamp 1..=500。
 
-- [ ] **Step 3: 单条事务删除的内部方法**
+- [x] **Step 3: 单条事务删除的内部方法**
 
 ```rust
 /// 删除一条：jobs + items（标签靠外键级联）。调用方负责文件删除与事件。
@@ -307,7 +307,7 @@ pub(crate) fn delete_item_row(&self, id: &str) -> Result<Option<(String, Option<
 
 返回 `(original_path, thumb_path)` 供上层删文件；`None` 表示记录不存在。**必须在同一个连接 guard 内完成两条 DELETE 与提交**。
 
-- [ ] **Step 4: 测试**
+- [x] **Step 4: 测试**
 
 - 10000 字（含 emoji，按字符计）写入成功；10001 字返回 `InvalidInput` 且库内值未变。
 - 空串备注写入成功（清空备注）。

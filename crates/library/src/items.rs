@@ -9,6 +9,9 @@ use crate::db::{db_error, Library};
 const COLUMNS: &str = "id, kind, status, captured_at, source_app, source_title, source_url, \
                        width, height, char_count, original_path, thumb_path, note, content_hash";
 
+/// 备注长度上限（按字符计，不是字节）。
+pub const MAX_NOTE_CHARS: usize = 10_000;
+
 impl Library {
     /// 插入新素材：生成 id 与时间戳，初始 `status = parsing`，`note` 为空。
     pub fn insert_item(&self, new: NewItem) -> Result<Item, AppError> {
@@ -141,6 +144,96 @@ impl Library {
         Ok(())
     }
 
+    /// 保存备注：先按**字符**校验长度，超限直接拒绝，不静默截断已存内容。
+    ///
+    /// 前端负责防抖，这里只做「校验 + 单条 UPDATE + 由调用方发事件」。
+    /// 并发语义：单写连接串行执行，后写覆盖先写，不引入版本号。
+    pub fn set_note(&self, id: &str, text: &str) -> Result<(), AppError> {
+        if text.chars().count() > MAX_NOTE_CHARS {
+            return Err(AppError::InvalidInput(format!(
+                "note longer than {MAX_NOTE_CHARS} chars"
+            )));
+        }
+        self.set_item_note(id, text)
+    }
+
+    /// 素材总数。
+    pub fn count_items(&self) -> Result<u64, AppError> {
+        let conn = self.conn()?;
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM items", [], |row| row.get(0))
+            .map_err(db_error)?;
+        Ok(count as u64)
+    }
+
+    /// `captured_at` 早于 `cutoff` 的素材数（保留策略预估用）。
+    pub fn count_items_before(&self, cutoff: i64) -> Result<u64, AppError> {
+        let conn = self.conn()?;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM items WHERE captured_at < ?1",
+                [cutoff],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        Ok(count as u64)
+    }
+
+    /// 过期的素材，按 `captured_at ASC, rowid ASC` 排序；`limit` 夹到 1..=500。
+    pub fn list_expired(&self, cutoff: i64, limit: u32) -> Result<Vec<Item>, AppError> {
+        let limit = limit.clamp(1, 500);
+        let conn = self.conn()?;
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {COLUMNS} FROM items
+                 WHERE captured_at < ?1
+                 ORDER BY captured_at ASC, rowid ASC
+                 LIMIT ?2"
+            ))
+            .map_err(db_error)?;
+        let rows = stmt
+            .query_map(rusqlite::params![cutoff, i64::from(limit)], row_to_item)
+            .map_err(db_error)?;
+
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row.map_err(db_error)?);
+        }
+        Ok(items)
+    }
+
+    /// 删除一条：`jobs` + `items`（标签关联靠外键级联）。调用方负责文件删除与事件。
+    ///
+    /// 返回 `(original_path, thumb_path)` 供上层删文件；`None` 表示记录不存在。
+    /// 两条 DELETE 必须在同一个事务里提交：`jobs.item_id` 在 0001 中没有外键，
+    /// 漏删会留下指向不存在素材的任务（阶段 03 会真的跑这些任务）。
+    pub(crate) fn delete_item_row(
+        &self,
+        id: &str,
+    ) -> Result<Option<(String, Option<String>)>, AppError> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction().map_err(db_error)?;
+        let row: Option<(Option<String>, Option<String>)> = tx
+            .query_row(
+                "SELECT original_path, thumb_path FROM items WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(db_error)?;
+        let Some((original_path, thumb_path)) = row else {
+            return Ok(None);
+        };
+
+        tx.execute("DELETE FROM jobs WHERE item_id = ?1", [id])
+            .map_err(db_error)?;
+        tx.execute("DELETE FROM items WHERE id = ?1", [id])
+            .map_err(db_error)?;
+        tx.commit().map_err(db_error)?;
+
+        Ok(Some((original_path.unwrap_or_default(), thumb_path)))
+    }
+
     /// 测试用：读取一行的 `(created_at, updated_at)`（`Item` 不暴露这两个字段）。
     #[doc(hidden)]
     pub fn item_timestamps_for_test(&self, id: &str) -> Result<(i64, i64), AppError> {
@@ -244,5 +337,65 @@ mod tests {
         }
         assert!(parse_kind("video".into(), 0).is_err());
         assert!(parse_status("done".into(), 0).is_err());
+    }
+
+    fn test_library() -> (tempfile::TempDir, Library) {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::open(dir.path().to_path_buf()).unwrap();
+        (dir, lib)
+    }
+
+    fn image_item() -> NewItem {
+        NewItem {
+            kind: ItemKind::Image,
+            captured_at: 1_700_000_000_000,
+            source_app: None,
+            source_title: None,
+            source_url: None,
+            width: None,
+            height: None,
+            char_count: None,
+            original_path: "originals/images/2026/11/a.png".into(),
+            content_hash: "hash".into(),
+        }
+    }
+
+    #[test]
+    fn delete_item_row_removes_jobs_and_returns_paths() {
+        let (_dir, lib) = test_library();
+        let item = lib.insert_item(image_item()).unwrap();
+        lib.update_status(&item.id, ItemStatus::Ready, Some("thumbs/a.png"))
+            .unwrap();
+        lib.enqueue_job(&item.id, "thumbnail", 1).unwrap();
+        lib.tag_add(&item.id, "work").unwrap();
+
+        let paths = lib.delete_item_row(&item.id).unwrap().unwrap();
+        assert_eq!(paths.0, "originals/images/2026/11/a.png");
+        assert_eq!(paths.1.as_deref(), Some("thumbs/a.png"));
+
+        assert!(lib.get_item(&item.id).unwrap().is_none());
+        let conn = lib.conn().unwrap();
+        let jobs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM jobs WHERE item_id = ?1",
+                [&item.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let links: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM item_tags WHERE item_id = ?1",
+                [&item.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(jobs, 0);
+        assert_eq!(links, 0);
+    }
+
+    #[test]
+    fn delete_item_row_returns_none_for_missing_item() {
+        let (_dir, lib) = test_library();
+        assert!(lib.delete_item_row("no-such-item").unwrap().is_none());
     }
 }
