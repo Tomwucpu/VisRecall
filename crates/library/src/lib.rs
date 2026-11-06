@@ -10,6 +10,7 @@ pub mod files;
 pub mod items;
 pub mod migrations;
 pub mod paths;
+pub mod settings_kv;
 
 pub use cleanup::StartupCleanup;
 pub use config::{AppConfig, BallConfig, CaptureConfig, HotkeyConfig, PrivacyConfig};

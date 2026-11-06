@@ -36,7 +36,7 @@
 - Consumes: 0001 已建 `items` / `settings` / `schema_migrations`
 - Produces: `migrations::apply(conn, root)`；`Library::setting_get/setting_set`；`tags` / `item_tags` / `tag_suppressions` 三张表
 
-- [ ] **Step 1: 写 0002 迁移**
+- [x] **Step 1: 写 0002 迁移**
 
 ```sql
 -- crates/library/migrations/0002_library_detail.sql
@@ -65,7 +65,7 @@ CREATE TABLE tag_suppressions (
 );
 ```
 
-- [ ] **Step 2: 迁移前备份 + 新签名**
+- [x] **Step 2: 迁移前备份 + 新签名**
 
 ```rust
 pub const MIGRATIONS: &[(i64, &str)] = &[
@@ -99,7 +99,7 @@ fn backup_before_migration(conn: &Connection, root: &Path) -> Option<PathBuf> {
 
 > 备份路径里的 checkpoint 是**最佳努力**：启动时还没有其他连接，且备份失败只 `warn`，所以这里不判定 `busy`。严格判定（`busy != 0` 即失败）只用于位置迁移，见 Task 6 的 `checkpoint()`。
 
-- [ ] **Step 3: `settings` 键值读写**
+- [x] **Step 3: `settings` 键值读写**
 
 ```rust
 // crates/library/src/settings_kv.rs
@@ -111,7 +111,7 @@ impl Library {
 
 解析失败返回 `None` 并 `warn!`（不返回错误，避免一条坏配置卡住设置页）。
 
-- [ ] **Step 4: 补测试**
+- [x] **Step 4: 补测试**
 
 - 连续 `apply` 两次幂等，`schema_migrations` 有 2 行。
 - 在已有 0001 库上应用 0002 后，`tags` 等三表可写；`PRAGMA foreign_keys` 打开时删除 `items` 行会级联清空 `item_tags`。

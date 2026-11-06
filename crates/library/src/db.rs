@@ -37,7 +37,8 @@ impl Library {
 
         let mut conn = Connection::open(root.join(DB_FILE)).map_err(db_error)?;
         conn.execute_batch(OPEN_PRAGMAS).map_err(db_error)?;
-        migrations::apply(&mut conn)?;
+        // 传入根目录：迁移前要把 visrecall.db 备份到 backups/。
+        migrations::apply(&mut conn, &root)?;
 
         let library = Library {
             root,
