@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, SUMMARY_PLACEHOLDER, type TagChip } from "../../lib/api";
-import { errorMessage } from "../../lib/errors";
+import { errorCode, errorMessage } from "../../lib/errors";
 import { formatAbsoluteTime, formatRelativeTime, kindLabel, statusLabel } from "../../lib/format";
 import { queryKeys } from "../../lib/queryClient";
 import { pushToast } from "../../lib/toast";
@@ -145,8 +145,17 @@ export function DetailPanel({ item, onClose }: Props) {
   const copy = async () => {
     try {
       await api.copyOriginal(item.id, item.kind);
+      pushToast(`已复制${copyLabelOf(item.kind).replace(/^复制/, "")}`);
     } catch (error) {
-      pushToast(errorMessage(error), "error");
+      // 按错误码给出可操作的提示，而不是把后端 message 原样抛给用户。
+      const code = errorCode(error);
+      if (code === "FILE_MISSING") {
+        pushToast("原图文件缺失", "error");
+      } else if (code === "CLIPBOARD_BUSY") {
+        pushToast("剪贴板被占用，请重试", "error");
+      } else {
+        pushToast(errorMessage(error), "error");
+      }
     }
   };
 
@@ -169,8 +178,25 @@ export function DetailPanel({ item, onClose }: Props) {
       await api.deleteItem(item.id);
       onClose();
     } catch (error) {
+      if (errorCode(error) === "NOT_FOUND") {
+        // 素材已被删掉：提示一句并收起面板，列表由事件刷新。
+        pushToast("该素材已不存在", "error");
+        onClose();
+        return;
+      }
       pushToast(errorMessage(error), "error");
     }
+  };
+
+  const removeTag = async (tagId: string, name: string) => {
+    try {
+      await api.removeTag(item.id, tagId);
+    } catch (error) {
+      pushToast(errorMessage(error), "error");
+      return;
+    }
+    // 成功后靠 `item_tags_updated` 事件刷新，本地不删数组（避免与后端状态漂移）。
+    pushToast(`已移除标签「${name}」`);
   };
 
   const extras = detail.data?.extras;
@@ -264,7 +290,7 @@ export function DetailPanel({ item, onClose }: Props) {
                 <span className="label">原文</span>
               </div>
               <p className={bodyText === null ? "d-stub" : "d-summary"}>
-                {bodyText ?? "原文读取将在阶段 02 提供（上限 2 万字符）"}
+                {bodyText ?? "原文不可读（文件缺失或不是 UTF-8 文本）"}
               </p>
             </section>
           )}
@@ -306,8 +332,25 @@ export function DetailPanel({ item, onClose }: Props) {
                 <span className="tag-empty">暂无标签</span>
               ) : (
                 tags.map((tag) => (
-                  <span key={tag.id} className={`tag${tag.auto ? " auto" : ""}`}>
+                  <span
+                    key={tag.id}
+                    className={`tag${tag.auto ? " auto" : ""}`}
+                    style={
+                      tag.hue
+                        ? ({ "--hue": `var(--hue-${tag.hue})` } as CSSProperties)
+                        : undefined
+                    }
+                  >
                     {tag.name}
+                    <button
+                      type="button"
+                      className="tag-remove"
+                      aria-label={`移除标签 ${tag.name}`}
+                      title={`移除标签 ${tag.name}`}
+                      onClick={() => void removeTag(tag.id, tag.name)}
+                    >
+                      ×
+                    </button>
                   </span>
                 ))
               )}

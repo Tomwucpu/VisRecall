@@ -1,8 +1,8 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { kindLabel } from "../../lib/format";
 
 type Props = {
-  /** 原图地址；stub 阶段恒为 `null`，此时退到缩略图并明确标注。 */
+  /** 原图地址 `visrecall://original/<id>`；为 `null`（如文本素材）时退到缩略图。 */
   originalUrl: string | null;
   thumbUrl: string | null;
   title: string;
@@ -13,13 +13,24 @@ type Props = {
 /**
  * 应用内大图覆盖层（D-UI-4）。
  *
- * 原图协议 `visrecall://original/<id>` 属阶段 02，当前 `originalUrl` 恒为 null
- * （api.ts stub）。这时显示真实缩略图并注明「原图待阶段 02 提供」——
- * 不放大系统看图程序，也不假装缩略图就是原图。
+ * 原图走 `visrecall://original/<id>` 协议；协议 404（文件被删）时不白屏：
+ * `onError` 退到缩略图并标注「原图文件缺失」——不放大系统看图程序，也不假装
+ * 缩略图就是原图。
  */
 export function ImageOverlay({ originalUrl, thumbUrl, title, kind, onClose }: Props) {
   const innerRef = useRef<HTMLDivElement>(null);
-  const src = originalUrl ?? thumbUrl;
+  // 两级降级：原图 404 → 缩略图；缩略图也 404 → 类型占位。两条都记下来，
+  // 避免「原图挂了就把缩略图也一起判死」。
+  const [originalFailed, setOriginalFailed] = useState(false);
+  const [thumbFailed, setThumbFailed] = useState(false);
+
+  const showingOriginal = originalUrl !== null && !originalFailed;
+  const src = showingOriginal ? originalUrl : thumbFailed ? null : thumbUrl;
+  const label = showingOriginal
+    ? "原图"
+    : originalUrl === null
+      ? "缩略图"
+      : "原图文件缺失 · 缩略图";
 
   useEffect(() => {
     innerRef.current?.focus();
@@ -45,14 +56,25 @@ export function ImageOverlay({ originalUrl, thumbUrl, title, kind, onClose }: Pr
       >
         <div className="preview-thumb">
           {src !== null ? (
-            <img src={src} alt={`${kindLabel(kind)}素材原图`} draggable={false} />
+            <img
+              src={src}
+              alt={`${kindLabel(kind)}素材原图`}
+              draggable={false}
+              onError={() => {
+                if (showingOriginal) {
+                  setOriginalFailed(true);
+                } else {
+                  setThumbFailed(true);
+                }
+              }}
+            />
           ) : (
             <span className="thumb-fallback">{kindLabel(kind)}</span>
           )}
         </div>
         <div className="preview-bar">
           <span className="mono">{title}</span>
-          <span className="mono">{originalUrl === null ? "缩略图 · 原图待阶段 02 提供" : "原图"}</span>
+          <span className="mono">{label}</span>
           <span className="grow" />
           <span className="mono">Esc 关闭</span>
           <button type="button" className="preview-close" aria-label="关闭预览" onClick={onClose}>

@@ -11,6 +11,17 @@ export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** 取稳定错误码；用于按 `FILE_MISSING` / `CLIPBOARD_BUSY` 等分支给不同提示。 */
+export function errorCode(error: unknown): string | null {
+  if (typeof error === "object" && error !== null) {
+    const { code } = error as { code?: unknown };
+    if (typeof code === "string") {
+      return code;
+    }
+  }
+  return null;
+}
+
 /** 面向排查：`CODE: message`，用在错误卡片等需要定位问题的位置。 */
 export function describeError(error: unknown): string {
   if (typeof error === "object" && error !== null) {

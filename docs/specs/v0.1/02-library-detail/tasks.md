@@ -818,24 +818,24 @@ pnpm typecheck && pnpm test && pnpm lint
 - Consumes: `api.loadDetail`（真实）、`api.saveNote`、`api.addTag`、`api.removeTag`、`api.copyOriginal`、`api.deleteItem`
 - Produces: 无 stub 的详情交互
 
-- [ ] **Step 1: 删除 `unsupported` 状态**
+- [x] **Step 1: 删除 `unsupported` 状态**
 
 `SaveState` 改为 `"idle" | "saving" | "saved" | "error"`；`noteBlocked` 删除；失败时 `setSaveState("error")` + Toast，保留文本。
 
-- [ ] **Step 2: 标签 chip 可移除**
+- [x] **Step 2: 标签 chip 可移除**
 
 chip 内加 `×` 按钮（`aria-label={`移除标签 ${tag.name}`}`），点击调 `api.removeTag(item.id, tag.id)`；成功后靠 `item_tags_updated` 事件刷新，不在本地删数组。chip 设置 `style={{ "--hue": tag.hue ? `var(--hue-${tag.hue})` : undefined }}`。
 
-- [ ] **Step 3: 复制与删除反馈**
+- [x] **Step 3: 复制与删除反馈**
 
 `copy()` 成功后 `pushToast("已复制" + copyLabelOf(item.kind))`；失败按 `code` 分支：`FILE_MISSING` → 「原图文件缺失」，`CLIPBOARD_BUSY` → 「剪贴板被占用，请重试」。
 `removeItem()` 成功后 `onClose()`，列表由 `item_deleted` 事件刷新；`NOT_FOUND` 时提示「该素材已不存在」并关闭。
 
-- [ ] **Step 4: 原图 overlay**
+- [x] **Step 4: 原图 overlay**
 
 `ImageOverlay` 的 `src = originalUrl ?? thumbUrl` 回退逻辑保留，但删除「原图待阶段 02 提供」文案：`originalUrl` 非空显示「原图」，为空显示「缩略图」。给 `<img>` 加 `onError` → 切到 `.thumb-fallback` 并显示「原图文件缺失」（协议 404 时不会再走 `originalUrl` 为空的路径）。
 
-- [ ] **Step 5: 测试**
+- [x] **Step 5: 测试**
 
 - 备注输入后 300ms 调一次 `saveNote`；连续输入只调最后一次。
 - 保存失败时文本仍在、显示「保存失败」。

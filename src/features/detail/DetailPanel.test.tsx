@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { resetToasts } from "../../lib/toast";
@@ -127,6 +127,8 @@ test("asks for confirmation before deleting, then closes the panel", async () =>
 
 test("opens the in-app overlay from the thumbnail and closes on Escape", async () => {
   renderPanel(<DetailPanel item={item} onClose={() => {}} />);
+  // 等详情（含 originalUrl）到位再开覆盖层，否则标签会退成「缩略图」。
+  await screen.findByText("1280 × 800");
 
   fireEvent.click(screen.getByRole("button", { name: "查看原图" }));
 
@@ -139,11 +141,74 @@ test("opens the in-app overlay from the thumbnail and closes on Escape", async (
   });
 });
 
-test("copies the original through copy_item_original", async () => {
+test("copies the original and reports success with a toast", async () => {
   renderPanel(<DetailPanel item={item} onClose={() => {}} />);
 
   fireEvent.click(screen.getByRole("button", { name: "复制原图" }));
   await waitFor(() => {
     expect(commands.copyItemOriginal).toHaveBeenCalledWith("abc123");
   });
+  expect(await screen.findByText("已复制原图")).toBeInTheDocument();
+});
+
+test("explains a missing original file instead of a generic error", async () => {
+  commands.copyItemOriginal.mockRejectedValueOnce({
+    code: "FILE_MISSING",
+    message: "file missing: originals/x.png",
+  });
+  renderPanel(<DetailPanel item={item} onClose={() => {}} />);
+
+  fireEvent.click(screen.getByRole("button", { name: "复制原图" }));
+  expect(await screen.findByText("原图文件缺失")).toBeInTheDocument();
+});
+
+test("keeps the note text and reports failure when saving fails", async () => {
+  commands.noteSet.mockRejectedValueOnce({
+    code: "IO",
+    message: "磁盘只读",
+  });
+  renderPanel(<DetailPanel item={item} onClose={() => {}} />);
+
+  const note = screen.getByLabelText("备注");
+  fireEvent.change(note, { target: { value: "写不进也要留着" } });
+
+  expect(await screen.findByText(/保存失败/)).toBeInTheDocument();
+  // 失败不回滚用户输入。
+  expect(note).toHaveValue("写不进也要留着");
+});
+
+test("removes a tag through tag_detach without editing the local array", async () => {
+  commands.getItemExt.mockResolvedValueOnce({
+    item: {
+      id: "abc123",
+      kind: "image",
+      status: "ready",
+      capturedAt: 1_700_000_000_000,
+      sourceApp: "chrome.exe",
+      sourceTitle: "Test",
+      sourceUrl: null,
+      width: 1280,
+      height: 800,
+      charCount: null,
+      note: "",
+      thumbUrl: "visrecall://thumb/1",
+    },
+    extras: {
+      summary: null,
+      bodyText: null,
+      originalUrl: "visrecall://original/abc123",
+      tags: [{ id: "t1", name: "work", auto: false, hue: "jade", itemCount: 3 }],
+    },
+  });
+  renderPanel(<DetailPanel item={item} onClose={() => {}} />);
+
+  const chip = await screen.findByText("work");
+  expect(chip.closest(".tag")).toHaveStyle({ "--hue": "var(--hue-jade)" });
+
+  fireEvent.click(screen.getByRole("button", { name: "移除标签 work" }));
+  await waitFor(() => {
+    expect(commands.tagDetach).toHaveBeenCalledWith("abc123", "t1");
+  });
+  // 本地不删数组：等 `item_tags_updated` 事件驱动刷新。
+  expect(within(chip.closest(".tag-row") as HTMLElement).getByText("work")).toBeInTheDocument();
 });
