@@ -96,7 +96,9 @@ const commands = vi.hoisted(() => ({
 vi.mock("../lib/bindings", () => ({ commands }));
 
 // Tauri 事件订阅在 jsdom 里没有运行时，直接给一个空实现。
-vi.mock("../lib/events", () => ({ subscribeItemEvents: () => () => {} }));
+vi.mock("../lib/events", () => ({ subscribeAppEvents: () => () => {} }));
+vi.mock("../lib/notifications", () => ({ subscribeNotifications: () => () => {} }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {} }));
 
 function renderApp() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -125,6 +127,20 @@ test("opens the detail panel from a card and closes it with Escape", async () =>
     expect(screen.queryByText("待解析（阶段 03 提供）")).not.toBeInTheDocument();
   });
   expect(screen.getByText("从中间选一条素材")).toBeInTheDocument();
+});
+
+test("shows the library total from usage instead of the loaded page", async () => {
+  commands.storageUsageGet.mockResolvedValueOnce({
+    usedBytes: 0,
+    capacityBytes: 1,
+    itemCount: 42,
+  });
+
+  renderApp();
+
+  // 列表只加载了 1 条，但计数取后端的库总量。
+  expect(await screen.findByText("找到 42 项")).toBeInTheDocument();
+  expect(await screen.findByText("42 条素材")).toBeInTheDocument();
 });
 
 test("toggles the sidebar with B and the theme with T", async () => {

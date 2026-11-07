@@ -16,7 +16,9 @@ type EventName =
   | "items_pruned"
   | "item_note_updated"
   | "item_tags_updated"
-  | "tags_changed";
+  | "tags_changed"
+  | "hotkey_restored"
+  | "storage_migration_progress";
 
 /** 需要重置列表的事件（分页状态一并丢弃）。 */
 const LIST_EVENTS = [
@@ -30,6 +32,9 @@ const LIST_EVENTS = [
 /** 会改变用量的列表事件。 */
 const USAGE_EVENTS = ["item_created", "item_deleted", "items_reset", "items_pruned"] as const;
 
+/** 会改变孤儿文件统计的事件：删素材只删库内引用，磁盘上可能留下文件。 */
+const ORPHAN_EVENTS = ["item_deleted", "items_reset", "items_pruned"] as const;
+
 const ALL_EVENTS: EventName[] = [
   "item_created",
   "item_updated",
@@ -39,6 +44,8 @@ const ALL_EVENTS: EventName[] = [
   "item_note_updated",
   "item_tags_updated",
   "tags_changed",
+  "hotkey_restored",
+  "storage_migration_progress",
 ];
 
 function itemIdOf(payload: unknown): string | null {
@@ -46,6 +53,16 @@ function itemIdOf(payload: unknown): string | null {
     const id = (payload as { id?: unknown }).id;
     if (typeof id === "string") {
       return id;
+    }
+  }
+  return null;
+}
+
+function phaseOf(payload: unknown): string | null {
+  if (typeof payload === "object" && payload !== null) {
+    const phase = (payload as { phase?: unknown }).phase;
+    if (typeof phase === "string") {
+      return phase;
     }
   }
   return null;
@@ -87,8 +104,13 @@ function subscribe(names: readonly EventName[], client: QueryClient): () => void
 
     if ((LIST_EVENTS as readonly string[]).includes(name)) {
       void client.resetQueries({ queryKey: queryKeys.items });
+      // 清空确认词里的条数依赖当前库内容，列表一变就过期。
+      void client.invalidateQueries({ queryKey: queryKeys.purgePreview });
       if ((USAGE_EVENTS as readonly string[]).includes(name)) {
         void client.invalidateQueries({ queryKey: queryKeys.usage });
+      }
+      if ((ORPHAN_EVENTS as readonly string[]).includes(name)) {
+        void client.invalidateQueries({ queryKey: queryKeys.orphans });
       }
       if (name === "items_reset" || name === "items_pruned") {
         void client.invalidateQueries({ queryKey: queryKeys.tags });
@@ -115,6 +137,19 @@ function subscribe(names: readonly EventName[], client: QueryClient): () => void
 
     if (name === "tags_changed") {
       void client.invalidateQueries({ queryKey: queryKeys.tags });
+      return;
+    }
+
+    if (name === "hotkey_restored") {
+      // 后端重载了捕获热键：设置面板显示的组合键必须跟着变。
+      void client.invalidateQueries({ queryKey: queryKeys.settings });
+      return;
+    }
+
+    if (name === "storage_migration_progress" && phaseOf(payload) === "done") {
+      // 迁移完成：库路径与「待重启」闸门都变了，用量口径也随之变化。
+      void client.invalidateQueries({ queryKey: queryKeys.status });
+      void client.invalidateQueries({ queryKey: queryKeys.usage });
     }
   };
 

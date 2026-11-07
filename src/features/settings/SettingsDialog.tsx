@@ -145,10 +145,12 @@ export function SettingsDialog({ onClose }: Props) {
   });
   // 确认词与条数由后端提供（前端不硬编码）：进入存储 pane 就取一次，
   // 这样折叠区展开时按钮的可用状态已经是正确的，不需要再等一轮请求。
+  // 条数随列表变化（事件会失效该键），因此不设 staleTime，避免显示过期的条数。
   const purgePreview = useQuery({
-    queryKey: ["purge-preview"] as const,
+    queryKey: queryKeys.purgePreview,
     queryFn: () => api.getPurgePreview(),
     enabled: pane === "storage",
+    staleTime: 0,
   });
 
   useEffect(() => {

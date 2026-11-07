@@ -126,8 +126,8 @@ export function TitleBar({ status, itemCount, onOpenSettings }: Props) {
             title="最小化"
             onClick={() => void runWindowAction("minimize")}
           >
-            <svg width="9" height="9" viewBox="0 0 10 10">
-              <path d="M1 5h8" stroke="currentColor" />
+            <svg width="10" height="10" viewBox="0 0 10 10">
+              <path d="M1 5h8" stroke="currentColor" strokeWidth="1" />
             </svg>
           </button>
           <button
@@ -137,13 +137,14 @@ export function TitleBar({ status, itemCount, onOpenSettings }: Props) {
             onClick={() => void runWindowAction("toggleMaximize")}
           >
             <svg
-              width="8"
-              height="8"
+              width="10"
+              height="10"
               viewBox="0 0 10 10"
               fill="none"
               stroke="currentColor"
+              strokeWidth="1"
             >
-              <rect x="1.5" y="1.5" width="7" height="7" rx=".8" />
+              <rect x="1" y="1" width="8" height="8" rx="1" />
             </svg>
           </button>
           <button
@@ -152,8 +153,8 @@ export function TitleBar({ status, itemCount, onOpenSettings }: Props) {
             title="关闭"
             onClick={() => void runWindowAction("close")}
           >
-            <svg width="9" height="9" viewBox="0 0 10 10" stroke="currentColor">
-              <path d="M2 2l6 6M8 2l-6 6" />
+            <svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" strokeWidth="1">
+              <path d="M1.8 1.8l6.4 6.4M8.2 1.8l-6.4 6.4" />
             </svg>
           </button>
         </div>

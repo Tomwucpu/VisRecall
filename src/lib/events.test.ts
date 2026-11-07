@@ -41,7 +41,7 @@ function emit(name: string, payload: unknown = {}) {
   }
 }
 
-test("subscribes to all eight phase 02 events", async () => {
+test("subscribes to every cache-affecting event", async () => {
   const { client } = makeClient();
   const cleanup = subscribeAppEvents(client);
   await flush();
@@ -55,10 +55,12 @@ test("subscribes to all eight phase 02 events", async () => {
     "item_note_updated",
     "item_tags_updated",
     "tags_changed",
+    "hotkey_restored",
+    "storage_migration_progress",
   ]);
 
   cleanup();
-  expect(mocks.unlisten).toHaveBeenCalledTimes(8);
+  expect(mocks.unlisten).toHaveBeenCalledTimes(10);
 });
 
 test("list events reset the items query and refresh usage", async () => {
@@ -69,6 +71,8 @@ test("list events reset the items query and refresh usage", async () => {
   emit("item_created");
   expect(reset).toHaveBeenCalledWith({ queryKey: ["items"] });
   expect(invalidate).toHaveBeenCalledWith({ queryKey: ["usage"] });
+  // 清空确认词里的条数随库内容变化。
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["purge-preview"] });
 
   reset.mockClear();
   invalidate.mockClear();
@@ -77,6 +81,11 @@ test("list events reset the items query and refresh usage", async () => {
   expect(invalidate).toHaveBeenCalledWith({ queryKey: ["usage"] });
   // 清理可能把某些标签的素材删光，标签云也要重取。
   expect(invalidate).toHaveBeenCalledWith({ queryKey: ["tags"] });
+
+  // 删素材可能留下孤儿文件，统计要重扫。
+  invalidate.mockClear();
+  emit("item_deleted", { id: "abc" });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["orphans"] });
 
   cleanup();
 });
@@ -119,6 +128,25 @@ test("note event without an id is ignored", async () => {
 
   emit("item_note_updated", {});
   expect(invalidate).not.toHaveBeenCalled();
+
+  cleanup();
+});
+
+test("settings and library status follow backend-side changes", async () => {
+  const { client, invalidate } = makeClient();
+  const cleanup = subscribeAppEvents(client);
+  await flush();
+
+  emit("hotkey_restored");
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["settings"] });
+
+  invalidate.mockClear();
+  emit("storage_migration_progress", { phase: "copy", done: 1, total: 2 });
+  expect(invalidate).not.toHaveBeenCalled();
+
+  emit("storage_migration_progress", { phase: "done", done: 0, total: 0 });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["status"] });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["usage"] });
 
   cleanup();
 });

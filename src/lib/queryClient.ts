@@ -9,6 +9,7 @@ export const queryKeys = {
   usage: ["usage"] as const,
   orphans: ["orphans"] as const,
   status: ["status"] as const,
+  purgePreview: ["purge-preview"] as const,
 };
 
 /**
