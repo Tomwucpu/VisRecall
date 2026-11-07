@@ -1,0 +1,271 @@
+/* 侧栏内容：视图/标签云/存储用量与折叠态（骨架在 layout.css）。 */
+
+/* ============ 侧栏内容（T6） ============ */
+.side-group {
+  margin-bottom: 20px;
+}
+
+.side-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px 7px;
+}
+
+.side-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 30px;
+  padding: 0 9px;
+  border-radius: 7px;
+  color: var(--ink-2);
+  font-size: 12.5px;
+  width: 100%;
+  text-align: left;
+  transition:
+    background 0.16s var(--ease),
+    color 0.16s var(--ease);
+}
+
+.side-item .ico {
+  flex: 0 0 16px;
+  color: var(--ink-3);
+  transition: color 0.16s var(--ease);
+}
+
+.side-item:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.side-item:hover .ico {
+  color: var(--ink-2);
+}
+
+.side-item.active {
+  background: var(--active);
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.side-item.active .ico {
+  color: var(--ink);
+}
+
+.side-item.active::before {
+  content: "";
+  position: absolute;
+  left: -10px;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  background: var(--ink);
+  border-radius: 2px;
+}
+
+.side-item .count {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-3);
+}
+
+.side-toggle {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  color: var(--ink-3);
+  transition:
+    background 0.16s var(--ease),
+    color 0.16s var(--ease),
+    transform 0.16s var(--ease);
+}
+
+.side-toggle:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.side-toggle:active {
+  transform: scale(0.94);
+}
+
+.side-toggle .ico-unfold {
+  display: none;
+}
+
+.sidebar.collapsed .side-toggle .ico-fold {
+  display: none;
+}
+
+.sidebar.collapsed .side-toggle .ico-unfold {
+  display: block;
+}
+
+.tag-cloud {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 2px 8px;
+}
+
+.tag-pill {
+  height: 23px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 11.5px;
+  color: var(--ink-2);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: all 0.16s var(--ease);
+}
+
+.tag-pill .hash {
+  opacity: 0.45;
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.tag-pill {
+  position: relative;
+}
+
+/* 标签云的素材数量与「…」操作入口：默认淡，hover 时出现，避免静态列表太吵。 */
+.tag-pill .tag-count {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--ink-3);
+}
+
+.tag-more {
+  margin-left: -2px;
+  padding: 0 2px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--ink-3);
+  opacity: 0;
+  transition: opacity 0.15s var(--ease);
+}
+
+.tag-pill:hover .tag-more,
+.tag-more:focus-visible {
+  opacity: 1;
+}
+
+.tag-more:hover {
+  color: var(--ink);
+}
+
+.tag-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 5;
+  margin-top: 4px;
+  padding: 3px;
+  display: flex;
+  flex-direction: column;
+  min-width: 88px;
+  border: 1px solid var(--line-2);
+  border-radius: 7px;
+  background: var(--surface);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
+}
+
+.tag-menu button {
+  padding: 5px 8px;
+  text-align: left;
+  font-size: 11.5px;
+  border-radius: 4px;
+  color: var(--ink-2);
+}
+
+.tag-menu button:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.tag-cloud-empty {
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
+.side-foot {
+  border-top: 1px solid var(--line);
+  padding: 12px 16px 14px;
+}
+
+.storage-line {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--ink-3);
+  letter-spacing: 0.03em;
+}
+
+.storage-bar {
+  height: 2px;
+  background: var(--line);
+  margin-top: 8px;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.storage-bar i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--ink-2);
+  border-radius: 2px;
+  transition: width 0.3s var(--ease);
+}
+
+.sidebar.collapsed {
+  width: 56px;
+  flex-basis: 56px;
+}
+
+.sidebar.collapsed .side-group-head span,
+.sidebar.collapsed .side-top .label,
+.sidebar.collapsed .side-item > span:not(.ico),
+.sidebar.collapsed .tag-cloud,
+.sidebar.collapsed .tag-cloud-empty,
+.sidebar.collapsed .side-foot {
+  display: none;
+}
+
+.sidebar.collapsed .side-top {
+  justify-content: center;
+  padding: 0;
+  margin-bottom: 8px;
+}
+
+.sidebar.collapsed .side-item {
+  justify-content: center;
+  padding: 0;
+  gap: 0;
+}
+
+.sidebar.collapsed .side-item .ico {
+  color: var(--ink-3);
+}
+
+.sidebar.collapsed .side-item.active .ico {
+  color: var(--ink);
+}
+
+/* 侧栏宽度过渡只在折叠前后生效，条目内容用透明度收尾。 */
+.sidebar {
+  transition:
+    width 0.3s var(--ease),
+    flex-basis 0.3s var(--ease);
+}

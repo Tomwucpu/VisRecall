@@ -1,0 +1,364 @@
+/* 基础层：重置、通用小件、按钮与动效 —— 跨组件共享的最底层样式。 */
+
+/* ============ 基础 ============ */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 13px/1.55 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+}
+
+::selection {
+  background: var(--ink);
+  color: var(--frame);
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  outline: 0;
+}
+
+:focus-visible {
+  outline: 1.5px solid var(--ink);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+svg {
+  display: block;
+}
+
+.mono {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--line-2);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ink-3);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ============ 通用小件 ============ */
+.mini-btn {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+  padding: 3px 6px;
+  border-radius: 4px;
+  transition:
+    background 0.15s var(--ease),
+    color 0.15s var(--ease);
+}
+
+.mini-btn:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+/* 失败提示：沿用印章色的低饱和处理，不新增色值。 */
+.alert {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 14px;
+  padding: 9px 12px;
+  border: 1px solid color-mix(in srgb, var(--seal) 34%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--seal) 10%, var(--surface));
+  font-size: 12px;
+  color: var(--seal);
+}
+
+.alert .mini-btn {
+  color: var(--seal);
+  border: 1px solid color-mix(in srgb, var(--seal) 34%, transparent);
+  padding: 3px 8px;
+}
+
+.alert-block {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 16px 18px;
+}
+
+/* 库已迁移、待重启：三栏之上的常驻横幅（阶段 02 P2-R09）。
+ * 用 ink 底而非 seal：这不是错误，而是「需要用户动作」的提醒。 */
+.migration-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--ink) 6%, var(--surface));
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.migration-banner .mini-btn {
+  flex: none;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  padding: 3px 8px;
+}
+
+.migration-banner .mini-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* 迁移进度条：与横幅同一底色，只做「有进展」的量化，不抢视觉。 */
+.migration-bar {
+  flex: none;
+  width: 140px;
+  height: 3px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 14%, transparent);
+  overflow: hidden;
+}
+
+.migration-bar i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--ink-2);
+  transition: width 0.2s var(--ease);
+}
+
+.alert-block h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.alert-block p {
+  margin: 0;
+  color: var(--ink-2);
+}
+
+.hint {
+  padding: 26px 0;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.03em;
+  color: var(--ink-3);
+}
+
+/* 渲染崩坏时的兜底页：不依赖任何业务组件，只借令牌。 */
+.crash {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  padding: 40px;
+  background: var(--bg);
+}
+
+.mini-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.mini-btn:disabled:hover {
+  background: none;
+  color: var(--ink-3);
+}
+
+/* ============ 按钮（原型 .btn 系列） ============ */
+.btn {
+  height: 31px;
+  padding: 0 12px;
+  border-radius: 7px;
+  border: 1px solid var(--line-2);
+  font-size: 12px;
+  color: var(--ink);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  transition:
+    background 0.16s var(--ease),
+    border-color 0.16s var(--ease),
+    transform 0.16s var(--ease),
+    color 0.16s var(--ease);
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--hover);
+  border-color: var(--ink-3);
+}
+
+.btn:active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+}
+
+.btn.primary {
+  background: var(--inv-bg);
+  border-color: var(--inv-bg);
+  color: var(--inv-ink);
+  flex: 1;
+  justify-content: center;
+}
+
+.btn.primary:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.btn.icon {
+  padding: 0 9px;
+  color: var(--ink-2);
+}
+
+/* ============ 动效 ============ */
+@keyframes cardIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes shimmer {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes detailIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes panelIn {
+  from {
+    transform: translateY(8px) scale(0.985);
+  }
+  to {
+    transform: none;
+  }
+}
+
+@keyframes paneIn {
+  from {
+    transform: translateY(5px);
+  }
+  to {
+    transform: none;
+  }
+}
+
+@keyframes toastIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* 主题切换：令牌替换期间只过渡颜色，避免布局抖动。 */
+html.theming,
+html.theming *,
+html.theming *::before,
+html.theming *::after {
+  transition:
+    background-color 0.34s var(--ease),
+    color 0.34s var(--ease),
+    border-color 0.34s var(--ease),
+    fill 0.34s var(--ease),
+    stroke 0.34s var(--ease),
+    box-shadow 0.34s var(--ease) !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

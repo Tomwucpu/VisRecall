@@ -1,0 +1,320 @@
+/* 弹窗：设置对话框、确认对话框与危险区。 */
+
+/* ============ 弹窗（设置 / 确认） ============ */
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  background: rgba(10, 10, 10, 0.42);
+  backdrop-filter: blur(6px);
+}
+
+.modal-panel {
+  width: min(760px, 92vw);
+  height: min(530px, 86vh);
+  background: var(--elevated);
+  border: 1px solid var(--line-2);
+  border-radius: 13px;
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  overflow: hidden;
+  animation: panelIn 0.3s var(--ease);
+}
+
+.modal-nav {
+  width: 176px;
+  flex: 0 0 176px;
+  border-right: 1px solid var(--line);
+  padding: 16px 10px;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-nav .label {
+  padding: 0 10px 10px;
+  letter-spacing: 0.1em;
+}
+
+.mnav {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 31px;
+  padding: 0 10px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  color: var(--ink-2);
+  text-align: left;
+  transition:
+    background 0.16s var(--ease),
+    color 0.16s var(--ease);
+}
+
+.mnav:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.mnav.on {
+  background: var(--active);
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.modal-nav .grow {
+  flex: 1;
+}
+
+.modal-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-head {
+  height: 52px;
+  flex: 0 0 52px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 18px 0 22px;
+  border-bottom: 1px solid var(--line);
+}
+
+.modal-head h2 {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.modal-head .sub {
+  font-size: 10px;
+  color: var(--ink-3);
+  margin-left: 9px;
+  font-family: var(--mono);
+  letter-spacing: 0.03em;
+}
+
+.modal-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 22px 26px;
+}
+
+.pane {
+  animation: paneIn 0.26s var(--ease);
+}
+
+.pane-desc {
+  margin: 0 0 18px;
+  font-size: 11.5px;
+  color: var(--ink-3);
+  line-height: 1.7;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.row:last-child {
+  border-bottom: 0;
+}
+
+.row-t {
+  font-size: 12.5px;
+  color: var(--ink);
+}
+
+.row-d {
+  font-size: 10.5px;
+  color: var(--ink-3);
+  margin-top: 3px;
+  line-height: 1.6;
+  max-width: 380px;
+}
+
+.row-r {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.switch {
+  width: 36px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  border: 1px solid var(--line-2);
+  position: relative;
+  transition:
+    background 0.22s var(--ease),
+    border-color 0.22s var(--ease);
+}
+
+.switch i {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--ink-3);
+  transition:
+    transform 0.26s var(--ease),
+    background 0.22s var(--ease);
+}
+
+.switch.on {
+  background: var(--inv-bg);
+  border-color: var(--inv-bg);
+}
+
+.switch.on i {
+  transform: translateX(16px);
+  background: var(--inv-ink);
+}
+
+.switch:disabled {
+  /* 只读反映真实配置：保留可读性，靠 cursor 与 title 说明不可改。 */
+  opacity: 0.75;
+  cursor: default;
+}
+
+.seg {
+  display: flex;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.seg button {
+  height: 26px;
+  padding: 0 10px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  color: var(--ink-3);
+  border-right: 1px solid var(--line);
+  transition:
+    background 0.16s var(--ease),
+    color 0.16s var(--ease);
+}
+
+.seg button:last-child {
+  border-right: 0;
+}
+
+.seg button.on {
+  background: var(--inv-bg);
+  color: var(--inv-ink);
+}
+
+.seg button:disabled {
+  opacity: 0.7;
+  cursor: default;
+}
+
+.row-r .mini-btn:not(:disabled) {
+  color: var(--ink-2);
+  border: 1px solid var(--line);
+  padding: 3px 8px;
+}
+
+.kbd-set {
+  display: flex;
+  gap: 4px;
+}
+
+.field {
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-2);
+  min-width: 170px;
+}
+
+.field:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* 确认对话框：原型没有该组件，用同一套令牌与按钮拼出最小形态。 */
+.confirm-panel {
+  width: min(392px, 88vw);
+  background: var(--elevated);
+  border: 1px solid var(--line-2);
+  border-radius: 13px;
+  box-shadow: var(--shadow-lg);
+  padding: 20px 22px 18px;
+  animation: panelIn 0.3s var(--ease);
+}
+
+.confirm-panel h2 {
+  margin: 0 0 8px;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.confirm-panel p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--ink-2);
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.confirm-actions .btn {
+  height: 30px;
+}
+
+.confirm-actions .btn.danger {
+  background: var(--seal);
+  border-color: var(--seal);
+  color: var(--inv-ink);
+}
+
+.confirm-actions .btn.danger:hover:not(:disabled) {
+  opacity: 0.9;
+  background: var(--seal);
+}
+
+/* 危险区：默认折叠，展开后才显示不可恢复操作（P2-R06）。 */
+.danger-zone {
+  margin-top: 18px;
+  padding: 10px 12px;
+  border: 1px dashed color-mix(in srgb, var(--seal) 40%, transparent);
+  border-radius: 8px;
+}
+
+.danger-zone > summary {
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: var(--seal);
+}
+
+.danger-zone[open] > summary {
+  margin-bottom: 8px;
+}

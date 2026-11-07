@@ -1,0 +1,259 @@
+/* 素材网格：网格容器、素材卡、空状态与「加载更多」。 */
+
+/* --- 网格 --- */
+.grid-scroll {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* 顶部 8px 是给卡片 hover 上浮与阴影留的：滚动容器会裁剪超出 padding 的内容。 */
+  padding: 8px 26px 30px;
+  scroll-behavior: smooth;
+}
+
+/*
+ * 固定轨道网格：卡片恒为 228px 宽，窗口或详情面板变化只增减列数，单卡尺寸不变。
+ * 列数算不尽时剩下的宽度由 `space-between` 均摊到列距，避免右侧出现大片空白；
+ * `min(210px, 100%)` 是极窄容器（窗口最小宽 + 详情列）下的兜底，让唯一一列等比收缩。
+ */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(210px, 100%), 228px));
+  gap: 16px;
+  justify-content: space-between;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.grid-cell {
+  display: block;
+  min-width: 0;
+}
+
+/* --- 卡片 --- */
+.card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  margin: 0;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  cursor: pointer;
+  transition:
+    transform 0.24s var(--ease),
+    border-color 0.24s var(--ease),
+    box-shadow 0.24s var(--ease);
+  animation: cardIn 0.36s var(--ease) backwards;
+  will-change: transform;
+}
+
+.card:hover {
+  transform: translateY(-2px);
+  border-color: var(--line-2);
+  box-shadow: var(--shadow-md);
+}
+
+.card.selected {
+  border-color: var(--ink-3);
+}
+
+.card.selected::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 9px;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 1px var(--ink-3);
+}
+
+/* 缩略区固定 16:10，图片完整缩放（contain）后居中，余下部分用纯色底留白。 */
+.card-thumb {
+  position: relative;
+  flex: 0 0 auto;
+  aspect-ratio: 16 / 10;
+  padding: 6px;
+  background: var(--thumb);
+  color: var(--ink-2);
+  overflow: hidden;
+  display: block;
+}
+
+.card-thumb > img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.thumb-fallback {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.card-body {
+  flex: 1;
+  padding: 11px 13px 10px;
+}
+
+.card-title {
+  margin: 0;
+  font-size: 12.8px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.card-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 5px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--ink-3);
+  letter-spacing: 0.02em;
+  min-width: 0;
+}
+
+.card-meta > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-meta .card-time {
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
+.card-meta .dot {
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.6;
+  flex: 0 0 2px;
+  overflow: visible;
+}
+
+.hue-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex: 0 0 5px;
+  background: var(--hue, var(--hue-ash));
+  opacity: 0.9;
+}
+
+.badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.03em;
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  border: 1px solid var(--line-2);
+  color: var(--ink-2);
+  backdrop-filter: blur(6px);
+}
+
+.badge.pending,
+.badge.failed {
+  background: color-mix(in srgb, var(--seal) 13%, var(--surface));
+  color: var(--seal);
+  border-color: color-mix(in srgb, var(--seal) 34%, transparent);
+}
+
+.card.is-pending .card-thumb > img,
+.card.is-pending .thumb-fallback {
+  opacity: 0.4;
+}
+
+.shimmer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(100deg, transparent 20%, rgba(255, 255, 255, 0.28) 45%, transparent 70%);
+  transform: translateX(-100%);
+  animation: shimmer 1.4s linear infinite;
+}
+
+[data-theme="dark"] .shimmer {
+  background: linear-gradient(100deg, transparent 20%, rgba(255, 255, 255, 0.07) 45%, transparent 70%);
+}
+
+/* --- 空状态 --- */
+.empty {
+  padding: 80px 0 60px;
+  text-align: center;
+  color: var(--ink-3);
+}
+
+.empty .mark {
+  width: 42px;
+  height: 42px;
+  margin: 0 auto 16px;
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  color: var(--ink-3);
+}
+
+.empty h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink-2);
+}
+
+.empty p {
+  margin: 0;
+  font-size: 12px;
+}
+
+.grid-more {
+  display: flex;
+  justify-content: center;
+  padding: 4px 0 16px;
+}
+
+.grid-more button {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--ink-2);
+  padding: 6px 14px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  transition:
+    background 0.16s var(--ease),
+    border-color 0.16s var(--ease),
+    color 0.16s var(--ease);
+}
+
+.grid-more button:hover:not(:disabled) {
+  background: var(--hover);
+  border-color: var(--ink-3);
+  color: var(--ink);
+}
