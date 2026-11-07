@@ -39,8 +39,11 @@ serde_json.workspace = true
 # 默认开启，`cargo build --release -p visrecall` 一条命令即可产出可运行的二进制。
 #
 # 副作用（已知，见 02-library-detail/verification.md §4 L3）：`tauri` 把「dev 模式」
-# 定义为「未启用 custom-protocol」，所以 debug 构建也内嵌 `dist/`：
-# - 开发态要连 Vite dev server：`cargo run -p visrecall --no-default-features`；
-# - 新克隆仓库先跑一次 `pnpm build`，否则内嵌资源缺失会导致编译失败。
+# 定义为「未启用 custom-protocol」，所以**裸** `cargo run`/`cargo build`（debug）
+# 也内嵌 `dist/`、不走 `devUrl`。
+# - 日常开发请用 `pnpm tauri dev`：CLI 实测执行 `cargo run --no-default-features`，
+#   HMR 照旧（2026-11-07 用 `--verbose` 确认日志 `DevCommand (cargo run --no-default-features …)`）；
+# - 只想跑二进制调试：`cargo run -p visrecall --no-default-features`（需 Vite 在 5173）；
+# - 新克隆仓库先跑一次 `pnpm build`，否则内嵌资源缺失会导致 `cargo build -p visrecall` 失败。
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]

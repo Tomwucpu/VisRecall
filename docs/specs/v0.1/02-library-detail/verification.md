@@ -167,7 +167,7 @@ pnpm build
 | 虚拟滚动未实现 | 测试规模 ≤20 条 | 素材超 200 条时 |
 | **L1 本轮未构造 20 条手工数据** | §2 中依赖这批数据的项标「未验证（环境限制）」；数据层语义由集成测试覆盖 | 阶段 03 启动前补测 |
 | **L2 截图与 GUI 目视全部未做** | 执行环境禁止 `Add-Type`（截屏 API 被安全策略拦截），且无 GUI 操作能力；视觉项以进程指标 + 日志 + 组件测试替代 | 有人值守时补 |
-| **L3 debug 构建也内嵌 `dist/`（`custom-protocol` 设为默认特性的副作用）** | `tauri` 的 `dev` cfg = 「未启用 `custom-protocol`」，因此 `cargo build`/`cargo run`（debug）同样走内嵌资源，Vite dev server 不再被使用；开发态要连 devUrl 必须 `cargo run -p visrecall --no-default-features`（已实测可编译）。且 `dist/` 不存在时 `cargo build -p visrecall` 会因内嵌资源缺失而失败——**新克隆仓库需先 `pnpm build`** | 阶段 04 若引入 `tauri dev` 流程时重估 |
+| **L3 `custom-protocol` 设为默认特性的副作用** | `tauri` 的 `dev` cfg 定义为「未启用 `custom-protocol`」，因此**裸 `cargo run` / `cargo build`（debug）也内嵌 `dist/`、不走 `devUrl`**；`dist/` 缺失时 `cargo build -p visrecall` 会因内嵌资源缺失而失败（新克隆仓库需先 `pnpm build`）。**日常开发不受影响**：`pnpm tauri dev` 实际执行 `cargo run --no-default-features`（2026-11-07 `--verbose` 实测日志 `DevCommand (cargo run --no-default-features --color always --)`，同时 `BeforeDevCommand` 起了 Vite），HMR 照旧；另有 `cargo run -p visrecall --no-default-features` 可手工走 devUrl | 阶段 04 若统一 dev 流程时重估 |
 | **L4 跨卷迁移未实测** | 迁移只在系统临时目录内（同卷）验证；不同盘符/不同文件系统的 `free_space_bytes` 与复制行为未实测 | 有人值守时补 |
 | **L5 原图只读删除** | 断言的是「库记录已删」；Windows 上只读属性不阻止已打开句柄删除，因此不要求文件消失，残留由孤儿扫描兜底 | 不排期 |
 | **L6 真实库只有 1 条素材** | `C:\Users\Tomwu\Documents\VisRecall` 仍是阶段 01 遗留的那条 `Code.exe` 截图；本轮 release 冒烟只读取了它，未产生新素材、未做迁移/清空等破坏性操作 | 用户可自行清理 |
@@ -183,5 +183,5 @@ pnpm build
 - **仍未达成、必须补齐的项**：
   1. 20 条手工数据下的视觉验收（详情三类、列表滚动/翻页、三档尺寸、贴边/全屏、引导只出现一次），以及全部截图证据（L1/L2）；
   2. 阶段 01 门禁里仍然 `未验证（环境限制）` 的 9 项：物理 4K + PresentMon、双屏与混合 DPI、100%/200% 缩放、物理 OLE 四来源、DRM/独占全屏、提权窗口与 UIPI、30 分钟 + ≥20 次真实捕获、重复捕获不去重、滚动帧率量化（§1）；
-  3. 详情读取耗时 P95、`pnpm tauri dev` 流程下 HMR 的取舍（L3）、跨卷迁移（L4）。
-- **建议下一阶段启动前确认**：①是否接受 L3（debug 构建内嵌 `dist/`，开发态需 `--no-default-features`）；②阶段 03 的检索依赖标签/摘要，届时需先补本阶段未做的标签云筛选与 20 条数据验收。
+  3. 详情读取耗时 P95、跨卷迁移（L4）、以及 L3 的取舍（只影响「裸 `cargo run`」，不影响 `pnpm tauri dev`）。
+- **建议下一阶段启动前确认**：①L3 是否保留现状（`custom-protocol` 默认开启：release 一条命令可用，代价是裸 `cargo build/run` 必须已有 `dist/`）；②阶段 03 的检索依赖标签/摘要，届时需先补本阶段未做的标签云筛选与 20 条数据验收。
