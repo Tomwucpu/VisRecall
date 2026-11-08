@@ -46,6 +46,10 @@ impl From<&AppError> for ApiError {
             AppError::Io(detail) => ("IO", detail.clone()),
             AppError::Database(detail) => ("DATABASE", detail.clone()),
             AppError::Internal(detail) => ("INTERNAL", detail.clone()),
+            AppError::ModelNotReady(detail) => ("MODEL_NOT_READY", detail.clone()),
+            AppError::Provider(detail) => ("PROVIDER", detail.clone()),
+            AppError::ProviderConfig(detail) => ("PROVIDER_CONFIG", detail.clone()),
+            AppError::SchemaViolation(detail) => ("SCHEMA_VIOLATION", detail.clone()),
         };
         ApiError::new(code, message)
     }
@@ -889,6 +893,13 @@ mod tests {
             (AppError::Io("disk".into()), "IO"),
             (AppError::Database("locked".into()), "DATABASE"),
             (AppError::Internal("oops".into()), "INTERNAL"),
+            (AppError::ModelNotReady("bge".into()), "MODEL_NOT_READY"),
+            (AppError::Provider("timeout".into()), "PROVIDER"),
+            (AppError::ProviderConfig("401".into()), "PROVIDER_CONFIG"),
+            (
+                AppError::SchemaViolation("missing summary".into()),
+                "SCHEMA_VIOLATION",
+            ),
         ];
         for (err, code) in cases {
             assert_eq!(ApiError::from(&err).code, code);

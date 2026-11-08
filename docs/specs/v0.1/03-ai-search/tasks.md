@@ -354,19 +354,19 @@ cargo clippy -p visrecall-ai --all-targets -- -D warnings
   - `ai::keyring::{save_key, load_key, delete_key}(slot)`（service `"VisRecall"`，account `vlm-primary`/`vlm-backup`）
   - `ai::vlm::probe(base_url, model, key) -> ProbeOutcome`（文本 ping + 1×1 PNG 视觉）
 
-- [ ] **Step 1: schema.rs**
+- [x] **Step 1: schema.rs**
 
 serde 强类型（design §4.5）+ 枚举校验 + `summary` ≤200 字符（给修复留余量）+ `tags` ≤8、逐个 ≤32 字符（超限截断不报错）。`repair_once(raw, serde_err)`：把错误与原文拼进修复提示词再请求一次。剥离 ```` ```json ```` 包裹。
 
-- [ ] **Step 2: OpenAiCompatible 客户端**
+- [x] **Step 2: OpenAiCompatible 客户端**
 
 `POST {base_url}/chat/completions`，Bearer key，`timeout 30s`；错误分类：连接/超时/5xx → `Provider`（可重试可切备）；401/403 → `ProviderConfig`（终止）；429 → `Provider` 且退避翻倍。视觉消息：`{ type: "image_url", image_url: { url: "data:image/png;base64,..." } }`。
 
-- [ ] **Step 3: keyring.rs**
+- [x] **Step 3: keyring.rs**
 
 `save_key` 覆盖写；`load_key` 不存在返回 `None`；`delete_key` 幂等。**日志与错误信息绝不包含 key 内容。**
 
-- [ ] **Step 4: wiremock 测试**
+- [x] **Step 4: wiremock 测试**
 
 - 正常 JSON → `VisionInsight` 全字段。
 - Markdown 包裹 → 剥离成功；畸形 JSON → 修复一次路径（mock 第二次返回合法）。
