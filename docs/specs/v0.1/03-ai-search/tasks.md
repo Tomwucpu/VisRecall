@@ -228,11 +228,11 @@ cargo clippy -p visrecall-search --all-targets -- -D warnings
 - Consumes: `item_vectors_int8` 表、`vector.active_table` 指针
 - Produces: `domain::{quantize_i8, cosine_i8, VectorIndex}`；`library::BruteForceInt8::new(library) -> Self`
 
-- [ ] **Step 1: vector_math 纯函数**
+- [x] **Step 1: vector_math 纯函数**
 
 `quantize_i8`：`round(x * 127 / max|x|)`（全零向量返回全零）；`cosine_i8`：int8 点积 / (模长乘积)，字节循环按 u8 展开（编译器自动向量化；不引入 SIMD crate）。单测：量化误差下与 f32 余弦排序一致（随机 1000 对，Spearman >0.99）。
 
-- [ ] **Step 2: BruteForceInt8**
+- [x] **Step 2: BruteForceInt8**
 
 ```rust
 pub struct BruteForceInt8 { library: Arc<Library> }
@@ -245,7 +245,7 @@ impl VectorIndex for BruteForceInt8 {
 
 `search` 的 `query: &[f32]` 先 `quantize_i8` 再比；`dim` 不匹配的行跳过并 `warn`（防脏数据毒化结果）。
 
-- [ ] **Step 3: 测试**
+- [x] **Step 3: 测试**
 
 - 量化往返 + 余弦正确性（正交=0、同向=1）。
 - 100 条随机向量 Top-10 与暴力 f32 参考 implementations 排序一致。

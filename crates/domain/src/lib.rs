@@ -15,6 +15,7 @@ pub mod search;
 pub mod storage;
 pub mod tag;
 pub mod time;
+pub mod vector_math;
 
 pub use capture::{CapturedImage, DisplayInfo, ForegroundInfo, RawFrame, WindowInfo};
 pub use drop::DropContent;
@@ -33,6 +34,7 @@ pub use storage::{
 };
 pub use tag::{hue_for, normalize_tag_name, ItemTag, Tag, TagSource, MAX_TAG_CHARS, TAG_HUES};
 pub use time::now_millis;
+pub use vector_math::{cosine_f32, cosine_i8, dequantize_i8, normalize_l2, quantize_i8};
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

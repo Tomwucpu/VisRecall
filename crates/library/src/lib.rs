@@ -19,6 +19,7 @@ pub mod relocate;
 pub mod settings_kv;
 pub mod storage;
 pub mod tags;
+pub mod vector_index;
 pub mod vectors;
 
 pub use cleanup::StartupCleanup;
@@ -28,6 +29,7 @@ pub use fts::{FtsColumns, FtsHit};
 pub use paths::{ensure_library_root, AppPaths, LibraryMeta};
 pub use purge::{DeletedItem, PurgeReport};
 pub use queries_log::QueryLog;
+pub use vector_index::BruteForceInt8;
 pub use vectors::{VectorRow, DEFAULT_VECTOR_TABLE};
 
 // 同事务写入原语（`write_index_tx` 的闭包内使用；pipeline 的 handlers 直接引用这些函数）。
