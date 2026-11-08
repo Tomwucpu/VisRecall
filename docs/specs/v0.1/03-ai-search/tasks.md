@@ -274,11 +274,11 @@ cargo clippy -p visrecall-domain -p visrecall-library --all-targets -- -D warnin
 - Consumes: `models/`（bge ONNX + tokenizer.json）、`models::resolve_model_dir`
 - Produces: `ai::BgeSmallEmbedder`（实现 `EmbeddingProvider`；`id()="bge-small-zh-v1.5-int8"`、`dim()=512`、`ready()`、内建 LRU 256 查询缓存）
 
-- [ ] **Step 1: 实现**
+- [x] **Step 1: 实现**
 
 懒加载：`OnceLock<Session>` + 状态 `AtomicU8 { NotReady, Loading, Ready, Failed }`；`embed` 在 NotReady 时同步加载（首次调用者承担，pipeline 阶段一天然如此）；`ready()` 供检索降级判定。tokenize → 512 截断 → ort run → CLS 池化 → L2 归一化。LRU：`Mutex<LruCache<String, Vec<f32>>>`，键为原文本，容量 256（嵌入批量为 1；批量接口保留给 rebuild 用）。
 
-- [ ] **Step 2: 测试**
+- [x] **Step 2: 测试**
 
 - `#[ignore]`（需模型）：确定性、维度、延迟（P95 <30ms 断言）、语义 sanity、LRU 二次命中（时间显著下降）。
 - 非 ignore：`ready()` 状态机（Failed 注入：模型目录指错 → ready=false、embed 报错不 panic）。
