@@ -308,19 +308,19 @@ cargo clippy -p visrecall-ai --all-targets -- -D warnings
 - Consumes: `models/`（det/rec ONNX）、`ndarray`
 - Produces: `ai::PpocrOcr`、`ai::WindowsOcr`、`ai::ocr::OcrChain`（PP-OCR→Windows 责任链，`ocr_engine` 字段记录实际引擎）
 
-- [ ] **Step 1: ppocr.rs**
+- [x] **Step 1: ppocr.rs**
 
 det：输入按比例 resize（长边 960、32 对齐）→ 二值图 → 阈值 + 盒子收缩（unclip 近似：按 box score 过滤即可，精度调优在 T0 已完成）；rec：逐 crop resize 高 48、宽按比例（上限 320）→ CTC 解码。输出：`text`（按 y-x 排序拼接，行间 `\n`）、`boxes`（归一化）、`confidence`（逐框均值）。长边 >4096 先等比降采样。
 
-- [ ] **Step 2: windows_ocr.rs**
+- [x] **Step 2: windows_ocr.rs**
 
 `BitmapDecoder` → `SoftwareBitmap`（BGRA8）→ `OcrEngine::TryCreateFromLanguage(zh-CN)` 失败则 `TryCreateFromUserProfileLanguages` → `RecognizeAsync` block（专用 STA 线程）。boxes 归一化对齐 PP-OCR 结构（word 级合并为行级近似）。
 
-- [ ] **Step 3: OcrChain**
+- [x] **Step 3: OcrChain**
 
 PP-OCR 失败（模型缺失/校验失败/推理错误）记 `warn!` → Windows OCR；Windows 也失败 → `Err`（上游按「OCR 无文字」矩阵处理）。链的构造只依赖 `resolve_model_dir` 结果，无运行时探测。
 
-- [ ] **Step 4: 测试**
+- [x] **Step 4: 测试**
 
 - `#[ignore]`（需模型）：fixtures 图逐张断言关键短语出现在 `text`；boxes 归一化范围 [0,1]；置信度 ∈ [0,1]；**无文字纯色图断言 `text` 为空、boxes 为空、正常返回 `Ok`（空结果是正常结果而非 `Err`，走 §6.1 的空文本分支）**。
 - 非 ignore：chain 降级（注入「模型目录无效」）→ `ocr_engine` 记录为 windows（本机有语言包时）或 `Err`（无语言包环境记 `#[ignore]`）。

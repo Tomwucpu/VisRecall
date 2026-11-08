@@ -16,7 +16,7 @@ use image::{imageops::FilterType, RgbImage};
 use ort::session::Session;
 use ort::value::Tensor;
 use visrecall_domain::insight::OcrBox;
-use visrecall_domain::providers::OcrOutput;
+use visrecall_domain::providers::{OcrOutput, OcrProvider};
 use visrecall_domain::AppError;
 
 use crate::runtime::session_builder;
@@ -220,6 +220,16 @@ impl PpocrOcr {
         let steps = *shape.get(1).unwrap_or(&0) as usize;
         let classes = *shape.get(2).unwrap_or(&0) as usize;
         Ok(ctc_greedy_decode(probs, steps, classes, &self.keys))
+    }
+}
+
+impl OcrProvider for PpocrOcr {
+    fn id(&self) -> &'static str {
+        PPOCR_ID
+    }
+
+    fn recognize(&self, png: &[u8]) -> Result<OcrOutput, AppError> {
+        self.recognize_bytes(png)
     }
 }
 

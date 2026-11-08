@@ -41,6 +41,14 @@ pub trait OcrProvider: Send + Sync {
     fn id(&self) -> &'static str;
     /// 识别 PNG 字节；引擎失败返回 `Err`（调用方按「OCR 无文字」矩阵处理）。
     fn recognize(&self, png: &[u8]) -> Result<OcrOutput, AppError>;
+
+    /// 识别并告知**实际**使用的引擎（责任链降级时与 `id()` 不同）。
+    ///
+    /// 默认实现把 `id()` 当作实际引擎；`OcrChain` 覆盖它以返回真实降级结果，
+    /// 这样 `insights.ocr_engine` 记录的是实际跑的那个引擎（P3-R01）。
+    fn recognize_with_engine(&self, png: &[u8]) -> Result<(OcrOutput, &'static str), AppError> {
+        self.recognize(png).map(|output| (output, self.id()))
+    }
 }
 
 /// 本地嵌入（查询与索引用同一个 Provider，保证同一向量空间）。
