@@ -20,6 +20,7 @@ use crate::db::{db_error, DB_FILE};
 pub const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_core.sql")),
     (2, include_str!("../migrations/0002_library_detail.sql")),
+    (3, include_str!("../migrations/0003_ai_search.sql")),
 ];
 
 const MIGRATIONS_TABLE: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (\n  version INTEGER PRIMARY KEY,\n  applied_at INTEGER NOT NULL\n)";
@@ -217,7 +218,6 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count as usize, MIGRATIONS.len());
-        assert_eq!(count, 2);
     }
 
     #[test]
@@ -289,8 +289,17 @@ mod tests {
             .flatten()
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names, vec!["visrecall.db.bak-2".to_string()]);
-        assert!(backups.join("visrecall.db.bak-2").metadata().unwrap().len() > 0);
+        // 备份名用「本次待应用迁移里的最高版本」：从 v1 库升级时是最后一条迁移的版本。
+        let latest = MIGRATIONS.last().unwrap().0;
+        assert_eq!(names, vec![format!("{BACKUP_PREFIX}{latest}")]);
+        assert!(
+            backups
+                .join(format!("{BACKUP_PREFIX}{latest}"))
+                .metadata()
+                .unwrap()
+                .len()
+                > 0
+        );
     }
 
     #[test]

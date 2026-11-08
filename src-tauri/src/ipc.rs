@@ -932,6 +932,8 @@ mod tests {
             thumb_path: None,
             note: String::new(),
             content_hash: "hash".into(),
+            revision: 0,
+            primary_color: None,
         };
 
         let dto = ItemDto::from(base.clone());
@@ -989,6 +991,8 @@ mod tests {
                 thumb_path: None,
                 note: String::new(),
                 content_hash: "hash".into(),
+                revision: 0,
+                primary_color: None,
             },
             extras: visrecall_app_core::DetailExtras {
                 summary: None,

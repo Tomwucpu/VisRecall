@@ -6,8 +6,14 @@ use visrecall_domain::{new_item_id, now_millis, AppError};
 
 use crate::db::{db_error, Library};
 
-const COLUMNS: &str = "id, kind, status, captured_at, source_app, source_title, source_url, \
-                       width, height, char_count, original_path, thumb_path, note, content_hash";
+/// 读取列（表别名 `i`）：`primary_color` 来自 `insights` 的 LEFT JOIN（P3-R10）。
+const COLUMNS: &str =
+    "i.id, i.kind, i.status, i.captured_at, i.source_app, i.source_title, i.source_url, \
+                       i.width, i.height, i.char_count, i.original_path, i.thumb_path, i.note, \
+                       i.content_hash, i.revision, ins.primary_color";
+
+/// 读取来源：素材 + 解析结果（可能没有 insights 行）。
+const FROM: &str = "items i LEFT JOIN insights ins ON ins.item_id = i.id";
 
 /// 备注长度上限（按字符计，不是字节）。
 pub const MAX_NOTE_CHARS: usize = 10_000;
@@ -39,6 +45,8 @@ impl Library {
             thumb_path: None,
             note: String::new(),
             content_hash: new.content_hash,
+            revision: 0,
+            primary_color: None,
         };
 
         let mut conn = self.conn()?;
@@ -79,9 +87,9 @@ impl Library {
         let conn = self.conn()?;
         let mut stmt = conn
             .prepare(&format!(
-                "SELECT {COLUMNS} FROM items
-                 WHERE (?1 IS NULL OR captured_at < ?1)
-                 ORDER BY captured_at DESC, rowid DESC
+                "SELECT {COLUMNS} FROM {FROM}
+                 WHERE (?1 IS NULL OR i.captured_at < ?1)
+                 ORDER BY i.captured_at DESC, i.rowid DESC
                  LIMIT ?2"
             ))
             .map_err(db_error)?;
@@ -100,7 +108,7 @@ impl Library {
     pub fn get_item(&self, id: &str) -> Result<Option<Item>, AppError> {
         let conn = self.conn()?;
         conn.query_row(
-            &format!("SELECT {COLUMNS} FROM items WHERE id = ?1"),
+            &format!("SELECT {COLUMNS} FROM {FROM} WHERE i.id = ?1"),
             [id],
             row_to_item,
         )
@@ -185,9 +193,9 @@ impl Library {
         let conn = self.conn()?;
         let mut stmt = conn
             .prepare(&format!(
-                "SELECT {COLUMNS} FROM items
-                 WHERE captured_at < ?1
-                 ORDER BY captured_at ASC, rowid ASC
+                "SELECT {COLUMNS} FROM {FROM}
+                 WHERE i.captured_at < ?1
+                 ORDER BY i.captured_at ASC, i.rowid ASC
                  LIMIT ?2"
             ))
             .map_err(db_error)?;
@@ -213,25 +221,69 @@ impl Library {
     ) -> Result<Option<(String, Option<String>)>, AppError> {
         let mut conn = self.conn()?;
         let tx = conn.transaction().map_err(db_error)?;
-        let row: Option<(Option<String>, Option<String>)> = tx
+        let row: Option<(Option<String>, Option<String>, i64)> = tx
             .query_row(
-                "SELECT original_path, thumb_path FROM items WHERE id = ?1",
+                "SELECT original_path, thumb_path, rowid FROM items WHERE id = ?1",
                 [id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()
             .map_err(db_error)?;
-        let Some((original_path, thumb_path)) = row else {
+        let Some((original_path, thumb_path, rowid)) = row else {
             return Ok(None);
         };
 
         tx.execute("DELETE FROM jobs WHERE item_id = ?1", [id])
+            .map_err(db_error)?;
+        // FTS 是 contentful 虚表，没有外键：必须在同一事务里显式删（design §1.2 澄清）。
+        // insights 与向量行由 `items` 的外键级联清理。
+        tx.execute("DELETE FROM items_fts WHERE rowid = ?1", [rowid])
             .map_err(db_error)?;
         tx.execute("DELETE FROM items WHERE id = ?1", [id])
             .map_err(db_error)?;
         tx.commit().map_err(db_error)?;
 
         Ok(Some((original_path.unwrap_or_default(), thumb_path)))
+    }
+
+    /// 素材的 `rowid`（FTS 与向量表都以它为键）；不存在返回 `Ok(None)`。
+    pub fn item_rowid(&self, id: &str) -> Result<Option<i64>, AppError> {
+        let conn = self.conn()?;
+        conn.query_row("SELECT rowid FROM items WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(db_error)
+    }
+
+    /// 递增 `revision` 并返回新值（`jobs.revision` 的真相来源，D3-03）。
+    ///
+    /// 必须与 [`Library::enqueue_job`] 在同一事务语义内调用（pipeline 侧用
+    /// `bump_revision` + `enqueue` 的顺序保证），否则旧任务可能带着新 revision 逃逸。
+    pub fn bump_revision(&self, id: &str) -> Result<i64, AppError> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "UPDATE items SET revision = revision + 1, updated_at = ?2 WHERE id = ?1
+             RETURNING revision",
+            rusqlite::params![id, now_millis()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db_error)?
+        .ok_or(AppError::NotFound)
+    }
+
+    /// 事务内的 [`Library::bump_revision`]。
+    pub fn bump_revision_tx(tx: &rusqlite::Transaction<'_>, id: &str) -> Result<i64, AppError> {
+        tx.query_row(
+            "UPDATE items SET revision = revision + 1, updated_at = ?2 WHERE id = ?1
+             RETURNING revision",
+            rusqlite::params![id, now_millis()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db_error)?
+        .ok_or(AppError::NotFound)
     }
 
     /// 测试用：读取一行的 `(created_at, updated_at)`（`Item` 不暴露这两个字段）。
@@ -265,6 +317,8 @@ fn row_to_item(row: &Row<'_>) -> rusqlite::Result<Item> {
         thumb_path: row.get(11)?,
         note: row.get(12)?,
         content_hash: row.get(13)?,
+        revision: row.get(14)?,
+        primary_color: row.get(15)?,
     })
 }
 
@@ -397,5 +451,68 @@ mod tests {
     fn delete_item_row_returns_none_for_missing_item() {
         let (_dir, lib) = test_library();
         assert!(lib.delete_item_row("no-such-item").unwrap().is_none());
+    }
+
+    #[test]
+    fn bump_revision_increments_per_item() {
+        let (_dir, lib) = test_library();
+        let item = lib.insert_item(image_item()).unwrap();
+        assert_eq!(item.revision, 0);
+
+        assert_eq!(lib.bump_revision(&item.id).unwrap(), 1);
+        assert_eq!(lib.bump_revision(&item.id).unwrap(), 2);
+        assert_eq!(lib.get_item(&item.id).unwrap().unwrap().revision, 2);
+
+        assert!(matches!(
+            lib.bump_revision("no-such-item"),
+            Err(AppError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn bump_revision_works_inside_write_index_tx() {
+        let (_dir, lib) = test_library();
+        let item = lib.insert_item(image_item()).unwrap();
+
+        lib.write_index_tx(|tx| {
+            Library::bump_revision_tx(tx, &item.id)?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(lib.get_item(&item.id).unwrap().unwrap().revision, 1);
+
+        // 闭包返回 Err → 整体回滚，revision 不变
+        let result = lib.write_index_tx(|tx| {
+            Library::bump_revision_tx(tx, &item.id)?;
+            Err(AppError::Internal("boom".into()))
+        });
+        assert!(result.is_err());
+        assert_eq!(lib.get_item(&item.id).unwrap().unwrap().revision, 1);
+    }
+
+    #[test]
+    fn list_items_joins_primary_color() {
+        let (_dir, lib) = test_library();
+        let item = lib.insert_item(image_item()).unwrap();
+        assert!(lib.list_items(None, 10).unwrap()[0].primary_color.is_none());
+
+        let mut insight = visrecall_domain::Insight::empty(&item.id, 1);
+        insight.primary_color = Some("orange".into());
+        lib.insight_upsert(&insight).unwrap();
+
+        assert_eq!(
+            lib.list_items(None, 10).unwrap()[0]
+                .primary_color
+                .as_deref(),
+            Some("orange")
+        );
+        assert_eq!(
+            lib.get_item(&item.id)
+                .unwrap()
+                .unwrap()
+                .primary_color
+                .as_deref(),
+            Some("orange")
+        );
     }
 }

@@ -53,4 +53,8 @@ pub struct Item {
     pub thumb_path: Option<String>,
     pub note: String,
     pub content_hash: String,
+    /// 元数据版本号（阶段 03）：索引任务的幂等依据，任何影响检索文本的变更都会 +1。
+    pub revision: i64,
+    /// 主色（`insights.primary_color`，LEFT JOIN 而来；未解析或未给色时为 `None`）。
+    pub primary_color: Option<String>,
 }

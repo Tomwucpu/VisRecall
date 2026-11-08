@@ -108,13 +108,13 @@ scripts/models-check.ps1
   - `Library::index_write(tx 闭包：insight + fts + vector 三写)` —— 以 `&mut Transaction` 参数暴露，供 pipeline 组装同事务
   - `Library::query_log_insert(QueryLog)` / `query_log_set_feedback(id, feedback)`
 
-- [ ] **Step 1: 写 0003 迁移**（SQL 见 design §4.1 原样；`ALTER TABLE items ADD COLUMN revision` + 四张表/索引）
+- [x] **Step 1: 写 0003 迁移**（SQL 见 design §4.1 原样；`ALTER TABLE items ADD COLUMN revision` + 四张表/索引）
 
-- [ ] **Step 2: revision 与 primaryColor**
+- [x] **Step 2: revision 与 primaryColor**
 
 `bump_revision`：`UPDATE items SET revision=revision+1, updated_at=?2 WHERE id=?1 RETURNING revision`；`list_items`/`get_item` 的 SELECT 增加 `LEFT JOIN insights` 取 `primary_color`（`Item.primary_color: Option<String>`，DTO 映射在 Task 12 一并接 bindings）。
 
-- [ ] **Step 3: fts.rs（contentful 语义）**
+- [x] **Step 3: fts.rs（contentful 语义）**
 
 ```rust
 pub struct FtsColumns<'a> {
@@ -133,11 +133,11 @@ pub struct FtsColumns<'a> {
 
 候选集下推：候选 ≤500 时拼 `rowid IN (...)`；>500 或全集时不过滤（由调用方在融合后再过滤——20 条规模恒走 IN 分支，实现只留 IN 分支也可，登记简化）。
 
-- [ ] **Step 4: vectors.rs（暴力路径 + 蓝绿指针）**
+- [x] **Step 4: vectors.rs（暴力路径 + 蓝绿指针）**
 
 `vector_search` 在 `vectors.rs` 不做——检索侧余弦在 `VectorIndex` 实现里（Task 4），本任务只做表读写：`vector_upsert`（DELETE+INSERT by rowid）、`vector_delete`、`active_vector_table`（读 settings，缺省 `item_vectors_int8`）、`vector_switch_active`（单事务改 settings）、`create_vector_table(name)`（同 0003 结构，供蓝绿）、`vector_counts()`（自检）。
 
-- [ ] **Step 5: 同事务写入口**
+- [x] **Step 5: 同事务写入口**
 
 ```rust
 /// 三写同事务：调用方在闭包内完成 insight_upsert / fts_upsert / vector_upsert，
@@ -145,11 +145,11 @@ pub struct FtsColumns<'a> {
 pub fn write_index_tx(&self, f: impl FnOnce(&Transaction) -> Result<(), AppError>) -> Result<(), AppError>;
 ```
 
-- [ ] **Step 6: 删除与自检**
+- [x] **Step 6: 删除与自检**
 
 `purge.rs`：`delete_item_row` 的事务里追加 `DELETE FROM items_fts WHERE rowid=?`（insights/向量靠 FK 级联）；`library_purge` 追加 `DELETE FROM items_fts`、`DELETE FROM queries`。`db.rs` 启动：三个 COUNT 比对，不一致 `warn!`（修复入队在 Task 9 接）。
 
-- [ ] **Step 7: 测试**（`tests/ai_storage_db.rs`）
+- [x] **Step 7: 测试**（`tests/ai_storage_db.rs`）
 
 - 0003 幂等（两次 apply）；0002 库升级后 revision 默认 0、旧数据无损。
 - `write_index_tx` 中段失败（闭包返回 Err）→ insights/FTS/向量三处均无写入。

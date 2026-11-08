@@ -11,6 +11,7 @@ pub mod ids;
 pub mod insight;
 pub mod item;
 pub mod providers;
+pub mod search;
 pub mod storage;
 pub mod tag;
 pub mod time;

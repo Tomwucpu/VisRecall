@@ -83,9 +83,12 @@ impl Library {
                 .query_row("SELECT COUNT(*) FROM tags", [], |row| row.get(0))
                 .map_err(crate::db::db_error)?;
 
-            // 先子后父，避免外键顺序问题（jobs 没有外键，但要显式删）。
+            // 先子后父，避免外键顺序问题（jobs/items_fts/queries 没有外键，要显式删）。
+            // insights 与向量表靠 `items` 的 ON DELETE CASCADE 清空。
             for sql in [
                 "DELETE FROM jobs",
+                "DELETE FROM queries",
+                "DELETE FROM items_fts",
                 "DELETE FROM item_tags",
                 "DELETE FROM tag_suppressions",
                 "DELETE FROM tags",

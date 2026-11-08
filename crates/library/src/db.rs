@@ -45,6 +45,8 @@ impl Library {
             write: Mutex::new(conn),
         };
 
+        library.self_check_index();
+
         match library.cleanup_startup() {
             Ok(cleanup) => tracing::info!(
                 tmp_removed = cleanup.tmp_removed,
@@ -174,10 +176,118 @@ impl Library {
         Ok(())
     }
 
+    /// 三写同事务入口（design §6.1 的「一致性模型」）：
+    /// `insights` + `items_fts` + 向量表必须在同一事务里写完，任一 `Err` 整体回滚。
+    ///
+    /// **禁止**把这三处拆成三个独立事务——那样会允许「FTS 搜得到但向量搜不到」的半更新。
+    pub fn write_index_tx(
+        &self,
+        f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction().map_err(db_error)?;
+        f(&tx)?;
+        tx.commit().map_err(db_error)
+    }
+
+    /// 索引行数自检（`items` / `items_fts` / 活跃向量表）。不一致只记 `warn`；
+    /// 修复入队由 pipeline 的启动检查完成（Task 9）。
+    pub fn index_counts(&self) -> Result<IndexCounts, AppError> {
+        let conn = self.conn()?;
+        let items: i64 = conn
+            .query_row("SELECT COUNT(*) FROM items", [], |row| row.get(0))
+            .map_err(db_error)?;
+        let fts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM items_fts", [], |row| row.get(0))
+            .map_err(db_error)?;
+        drop(conn);
+        let vectors = self.vector_count()?;
+        Ok(IndexCounts {
+            items: items as u64,
+            fts: fts as u64,
+            vectors,
+        })
+    }
+
+    /// 启动自检：派生数据行数不一致时 `warn`（不阻塞开库）。
+    pub(crate) fn self_check_index(&self) {
+        match self.index_counts() {
+            Ok(counts) => {
+                if counts.items != counts.fts || counts.items != counts.vectors {
+                    tracing::warn!(
+                        items = counts.items,
+                        fts = counts.fts,
+                        vectors = counts.vectors,
+                        "derived index rows do not match items; repair will be enqueued on startup"
+                    );
+                }
+            }
+            Err(err) => tracing::warn!(%err, "index self check failed"),
+        }
+
+        // 分词器版本：首次开库写入，之后不一致只告警（全量重建留给真正需要时，design §1.2）。
+        let current = visrecall_domain::search::TOKENIZER_VERSION;
+        match self.setting_get::<String>(visrecall_domain::search::TOKENIZER_VERSION_KEY) {
+            None => {
+                if let Err(err) = self.setting_set(
+                    visrecall_domain::search::TOKENIZER_VERSION_KEY,
+                    &current.to_string(),
+                ) {
+                    tracing::warn!(%err, "failed to record tokenizer version");
+                }
+            }
+            Some(stored) if stored != current => tracing::warn!(
+                stored = %stored,
+                current = %current,
+                "fts.tokenizer_version mismatch; index text may not match query tokenizer"
+            ),
+            Some(_) => {}
+        }
+    }
+
+    /// 测试辅助：某张表是否存在（不暴露连接）。
+    #[doc(hidden)]
+    pub fn table_exists_for_test(&self, name: &str) -> Result<bool, AppError> {
+        let conn = self.conn()?;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = ?1",
+                [name],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        Ok(count > 0)
+    }
+
+    /// 测试辅助：已应用的最高迁移版本。
+    #[doc(hidden)]
+    pub fn max_schema_version_for_test(&self) -> Result<i64, AppError> {
+        let conn = self.conn()?;
+        conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .map_err(db_error)
+    }
+
     pub(crate) fn conn(&self) -> Result<MutexGuard<'_, Connection>, AppError> {
         self.write
             .lock()
             .map_err(|_| AppError::Internal("library connection poisoned".into()))
+    }
+}
+
+/// 索引行数快照（启动自检用）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexCounts {
+    pub items: u64,
+    pub fts: u64,
+    pub vectors: u64,
+}
+
+impl IndexCounts {
+    /// 三处是否一致。
+    pub fn is_consistent(&self) -> bool {
+        self.items == self.fts && self.items == self.vectors
     }
 }
 
