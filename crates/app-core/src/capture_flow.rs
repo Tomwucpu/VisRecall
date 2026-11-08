@@ -579,6 +579,10 @@ fn capture_failed_code(err: &AppError) -> &'static str {
         AppError::Io(_) => "IO",
         AppError::Database(_) => "DATABASE",
         AppError::Internal(_) => "INTERNAL",
+        AppError::ModelNotReady(_) => "MODEL_NOT_READY",
+        AppError::Provider(_) => "PROVIDER",
+        AppError::ProviderConfig(_) => "PROVIDER_CONFIG",
+        AppError::SchemaViolation(_) => "SCHEMA_VIOLATION",
     }
 }
 

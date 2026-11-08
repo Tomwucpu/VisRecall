@@ -571,6 +571,10 @@ fn clone_error(err: &AppError) -> AppError {
         AppError::Io(detail) => AppError::Io(detail.clone()),
         AppError::Database(detail) => AppError::Database(detail.clone()),
         AppError::Internal(detail) => AppError::Internal(detail.clone()),
+        AppError::ModelNotReady(detail) => AppError::ModelNotReady(detail.clone()),
+        AppError::Provider(detail) => AppError::Provider(detail.clone()),
+        AppError::ProviderConfig(detail) => AppError::ProviderConfig(detail.clone()),
+        AppError::SchemaViolation(detail) => AppError::SchemaViolation(detail.clone()),
     }
 }
 
