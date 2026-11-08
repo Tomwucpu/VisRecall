@@ -113,6 +113,15 @@ unclip 用面积/周长外扩、无 cls 方向分类、长边 >4096 降采样。
 分词口径：写入侧与查询侧都走同一个 `jieba.cut(text, false)`，token 以空格连接后再交给 FTS5
 `unicode61 remove_diacritics 2`；查询表达式把每个 token 加双引号再 OR（避免 FTS5 语法字符问题）。
 
+**Task 3 落地时的两处细化**（生产分词器 `crates/search/src/tokenizer.rs`，spike 用的是裸 `cut`）：
+1. **内置领域词表**：jieba 默认词典把 `营收/高亮/看板/漏斗图/饼图/大盘/置信度` 切成单字
+   （实测 `营收 → 营 + 收`），单字 token 几乎命中所有素材；改为启动时 `add_word` 固化
+   30 个截图高频复合词。刻意**不加** `发票号` 这类「更长词」——否则查「发票」会漏。
+2. **索引侧细化、查询侧粗化**：索引用 `cut_for_search`（`漏斗图 → 漏斗 漏斗图 图`），查询用
+   `cut`，因此任一切分粒度都能命中，避免两侧粒度不一致导致的漏召回。
+3. 转义统一走「每个词包成 FTS5 字符串字面量」（内部 `"` → `""`），不维护危险字符黑名单；
+   引号内内容按 `AND`（必命中）语义，见 §1.3 上方与 design §1.2。
+
 ### 1.4 ort ARM64 交叉（门禁 5）
 
 `rustup target add aarch64-pc-windows-msvc` 后 `cargo check -p visrecall-ai --target aarch64-pc-windows-msvc`

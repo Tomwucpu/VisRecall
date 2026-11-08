@@ -1,0 +1,17 @@
+[package]
+name = "visrecall-search"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+visrecall-domain = { path = "../domain" }
+jieba-rs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+visrecall-library = { path = "../library" }
+tempfile = "3"
+proptest = { workspace = true }

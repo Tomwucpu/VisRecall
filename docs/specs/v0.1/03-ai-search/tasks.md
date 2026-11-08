@@ -182,21 +182,21 @@ cargo clippy -p visrecall-library --all-targets -- -D warnings
 - Consumes: `visrecall-library`（dev-dep，集成测试用）
 - Produces: `TOKENIZER_VERSION`、`tokenize_for_fts`、`terms_for_query`、`build_match_expr(terms, quoted) -> String`、`build_search_document(&DocumentFields) -> String`
 
-- [ ] **Step 1: tokenizer.rs（唯一 jieba 入口）**
+- [x] **Step 1: tokenizer.rs（唯一 jieba 入口）**
 
 `jieba::Jieba` 全局 `OnceLock`；`tokenize_for_fts`：切分 → 过滤纯空白/标点 token → 空格连接；`terms_for_query`：切分 → 去停用词表（内置 ~100 常见虚词）→ 去重。`TOKENIZER_VERSION = "jieba-rs-0.7"`（与依赖版本同步维护，升级时改常量）。
 
-- [ ] **Step 2: fts_query.rs（MATCH 构造与转义）**
+- [x] **Step 2: fts_query.rs（MATCH 构造与转义）**
 
 - 转义：剔除 `"` `*` `(` `)` `:` `^` `-` 等 FTS5 语法字符（中文查询天然不含，英文场景兜底）。
 - `build_match_expr(terms, quoted)`：`terms` 以 ` OR ` 连接（空则不产生通道查询）；`quoted` 逐词转义后以 ` AND ` 连接，整体追加。返回空串表示 FTS 通道跳过。
 - 拼接结果只含安全字符——proptest 断言任意随机输入不产生语法错误（对临时库跑 `MATCH` 冒烟）。
 
-- [ ] **Step 3: document.rs（索引侧文本）**
+- [x] **Step 3: document.rs（索引侧文本）**
 
 字段序 `title > summary > tags > entities > note > ocr_or_original`；按 512 token 预算截断（字符近似常量 `DOC_CHAR_BUDGET`，T0 校准值固化并注明）；字段间以 `；` 分隔，空字段跳过。
 
-- [ ] **Step 4: 测试**
+- [x] **Step 4: 测试**
 
 - 同一文本 `tokenize_for_fts` 与 `terms_for_query` 词形一致（写入查得回）。
 - `build_match_expr`：含语法字符输入安全；quoted AND 语义。

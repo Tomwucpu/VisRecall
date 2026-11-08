@@ -7,6 +7,7 @@ members = [
   "crates/shell",
   "crates/app-core",
   "crates/ai",
+  "crates/search",
   "src-tauri",
 ]
 
