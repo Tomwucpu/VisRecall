@@ -38,33 +38,36 @@
 - Consumes: 无
 - Produces: workspace 依赖锁定；`crates/ai` crate（空骨架 + models 定位工具 `models::resolve_model_dir()`）；T0 门禁结论
 
-- [ ] **Step 1: workspace 依赖与 ai crate 骨架**
+- [x] **Step 1: workspace 依赖与 ai crate 骨架**
 
-按架构文档《VisRecall-阶段三-AI与检索架构设计》附录 A 与本文 Tech Stack 行把依赖加入 `[workspace.dependencies]`（版本以锁定的 `Cargo.lock` 为准）；`crates/ai` 只建 `lib.rs`（`pub mod models;`）与 `models.rs`：`resolve_model_dir() -> PathBuf` 按「exe resource dir → `CARGO_MANIFEST_DIR/../../models`（dev）」顺序找到含 `manifest.json` 且校验通过的目录；`verify_manifest() -> Result<(), AppError>` 逐文件 sha256。
+按架构文档《VisRecall-阶段三-AI与检索架构设计》附录 A 与本文 Tech Stack 行把依赖加入 `[workspace.dependencies]`（版本以锁定的 `Cargo.lock` 为准）；`crates/ai` 只建 `lib.rs`（`pub mod models;`）与 `models.rs`：`resolve_model_dir() -> Result<PathBuf, AppError>` 按「`VISRECALL_MODEL_DIR` → exe 同级/上级 `models/` → cwd `models/`」顺序找到含 `manifest.json` 的目录；`verify_manifest()` 逐文件 sha256。
 
-- [ ] **Step 2: 放置模型文件 + 清单**
+> 落地注记：目录解析改为「不写死绝对路径」的可执行文件向上回溯，并加 `runtime.rs`（`load-dynamic` 加载 `onnxruntime.dll`）。偏差与原因见 `verification.md` §1.5。
 
-PP-OCRv5（或 v4，T0 实测择优，选定后固定）mobile det + rec 两个 ONNX；bge-small-zh-v1.5 int8 动态量化 ONNX + tokenizer.json。写 `manifest.json`（`{ "files": { "<name>": "<sha256>" } }`，附来源 URL 与许可备注）；跑 `scripts/models-check.ps1` 核对。
+- [x] **Step 2: 放置模型文件 + 清单**
+
+PP-OCRv4 mobile det + rec（v5 无可用 ONNX 来源，选定 v4 并固定）；bge-small-zh-v1.5 int8 动态量化 ONNX + tokenizer.json；`manifest.json` 记录 sha256 + 来源 URL + 许可。`scripts/models-check.ps1` 核对 6/6 OK。
 
 - [ ] **Step 3: OCR spike**
 
-`examples/ocr_spike.rs`：读 `--images <dir>` 下 100–200 张真实截图（人工准备，不入库）→ PP-OCR 推理 → 输出逐张耗时与文本；配套 `scripts/ocr-accuracy.ps1` 用人工标注文件（`spice` 数据本地，不入库）计算字符准确率。记录 P95 延迟、4K 长图耗时、内存增量。
+`examples/ocr_spike.rs` 已实现并跑通：真实截图 5 张（1080p/1440p/2868×8000）全部返回文本、0 报错；典型 1440p P95 798ms、超长图 1856ms；`scripts/ocr-accuracy.ps1` 已实现（CER 口径）。
+**未完成**：字符准确率门禁需 100–200 张（T0 口径）/ 20 张（P3-R01 口径）真实截图 + 人工标注，本机只有 5 张且无标注 → 按 2026-11-08 决策登记为「未验证（环境限制）」，素材到位后补测回填。
 
-- [ ] **Step 4: 嵌入 spike**
+- [x] **Step 4: 嵌入 spike**
 
-`examples/embed_spike.rs`：加载 bge int8 → 50 条中文文本嵌入 → 输出单条延迟（P95）、模型加载耗时、进程内存增量；断言维度 512、确定性（同文本两次结果一致）、语义 sanity（相关对 > 不相关对，10 组）。
+`examples/embed_spike.rs`：加载 145ms、单条 P95 1.4ms、内存 +56.4MB、维度 512、确定性 0 误差、语义 sanity 10/10、LRU 命中 0.001ms。
 
-- [ ] **Step 5: jieba + FTS5 spike**
+- [x] **Step 5: jieba + FTS5 spike**
 
-`crates/library` 里加临时集成测试（Task 2 会转正）：建 FTS5 表 → jieba 分词写入 20 条 → 10 条真实中文查询断言字面召回与 `snippet()`。同时确认 rusqlite bundled FTS5 可用（`SELECT fts5('')` 冒烟）。
+`crates/library/tests/fts_spike.rs`（6 passed）：FTS5 可用性冒烟、20 条中文素材 × 10 条真实查询字面召回、`snippet()` 标记、BM25 排序、删除减行、emoji/全角查询不崩。
 
-- [ ] **Step 6: （可选）vec0 与 ARM64**
+- [x] **Step 6: （可选）vec0 与 ARM64**
 
-`cargo check` 验证 `sqlite-vec` 静态链接（不进依赖图，单独分支/临时 patch 验证即可）；`cargo check -p visrecall-ai --target aarch64-pc-windows-msvc`。任一失败记录为限制，不阻塞。
+vec0 按 design §1.2 搁置（不进依赖图、不建表）；`cargo check -p visrecall-ai --target aarch64-pc-windows-msvc` 通过（`load-dynamic` 无架构相关原生库）。
 
-- [ ] **Step 7: 回填门禁表**
+- [x] **Step 7: 回填门禁表**
 
-T0 五项的实测数字写入 `verification.md` §1；**不达标先调方案（design §10.1 的「不通过时」列），复测通过才进 Task 2**。
+T0 五项实测数字与偏差已写入 `verification.md` §1（§1.1–§1.5）。门禁 1 的字符准确率未验证（环境限制）+ 内存叠加风险（OCR 88MB + 嵌入 56MB ≈ 190MB > 150MB 硬上限）已登记收口方案；**进 Task 2 的依据是用户 2026-11-08 决策「先按 20 张抽样口径，T0 的 100–200 张门禁记未验证」**。
 
 **Verify:**
 

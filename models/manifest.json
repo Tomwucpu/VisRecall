@@ -1,0 +1,26 @@
+{
+  "files": {
+    "bge-small-zh-v1.5-int8.onnx": "15b717c382bcb518ba457b93ea6850ede7f4f1cd8937454aa06972366cd19bcc",
+    "ch_PP-OCRv4_det_infer.onnx": "d2a7720d45a54257208b1e13e36a8479894cb74155a5efe29462512d42f49da9",
+    "ch_PP-OCRv4_rec_infer.onnx": "48fc40f24f6d2a207a2b1091d3437eb3cc3eb6b676dc3ef9c37384005483683b",
+    "onnxruntime.dll": "e45f61e50d8650885452be538a00bb14a715e46a1bc3691000ce947e89ed0306",
+    "ppocr_keys_v1.txt": "a1c84d9bdb9ab29043c58896224d32941783eb821629618416dcb08f12886492",
+    "tokenizer.json": "48cea5d44424912a6fd1ea647bf4fe50b55ab8b1e5879c3275f80e339e8fae26"
+  },
+  "sources": {
+    "ch_PP-OCRv4_det_infer.onnx": "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv4/ch_PP-OCRv4_det_infer.onnx",
+    "ch_PP-OCRv4_rec_infer.onnx": "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv4/ch_PP-OCRv4_rec_infer.onnx",
+    "ppocr_keys_v1.txt": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/main/ppocr/utils/ppocr_keys_v1.txt",
+    "bge-small-zh-v1.5-int8.onnx": "https://huggingface.co/Xenova/bge-small-zh-v1.5/resolve/main/onnx/model_quantized.onnx",
+    "tokenizer.json": "https://huggingface.co/Xenova/bge-small-zh-v1.5/resolve/main/tokenizer.json",
+    "onnxruntime.dll": "https://pypi.org/project/onnxruntime/1.31.1/ (wheel onnxruntime-1.31.1-cp312-cp312-win_amd64.whl -> onnxruntime/capi/onnxruntime.dll)"
+  },
+  "licenses": {
+    "ch_PP-OCRv4_det_infer.onnx": "Apache-2.0 (PaddleOCR PP-OCRv4 mobile det, ONNX conversion by RapidAI/RapidOCR)",
+    "ch_PP-OCRv4_rec_infer.onnx": "Apache-2.0 (PaddleOCR PP-OCRv4 mobile rec, ONNX conversion by RapidAI/RapidOCR)",
+    "ppocr_keys_v1.txt": "Apache-2.0 (PaddleOCR dictionary)",
+    "bge-small-zh-v1.5-int8.onnx": "MIT (BAAI bge-small-zh-v1.5, dynamic int8 ONNX by Xenova)",
+    "tokenizer.json": "MIT (BAAI bge-small-zh-v1.5 tokenizer)",
+    "onnxruntime.dll": "MIT (Microsoft ONNX Runtime 1.31.1)"
+  }
+}

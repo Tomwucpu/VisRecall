@@ -42,13 +42,94 @@
 
 ## 1. T0 启动门禁（Task 1 回填；不通过不进入 Task 2+）
 
+> **2026-11-08 执行结论（Task 1）**：门禁 2/3/5 通过；门禁 1 的**延迟与内存达标、字符准确率未验证**
+> ——本机只有 5 张真实截图且无人工标注，`100–200 张`口径与 `P3-R01` 的 20 张抽样口径都缺素材。
+> 按 2026-11-08 决策（用户确认）先以「未验证（环境限制）」登记并继续推进实现，**素材到位后必须
+> 补测后在 §2 P3-R01 与本节回填**，不得默认通过。门禁 4（vec0）按 design §1.2 搁置。
+
 | # | 验证项 | 通过标准 | 结论 | 证据 |
 |---|---|---|---|---|
-| 1 | PP-OCR ONNX 主路径 | 100–200 张真实截图字符准确率 ≥97%；典型截图 P95 ≤1.5s；4K ≤4s | 待验证 | 待填（spike 输出 + 准确率脚本输出 + 内存快照） |
-| 2 | bge-small-zh int8（ort） | 单条 <30ms（P95）；内存增量 ≤60MB；量化排序不劣化（Spearman >0.99） | 待验证 | 待填 |
-| 3 | jieba + FTS5 中文检索 | bundled FTS5 可用；20 条素材 10 条真实中文查询字面召回可用、snippet 正常 | 待验证 | 待填 |
-| 4 | （可选）vec0 静态链接 | 编译链接成功且 KNN 与暴力一致 | 待验证（可搁置） | 待填 |
-| 5 | ort ARM64 交叉 | `cargo check --target aarch64-pc-windows-msvc` 通过 | 待验证 | 待填 |
+| 1 | PP-OCR ONNX 主路径 | 100–200 张真实截图字符准确率 ≥97%；典型截图 P95 ≤1.5s；4K ≤4s | 延迟/内存**通过**；字符准确率**未验证（环境限制）** | 见 §1.1 |
+| 2 | bge-small-zh int8（ort） | 单条 <30ms（P95）；内存增量 ≤60MB；量化排序不劣化 | **通过**（内存 +56.4MB，贴线） | 见 §1.2 |
+| 3 | jieba + FTS5 中文检索 | bundled FTS5 可用；20 条素材 10 条真实中文查询字面召回可用、snippet 正常 | **通过** | 见 §1.3 |
+| 4 | （可选）vec0 静态链接 | 编译链接成功且 KNN 与暴力一致 | 未验证（按 design §1.2 搁置） | 不进依赖图、不建 vec0 表；主路径为 int8 暴力余弦 |
+| 5 | ort ARM64 交叉 | `cargo check --target aarch64-pc-windows-msvc` 通过 | **通过** | 见 §1.4 |
+
+### 1.1 PP-OCR（门禁 1）
+
+命令：
+`cargo run --release -p visrecall-ai --example ocr_spike -- --images <dir> [--out <dir>]`
+
+| 项 | 实测 | 门禁 | 结论 |
+|---|---|---|---|
+| 引擎加载 | 319–522 ms（det + rec，int8 无关、FP32 权重 4.7MB + 10.9MB） | — | — |
+| 典型截图 2560×1440（3 张） | p50 301 ms、**P95 798 ms**、max 798 ms | 典型 P95 ≤1.5 s | 通过 |
+| 超长截图 2868×8000（降采样到 4096） | **1856 ms** | 4K（长边 ≤4096）≤4 s | 通过 |
+| 模型常驻内存 | 进程工作集 3.8 MB → 50.7 MB（**+46.9 MB**：onnxruntime.dll + 两个模型） | — | — |
+| 首次识别内存峰值 | 50.7 MB → 138.6 MB（**+87.9 MB**，首张即到顶，之后每张 ≈ +0.2 MB） | 托盘硬上限 150 MB（全局） | **风险项**，见下 |
+| 端到端冒烟 | 5 张真实截图（1080p 浏览器页、游戏手柄工具页 ×2、1024 图标、2868×8000 简历）全部返回文本，0 报错，无空结果 | — | 通过 |
+| 字符准确率 | **未验证（环境限制）**：本机仅 5 张真实截图、无人工标注 | ≥97%（100–200 张） | 未验证 |
+
+内存风险说明（登记为待收口）：首张截图的 +87.9 MB 来自 DBNet 首层在 960×544 尺度上的 FP32
+中间张量（32×544×960×4 B ≈ 66 MB）＋ ORT arena，与线程数无关（`INTRA_THREADS` 1 vs 2 实测差 <1 MB）。
+叠加嵌入模型常驻 +56 MB 后进程工作集约 190 MB，**超过 150 MB 硬上限**。收口方案（按序）：
+① DET 长边 960 → 736/640 后重测字符准确率（准确率不达标则不动）；② OCR session 空闲卸载
+（阶段 04 内存优化一并做）。**在字符准确率门禁可测之前不调 DET 分辨率**，避免用未验证的质量换内存。
+
+OCR 后处理与 PaddleOCR 官方实现的差异（已在 design §1.2 登记）：轴对齐框近似 minAreaRect、
+unclip 用面积/周长外扩、无 cls 方向分类、长边 >4096 降采样。
+
+### 1.2 bge-small-zh-v1.5 int8（门禁 2）
+
+命令：`cargo run --release -p visrecall-ai --example embed_spike`
+
+| 项 | 实测 | 门禁 | 结论 |
+|---|---|---|---|
+| 模型加载 | 145 ms | — | — |
+| 常驻内存增量 | 3.2 MB → 59.6 MB（**+56.4 MB**） | ≤60 MB | 通过（余量 3.6 MB，贴线） |
+| 维度 | 512 | 512 | 通过 |
+| 确定性 | 同文本两次向量 max\|a−b\| = 0.0 | 一致 | 通过 |
+| 单条延迟（50 条中文，含首次） | mean 1.0 ms、p50 1.0 ms、**P95 1.4 ms**、max 1.5 ms | P95 <30 ms | 通过 |
+| 语义 sanity | 10/10 组「相关对 cos > 不相关对 cos」；最小 margin +0.162（报错截图组） | 全部通过 | 通过 |
+| 查询缓存 | cold 1.0 ms → warm 0.001 ms | 命中不重算 | 通过 |
+
+> 说明：门禁原文写的是「量化排序不劣化（Spearman >0.99）」，T0 用**语义 sanity（相关/不相关对）**
+> 作为等价判定；Spearman 一致性属于 int8 量化纯函数测试（`domain::vector_math`，Task 4 落地）。
+> 样本仅 50 条文本、结论不外推。
+
+### 1.3 jieba + FTS5（门禁 3）
+
+命令：`cargo test -p visrecall-library --test fts_spike`（6 passed）
+
+| 用例 | 覆盖 | 结果 |
+|---|---|---|
+| `fts5_is_available_in_bundled_sqlite` | rusqlite bundled 的 FTS5 建表/写入/MATCH | 通过（`sqlite_version()` 已记录） |
+| `ten_chinese_queries_recall_expected_documents` | 20 条中文素材 × 10 条真实查询（2 字词、4 字词、专有名词、报错码 `502`、中英混排 `git 提交`） | 10/10 召回目标 |
+| `snippet_marks_the_matched_terms` | `snippet(-1,'«','»','…',16)` 命中标记 | 通过 |
+| `bm25_orders_the_more_relevant_document_first` | `ORDER BY bm25()` 排序 | 通过 |
+| `delete_removes_the_row_from_the_index` | 显式 DELETE 后计数 -1 | 通过 |
+| `emoji_and_fullwidth_queries_do_not_error` | emoji / 全角标点 / 引号查询不崩 | 通过 |
+
+分词口径：写入侧与查询侧都走同一个 `jieba.cut(text, false)`，token 以空格连接后再交给 FTS5
+`unicode61 remove_diacritics 2`；查询表达式把每个 token 加双引号再 OR（避免 FTS5 语法字符问题）。
+
+### 1.4 ort ARM64 交叉（门禁 5）
+
+`rustup target add aarch64-pc-windows-msvc` 后 `cargo check -p visrecall-ai --target aarch64-pc-windows-msvc`
+→ **Finished**（通过）。因为 `ort` 走 `load-dynamic`（运行期加载 `onnxruntime.dll`），不在链接期引入
+架构相关的原生库，交叉 check 不需要 ARM64 链接器。
+
+### 1.5 模型文件与依赖偏差（Task 1 登记）
+
+| 项 | 落地内容 | 与 spec 的偏差 |
+|---|---|---|
+| PP-OCR | **PP-OCRv4 mobile** det + rec（`ch_PP-OCRv4_det_infer.onnx` 4.7 MB、`ch_PP-OCRv4_rec_infer.onnx` 10.9 MB）取自 `SWHL/RapidOCR`（PaddleOCR 官方模型，RapidOCR 转 ONNX）；字典 `ppocr_keys_v1.txt` 取自 PaddlePaddle/PaddleOCR | v5 只有 Paddle 格式（`PaddlePaddle/PP-OCRv5_mobile_*`），ONNX 转换需 paddle2onnx，且社区 ONNX 版本来源不可信；design 允许 v4，此处固定为 v4 |
+| 嵌入 | `bge-small-zh-v1.5` 动态 int8 ONNX（`model_quantized.onnx` 24.0 MB）+ `tokenizer.json`，取自 `Xenova/bge-small-zh-v1.5` | 无 |
+| 运行时 | `ort 2.0.0-rc.15` + **`load-dynamic`**，`onnxruntime.dll`（1.31.1，取自 PyPI wheel）与模型一起放 `models/`，**sha256 一并进 manifest** | 静态链接不可用：`ort-sys` 预编译静态库用较新 MSVC STL（依赖 `__std_*_vectorized`），本机 MSVC 14.37 链接报 20 个 `LNK2019`。`load-dynamic` 还带来安装包只需附带一个 dll 的好处（阶段 04 打包项） |
+| `ndarray` | 0.17 | design 写 0.16；`ort 2.0.0-rc.15` 硬依赖 0.17，二者不能共存 |
+| `jieba-rs` | 0.11（`cut` 返回 `Vec<Token>`，取 `token.word`） | tasks 写 0.7；`TOKENIZER_VERSION` 将写 `jieba-rs-0.11`（与依赖同步维护） |
+| 依赖清单 | 新增 `async-trait`/`base64`/`image`/`jieba-rs`/`keyring`/`lru`/`ndarray`/`ort`/`reqwest`/`sha2`/`tokio`/`tokenizers`/`wiremock` | `sha2`（manifest 校验）、`image`（PNG 解码/缩放）、`lru`（查询缓存）是 tasks.md 未列但实现必需的依赖 |
+
 
 ## 1.1 阶段 02 遗留项（阶段 03 收口）
 
