@@ -1,0 +1,286 @@
+/* 阶段 03：搜索、命中解释、标签筛选、模型设置与 OCR 高亮。
+   颜色一律复用 tokens.css 的变量，保持明暗主题自动适配。 */
+
+.search-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  position: relative;
+  padding: 7px 10px;
+  margin: 0 0 10px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.search-bar:focus-within {
+  border-color: var(--hue-slate);
+}
+
+.search-icon {
+  color: var(--ink-3);
+  font-size: 17px;
+  line-height: 1;
+}
+
+.search-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.search-input::placeholder {
+  color: var(--ink-3);
+}
+
+.search-kbd {
+  color: var(--ink-3);
+  font: 10px var(--mono);
+  white-space: nowrap;
+}
+
+.search-clear {
+  flex: none;
+}
+
+.search-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  overflow: hidden;
+  border-radius: 0 0 var(--radius) var(--radius);
+  background: var(--line);
+}
+
+.search-progress::after {
+  content: "";
+  display: block;
+  width: 32%;
+  height: 100%;
+  background: var(--hue-slate);
+  animation: search-sweep 0.9s var(--ease) infinite;
+}
+
+@keyframes search-sweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(320%); }
+}
+
+.search-degraded,
+.status-degraded {
+  color: var(--hue-ochre);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.search-degraded-note {
+  margin: 0 0 10px;
+  color: var(--ink-2);
+  font-size: 11px;
+}
+
+.query-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: -2px 0 10px;
+  padding: 0;
+  list-style: none;
+}
+
+.query-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 6px 3px 8px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font-size: 11px;
+}
+
+.query-chip-remove {
+  border: 0;
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.query-chip-remove:hover {
+  color: var(--seal);
+}
+
+.search-empty {
+  padding: 40px 12px;
+  text-align: center;
+  color: var(--ink-2);
+}
+
+.search-empty .hint {
+  color: var(--ink-3);
+  font-size: 11px;
+}
+
+.search-result {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.search-total {
+  margin: 12px 0 0;
+  color: var(--ink-3);
+  font-size: 11px;
+}
+
+.not-this {
+  align-self: flex-start;
+}
+
+.card-hit {
+  display: inline-block;
+  margin-bottom: 5px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--surface-3);
+  color: var(--ink-2);
+  font-size: 10px;
+}
+
+.card-summary {
+  margin: 0 0 6px;
+  color: var(--ink-2);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.explain-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-left: 2px solid var(--hue-ash);
+  color: var(--ink-2);
+  font-size: 10px;
+}
+
+.explain-bar.is-semantic { border-left-color: var(--hue-plum); }
+.explain-bar.is-fts { border-left-color: var(--hue-jade); }
+.explain-bar.is-filter { border-left-color: var(--hue-ochre); }
+
+.explain-filter {
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--surface-3);
+}
+
+.explain-warn,
+.model-probe.is-error,
+.model-error {
+  color: var(--seal);
+}
+
+.explain-boxes {
+  color: var(--ink-3);
+}
+
+.d-source-badge {
+  margin-right: auto;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  color: var(--ink-2);
+  font-size: 10px;
+}
+
+.d-highlight-btn {
+  margin-top: 6px;
+}
+
+.preview-stage {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  line-height: 0;
+}
+
+.ocr-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.ocr-box {
+  position: absolute;
+  border: 1px solid rgba(168, 66, 54, 0.65);
+  background: rgba(168, 66, 54, 0.12);
+  border-radius: 2px;
+}
+
+.ocr-box.is-hit {
+  border-width: 2px;
+  background: rgba(168, 66, 54, 0.22);
+}
+
+.tag-pill.is-active {
+  background: var(--active);
+  color: var(--ink);
+  outline: 1px solid var(--line-2);
+}
+
+.status-indexing {
+  color: var(--hue-slate);
+  font-size: 10px;
+}
+
+.model-slot {
+  display: block;
+  padding: 10px 0;
+}
+
+.model-key-badge {
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  color: var(--ink-2);
+  font-size: 10px;
+}
+
+.model-fields {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.model-field {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-2);
+  font-size: 11px;
+}
+
+.model-field .field {
+  width: 100%;
+}
+
+.model-probe,
+.model-error {
+  margin: 6px 0 0;
+  font-size: 11px;
+}

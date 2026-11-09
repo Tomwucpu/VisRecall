@@ -18,6 +18,14 @@ const NOTE_DEBOUNCE_MS = 300;
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
+/** 摘要来源 → 徽标文案（与后端 `summary_source` 的取值一一对应）。 */
+const SUMMARY_SOURCE_LABEL: Record<string, string> = {
+  vlm: "VLM",
+  ocr: "OCR 摘录",
+  extractive: "原文摘录",
+  user: "已编辑",
+};
+
 function copyLabelOf(kind: string): string {
   if (kind === "image") return "复制原图";
   if (kind === "link") return "复制链接";
@@ -188,6 +196,18 @@ export function DetailPanel({ item, onClose }: Props) {
     }
   };
 
+  const copySummary = async () => {
+    if (summary === null) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(summary);
+      pushToast("已复制摘要");
+    } catch {
+      pushToast("复制失败：剪贴板不可用", "error");
+    }
+  };
+
   const removeTag = async (tagId: string, name: string) => {
     try {
       await api.removeTag(item.id, tagId);
@@ -202,6 +222,17 @@ export function DetailPanel({ item, onClose }: Props) {
   const extras = detail.data?.extras;
   const tags: TagChip[] = extras?.tags ?? [];
   const summary = extras?.summary ?? null;
+  const summarySource = extras?.summarySource ?? "none";
+  // 生成的 DTO 把 f32 映射成 `number | null`：这里统一成数字并丢掉零尺寸的脏框
+  const ocrBoxes = (extras?.ocrBoxes ?? [])
+    .map((box) => ({
+      text: box.text,
+      x: box.x ?? 0,
+      y: box.y ?? 0,
+      w: box.w ?? 0,
+      h: box.h ?? 0,
+    }))
+    .filter((box) => box.w > 0 && box.h > 0);
   const bodyText = extras?.bodyText ?? null;
   const originalUrl = extras?.originalUrl ?? null;
   const full = detail.data?.item;
@@ -274,14 +305,34 @@ export function DetailPanel({ item, onClose }: Props) {
           <section className="d-sec">
             <div className="d-sec-head">
               <span className="label">AI 描述</span>
-              {/* 阶段 03 才有摘要，复制在数据到来前保持禁用（红线）。 */}
-              <button type="button" className="mini-btn" disabled title="阶段 03 提供">
+              {summary !== null && summarySource !== "none" && (
+                <span className={`d-source-badge src-${summarySource}`} title="摘要来源">
+                  {SUMMARY_SOURCE_LABEL[summarySource] ?? summarySource}
+                </span>
+              )}
+              <button
+                type="button"
+                className="mini-btn"
+                disabled={summary === null}
+                title={summary === null ? "还没有摘要" : "复制摘要"}
+                onClick={() => void copySummary()}
+              >
                 复制
               </button>
             </div>
             <p className={`d-summary${summary === null ? " is-placeholder" : ""}`}>
               {summary ?? SUMMARY_PLACEHOLDER}
             </p>
+            {ocrBoxes.length > 0 && (
+              <button
+                type="button"
+                className="mini-btn d-highlight-btn"
+                onClick={() => setOverlayOpen(true)}
+                title="在原图上标出识别到的文字"
+              >
+                在图中查看 {ocrBoxes.length} 处文字
+              </button>
+            )}
           </section>
 
           {item.kind === "text" && (
@@ -437,6 +488,7 @@ export function DetailPanel({ item, onClose }: Props) {
           thumbUrl={item.thumbUrl}
           title={title}
           kind={item.kind}
+          boxes={ocrBoxes}
           onClose={() => setOverlayOpen(false)}
         />
       )}

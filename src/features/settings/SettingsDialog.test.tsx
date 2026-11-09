@@ -61,12 +61,14 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-test("shows only the capture and storage panes", () => {
+test("shows the capture, storage and model panes", () => {
   renderDialog();
 
   expect(screen.getByRole("button", { name: "捕获" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "存储" })).toBeInTheDocument();
-  for (const hidden of ["模型", "隐私", "关于"]) {
+  // 阶段 03 新增「模型」pane（主备 VLM 配置）
+  expect(screen.getByRole("button", { name: "模型" })).toBeInTheDocument();
+  for (const hidden of ["隐私", "关于"]) {
     expect(screen.queryByRole("button", { name: hidden })).not.toBeInTheDocument();
   }
 });

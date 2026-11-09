@@ -57,10 +57,14 @@ test("subscribes to every cache-affecting event", async () => {
     "tags_changed",
     "hotkey_restored",
     "storage_migration_progress",
+    "item_indexed",
+    "item_enriched",
+    "pipeline_status",
+    "semantic_status",
   ]);
 
   cleanup();
-  expect(mocks.unlisten).toHaveBeenCalledTimes(10);
+  expect(mocks.unlisten).toHaveBeenCalledTimes(14);
 });
 
 test("list events reset the items query and refresh usage", async () => {
@@ -165,6 +169,32 @@ test("subscribeItemEvents keeps the phase 01 list-only behaviour", async () => {
 
   cleanup();
   expect(mocks.unlisten).toHaveBeenCalledTimes(5);
+});
+
+test("indexing events reset the list and invalidate search results", async () => {
+  const { client, reset, invalidate } = makeClient();
+  const cleanup = subscribeAppEvents(client);
+  await flush();
+
+  emit("item_indexed", { id: "abc" });
+  expect(reset).toHaveBeenCalledWith({ queryKey: ["items"] });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["search"] });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["detail", "abc"] });
+
+  invalidate.mockClear();
+  emit("item_enriched", { id: "abc" });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["search"] });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["tags"] });
+
+  // 状态栏事件不该碰任何 Query 缓存
+  invalidate.mockClear();
+  reset.mockClear();
+  emit("pipeline_status", { queued: 2, running: 1 });
+  emit("semantic_status", { ready: false });
+  expect(invalidate).not.toHaveBeenCalled();
+  expect(reset).not.toHaveBeenCalled();
+
+  cleanup();
 });
 
 test("strict-mode remount does not leave duplicate listeners", async () => {

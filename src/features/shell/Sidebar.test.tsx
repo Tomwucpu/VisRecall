@@ -136,3 +136,32 @@ test("collapses through the toggle and reports the new state", () => {
   fireEvent.click(toggle);
   expect(onToggle).toHaveBeenCalledTimes(1);
 });
+
+test("clicking a tag pill applies the filter and can be cancelled", async () => {
+  const onTagFilter = vi.fn();
+  const { container, rerender } = renderSidebar({ onTagFilter });
+  await screen.findByText("work");
+
+  const pill = container.querySelector(".tag-pill") as HTMLElement;
+  expect(pill).toHaveAttribute("aria-pressed", "false");
+  fireEvent.click(pill);
+  expect(onTagFilter).toHaveBeenCalledWith("work");
+
+  // 激活态由 App 回传；再点一次由 App 恢复原查询（这里只断言回调再次触发）
+  const client = (container.closest("#root") ?? container) as HTMLElement;
+  void client;
+  rerender(
+    <QueryClientProvider client={new QueryClient()}>
+      <Sidebar
+        collapsed={false}
+        onToggle={() => {}}
+        itemCount={7}
+        onTagFilter={onTagFilter}
+        activeTag="work"
+      />
+    </QueryClientProvider>,
+  );
+  expect(container.querySelector(".tag-pill")).toHaveClass("is-active");
+  fireEvent.click(container.querySelector(".tag-pill") as HTMLElement);
+  expect(onTagFilter).toHaveBeenCalledTimes(2);
+});

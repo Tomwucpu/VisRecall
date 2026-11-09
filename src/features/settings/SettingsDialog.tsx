@@ -6,16 +6,18 @@ import { queryKeys } from "../../lib/queryClient";
 import { errorMessage } from "../../lib/errors";
 import { pushToast } from "../../lib/toast";
 import { ConfirmDialog } from "../common/ConfirmDialog";
+import { ModelSettingsPane } from "./ModelSettingsPane";
 
 type Props = {
   onClose: () => void;
 };
 
-type PaneId = "capture" | "storage";
+type PaneId = "capture" | "storage" | "models";
 
 const PANE_META: Record<PaneId, { title: string; sub: string }> = {
   capture: { title: "捕获", sub: "快捷键 · 悬浮球" },
   storage: { title: "存储", sub: "位置 · 容量 · 保留策略" },
+  models: { title: "模型", sub: "主备 VLM · 凭据" },
 };
 
 /** `Ctrl+Shift+S` → `["Ctrl","Shift","S"]`，用于渲染 kbd 芯片。 */
@@ -370,7 +372,9 @@ export function SettingsDialog({ onClose }: Props) {
           </div>
 
           <div className="modal-content">
-            {pane === "capture" ? (
+            {pane === "models" ? (
+              <ModelSettingsPane />
+            ) : pane === "capture" ? (
               <div className="pane">
                 <p className="pane-desc">
                   捕获只有一个动作：框选，或松手。所有分类与打标都由系统完成。

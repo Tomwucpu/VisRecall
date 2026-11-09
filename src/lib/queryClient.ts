@@ -10,6 +10,8 @@ export const queryKeys = {
   orphans: ["orphans"] as const,
   status: ["status"] as const,
   purgePreview: ["purge-preview"] as const,
+  modelConfig: ["model-config"] as const,
+  search: ["search"] as const,
 };
 
 /**

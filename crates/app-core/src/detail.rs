@@ -24,10 +24,14 @@ pub const ORIGINAL_URL_PREFIX: &str = "visrecall://original/";
 pub const TRUNCATED_MARKER: &str = "…（已截断）";
 
 /// 详情面板需要的额外内容。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct DetailExtras {
-    /// AI 摘要；阶段 02 恒为 `None`（阶段 03 提供）。
+    /// AI 摘要；未解析时为 `None`（面板显示占位）。
     pub summary: Option<String>,
+    /// 摘要来源：`vlm` / `ocr` / `extractive` / `user` / `none`（面板据此显示来源徽标）。
+    pub summary_source: String,
+    /// OCR 归一化包围盒（图片素材；无文字为空）——详情面板据此画高亮框。
+    pub ocr_boxes: Vec<visrecall_domain::OcrBox>,
     /// 文本素材的原文（前 [`BODY_TEXT_LIMIT`] 字符）。
     pub body_text: Option<String>,
     /// 图片素材的原图协议 URL；文本/链接为 `None`。
@@ -37,7 +41,7 @@ pub struct DetailExtras {
 }
 
 /// 素材本体 + 额外内容。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ItemDetail {
     pub item: Item,
     pub extras: DetailExtras,
@@ -47,6 +51,8 @@ pub struct ItemDetail {
 pub fn load_detail(library: &Library, id: &str) -> Result<ItemDetail, AppError> {
     let item = library.get_item(id)?.ok_or(AppError::NotFound)?;
     let tags = library.tags_for_item(&item.id)?;
+    // 阶段 03：AI 解析结果（可能还没有行 → 全部按未解析展示）
+    let insight = library.insight_get(&item.id)?;
 
     let body_text = read_body_text(library, &item);
     let original_url = match item.kind {
@@ -57,8 +63,15 @@ pub fn load_detail(library: &Library, id: &str) -> Result<ItemDetail, AppError> 
     Ok(ItemDetail {
         item,
         extras: DetailExtras {
-            // 阶段 03 提供；这里保持 `None`，前端固定显示「待解析」。
-            summary: None,
+            summary: insight.as_ref().and_then(|value| value.summary.clone()),
+            summary_source: insight
+                .as_ref()
+                .map(|value| value.summary_source.as_str().to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            ocr_boxes: insight
+                .as_ref()
+                .map(|value| value.ocr_boxes.clone())
+                .unwrap_or_default(),
             body_text,
             original_url,
             tags,

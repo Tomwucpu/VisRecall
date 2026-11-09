@@ -349,11 +349,15 @@ impl From<ItemTag> for TagChipDto {
 }
 
 /// 详情面板的额外内容。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
+#[derive(Debug, Clone, PartialEq, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct DetailExtrasDto {
-    /// AI 摘要；阶段 02 恒为 `None`（阶段 03 提供）。
+    /// AI 摘要；未解析为 `None`（面板显示占位）。
     pub summary: Option<String>,
+    /// 摘要来源：`vlm` / `ocr` / `extractive` / `user` / `none`。
+    pub summary_source: String,
+    /// OCR 归一化包围盒（图片素材；无文字为空）。
+    pub ocr_boxes: Vec<OcrBoxDto>,
     /// 文本素材的原文（前 20000 字符，超出部分已截断）。
     pub body_text: Option<String>,
     /// 图片素材的原图协议 URL；文本/链接为 `None`。
@@ -362,7 +366,7 @@ pub struct DetailExtrasDto {
 }
 
 /// 详情聚合结果。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
+#[derive(Debug, Clone, PartialEq, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemDetailDto {
     pub item: ItemDto,
@@ -375,6 +379,13 @@ impl From<visrecall_app_core::ItemDetail> for ItemDetailDto {
             item: ItemDto::from(detail.item),
             extras: DetailExtrasDto {
                 summary: detail.extras.summary,
+                summary_source: detail.extras.summary_source,
+                ocr_boxes: detail
+                    .extras
+                    .ocr_boxes
+                    .into_iter()
+                    .map(OcrBoxDto::from)
+                    .collect(),
                 body_text: detail.extras.body_text,
                 original_url: detail.extras.original_url,
                 tags: detail
@@ -907,9 +918,7 @@ pub struct ModelConfigPatchDto {
     pub backup: Option<ProviderEntryInputDto>,
 }
 
-fn model_config_dto(
-    config: &visrecall_app_core::ModelConfig,
-) -> ModelConfigDto {
+fn model_config_dto(config: &visrecall_app_core::ModelConfig) -> ModelConfigDto {
     let view = |entry: &Option<visrecall_app_core::ProviderEntry>, slot| {
         entry.as_ref().map(|entry| ProviderEntryDto {
             base_url: entry.base_url.clone(),
@@ -940,18 +949,24 @@ pub async fn set_model_config(
 ) -> Result<ModelConfigDto, ApiError> {
     run_blocking(app, move |core| {
         let patch = visrecall_app_core::ModelConfigPatch {
-            primary: patch.primary.map(|entry| visrecall_app_core::ProviderEntryInput {
-                base_url: entry.base_url,
-                model: entry.model,
-                api_key: entry.api_key,
-            }),
-            backup: patch.backup.map(|entry| visrecall_app_core::ProviderEntryInput {
-                base_url: entry.base_url,
-                model: entry.model,
-                api_key: entry.api_key,
-            }),
+            primary: patch
+                .primary
+                .map(|entry| visrecall_app_core::ProviderEntryInput {
+                    base_url: entry.base_url,
+                    model: entry.model,
+                    api_key: entry.api_key,
+                }),
+            backup: patch
+                .backup
+                .map(|entry| visrecall_app_core::ProviderEntryInput {
+                    base_url: entry.base_url,
+                    model: entry.model,
+                    api_key: entry.api_key,
+                }),
         };
-        let saved = core.set_model_config(patch).map_err(|err| ApiError::from(&err))?;
+        let saved = core
+            .set_model_config(patch)
+            .map_err(|err| ApiError::from(&err))?;
         Ok(model_config_dto(&saved))
     })
     .await
@@ -1325,6 +1340,8 @@ mod tests {
             },
             extras: visrecall_app_core::DetailExtras {
                 summary: None,
+                summary_source: "none".into(),
+                ocr_boxes: vec![],
                 body_text: Some("abc".into()),
                 original_url: None,
                 tags: vec![],
@@ -1333,6 +1350,8 @@ mod tests {
 
         let json = serde_json::to_value(ItemDetailDto::from(detail)).unwrap();
         assert_eq!(json["extras"]["bodyText"], "abc");
+        assert_eq!(json["extras"]["summarySource"], "none");
+        assert!(json["extras"]["ocrBoxes"].is_array());
         assert!(json["extras"]["originalUrl"].is_null());
         assert!(json["extras"]["tags"].is_array());
     }

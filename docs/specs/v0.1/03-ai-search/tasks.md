@@ -642,11 +642,11 @@ git diff --stat src/lib/bindings.ts
 - Consumes: `commands.searchItems` / `searchFeedback`（Task 12 生成）、新事件
 - Produces: 搜索模式 UI 全链路；`api.searchItems(raw)` / `api.sendFeedback(...)`；`queryKeys.search(raw)`
 
-- [ ] **Step 1: useSearch**
+- [x] **Step 1: useSearch**
 
 防抖 250ms；`seqRef` 请求序号（后发先至丢弃）；空查询不发请求并切回列表模式；`isFetching` 供 UI；结果缓存进 TanStack Query（key 含 raw）。
 
-- [ ] **Step 2: SearchBar / QueryChips / ResultGrid / ExplainBar**
+- [x] **Step 2: SearchBar / QueryChips / ResultGrid / ExplainBar**
 
 - SearchBar：输入框 + 清除按钮 + 提交提示（Enter 立即搜索）；`aria-label="搜索素材"`。
 - QueryChips：`parsed.chips` 渲染，× 删除后从 raw 中移除对应片段重算（由 `useSearch` 维护「raw 减去已删 chip」的当前查询串）。
@@ -655,11 +655,11 @@ git diff --stat src/lib/bindings.ts
 - DetailPanel：摘要区接 `extras.summary` + 来源徽标（AI 摘要/OCR 摘录/原文摘录/无）；`ImageOverlay` 在开关开启时按 `highlightBoxes`（归一化 → CSS 百分比）叠加半透明框。
 - StatusBar：`pipeline_status` 显示「后台索引中（N）」；`semantic_status` false 显示「语义检索未就绪（FTS 模式）」。
 
-- [ ] **Step 3: api.ts / events.ts**
+- [x] **Step 3: api.ts / events.ts**
 
 `searchItems`、`sendFeedback`；事件分派：`item_indexed`/`item_enriched` → `resetQueries(items)` + `invalidateQueries(search)`（+detail）；`pipeline_status`/`semantic_status` → 状态栏局部状态（不进 Query）。
 
-- [ ] **Step 4: 测试**
+- [x] **Step 4: 测试**
 
 - 防抖与过期丢弃（fake timers）；空查询不调 `searchItems`。
 - chips 删除后重发查询且 raw 不含已删片段。
@@ -690,19 +690,19 @@ pnpm test -- src/features/search && pnpm typecheck && pnpm lint
 - Consumes: `api.getModelConfig` / `setModelConfig` / `probeModel`；`ItemDto.primaryColor`；`FilterChipDto(kind="tag")`
 - Produces: P3-R10 / P3-R11 的全部 UI
 
-- [ ] **Step 1: 标签云筛选**
+- [x] **Step 1: 标签云筛选**
 
 标签 pill `onClick` → App 状态 `activeTag` → 注入搜索上下文（`tag:<name>` 进查询或直接作为 tag chip）→ `useSearch` 触发；再次点击/删 chip 取消。移除阶段 02 的 `title="阶段 03 支持按标签筛选"`。
 
-- [ ] **Step 2: hue-dot**
+- [x] **Step 2: hue-dot**
 
 `primaryColor` 非空 → 卡片角落 8px 圆点，色值来自前端固定色板（枚举 → hex，与 VLM 枚举一一对应）；为空不渲染。色板常量放 `src/lib/colors.ts`（单一来源）。
 
-- [ ] **Step 3: 模型 pane**
+- [x] **Step 3: 模型 pane**
 
 「模型」新 pane：主/备两组表单（base URL、模型名、API Key 密码框——保存后只显示「已设置」）；「探测」按钮 → `probeModel` → 行内结果（延迟/视觉能力/错误信息）；保存 → `setModelConfig` → 立即生效提示。表单校验：base URL 必须以 `http(s)://` 开头。**密钥输入框在保存成功后清空**，界面永不回显。
 
-- [ ] **Step 4: 测试**
+- [x] **Step 4: 测试**
 
 - 点标签 → 出现 tag chip → 删除恢复；`activeTag` 不污染普通搜索。
 - 有/无 primaryColor 圆点渲染；「橙」色查询命中素材圆点为橙（数据注入）。
@@ -767,7 +767,7 @@ cargo clippy -p visrecall-eval -- -D warnings
 - Consumes: Task 1–15 全部产物
 - Produces: 可审计的验收记录与状态更新
 
-- [ ] **Step 1: 跑完整自动化门禁**
+- [x] **Step 1: 跑完整自动化门禁**
 
 ```bash
 cargo fmt --all -- --check

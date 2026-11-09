@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { commands, type AppStatus } from "../lib/bindings";
 import { api, type MigrationProgress } from "../lib/api";
@@ -59,10 +59,27 @@ export default function App() {
   const [migration, setMigration] = useState<MigrationProgress | null>(null);
   // 阶段 03：搜索模式。空查询 = 普通列表，非空 = 检索结果（两套数据源不混用）。
   const [query, setQuery] = useState("");
+  // 标签筛选是「查询的一种」，但要能一键取消并回到点击前的查询（不污染普通搜索）
+  const [activeTag, setActiveTag] = useState<string | null>(null);
+  const queryBeforeTag = useRef("");
   const items = useItems();
   const search = useSearch(query);
   const pipeline = usePipelineState();
   const searching = query.trim().length > 0;
+
+  const toggleTagFilter = useCallback(
+    (name: string) => {
+      if (activeTag === name) {
+        setActiveTag(null);
+        setQuery(queryBeforeTag.current);
+        return;
+      }
+      queryBeforeTag.current = query;
+      setActiveTag(name);
+      setQuery(`#${name}`);
+    },
+    [activeTag, query],
+  );
 
   // 库总量只在用量查询里（`itemCount` 来自 count_items），列表只统计已加载页。
   const usageQuery = useQuery({
@@ -242,6 +259,8 @@ export default function App() {
           collapsed={sidebarCollapsed}
           onToggle={() => setSidebarCollapsed((value) => !value)}
           itemCount={shownCount}
+          onTagFilter={toggleTagFilter}
+          activeTag={activeTag}
         />
 
         <main className="main">

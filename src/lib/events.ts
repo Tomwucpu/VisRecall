@@ -18,7 +18,12 @@ type EventName =
   | "item_tags_updated"
   | "tags_changed"
   | "hotkey_restored"
-  | "storage_migration_progress";
+  | "storage_migration_progress"
+  // 阶段 03：索引管线与语义通道事件
+  | "item_indexed"
+  | "item_enriched"
+  | "pipeline_status"
+  | "semantic_status";
 
 /** 需要重置列表的事件（分页状态一并丢弃）。 */
 const LIST_EVENTS = [
@@ -46,6 +51,10 @@ const ALL_EVENTS: EventName[] = [
   "tags_changed",
   "hotkey_restored",
   "storage_migration_progress",
+  "item_indexed",
+  "item_enriched",
+  "pipeline_status",
+  "semantic_status",
 ];
 
 function itemIdOf(payload: unknown): string | null {
@@ -150,7 +159,26 @@ function subscribe(names: readonly EventName[], client: QueryClient): () => void
       // 迁移完成：库路径与「待重启」闸门都变了，用量口径也随之变化。
       void client.invalidateQueries({ queryKey: queryKeys.status });
       void client.invalidateQueries({ queryKey: queryKeys.usage });
+      return;
     }
+
+    if (name === "item_indexed" || name === "item_enriched") {
+      // 阶段一完成（三路可检索）/ 阶段二完成（摘要与标签落地）：列表与检索缓存都要重取，
+      // 否则用户刚捕获的素材在搜索结果里看不到，或看到的是旧的占位摘要。
+      void client.resetQueries({ queryKey: queryKeys.items });
+      void client.invalidateQueries({ queryKey: queryKeys.search });
+      const id = itemIdOf(payload);
+      if (id !== null) {
+        void client.invalidateQueries({ queryKey: queryKeys.detail(id) });
+      }
+      if (name === "item_enriched") {
+        void client.invalidateQueries({ queryKey: queryKeys.tags });
+      }
+      return;
+    }
+
+    // pipeline_status / semantic_status 只驱动状态栏与降级标注（局部 state），
+    // 它们不改变任何查询结果，刻意不进 Query 缓存。
   };
 
   for (const name of names) {

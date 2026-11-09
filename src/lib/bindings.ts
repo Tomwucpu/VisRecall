@@ -94,8 +94,12 @@ export type DetailExtrasDto = DetailExtrasDto_Serialize | DetailExtrasDto_Deseri
 
 /**  详情面板的额外内容。 */
 export type DetailExtrasDto_Deserialize = {
-	/**  AI 摘要；阶段 02 恒为 `None`（阶段 03 提供）。 */
+	/**  AI 摘要；未解析为 `None`（面板显示占位）。 */
 	summary?: string | null,
+	/**  摘要来源：`vlm` / `ocr` / `extractive` / `user` / `none`。 */
+	summarySource: string,
+	/**  OCR 归一化包围盒（图片素材；无文字为空）。 */
+	ocrBoxes: OcrBoxDto[],
 	/**  文本素材的原文（前 20000 字符，超出部分已截断）。 */
 	bodyText?: string | null,
 	/**  图片素材的原图协议 URL；文本/链接为 `None`。 */
@@ -105,8 +109,12 @@ export type DetailExtrasDto_Deserialize = {
 
 /**  详情面板的额外内容。 */
 export type DetailExtrasDto_Serialize = {
-	/**  AI 摘要；阶段 02 恒为 `None`（阶段 03 提供）。 */
+	/**  AI 摘要；未解析为 `None`（面板显示占位）。 */
 	summary: string | null,
+	/**  摘要来源：`vlm` / `ocr` / `extractive` / `user` / `none`。 */
+	summarySource: string,
+	/**  OCR 归一化包围盒（图片素材；无文字为空）。 */
+	ocrBoxes: OcrBoxDto[],
 	/**  文本素材的原文（前 20000 字符，超出部分已截断）。 */
 	bodyText: string | null,
 	/**  图片素材的原图协议 URL；文本/链接为 `None`。 */
