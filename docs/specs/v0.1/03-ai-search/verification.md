@@ -151,46 +151,95 @@ unclip 用面积/周长外扩、无 cls 方向分类、长边 >4096 降采样。
 
 ## 2. 阶段 03 验收矩阵
 
+> **2026-11-09 状态（Task 16 回填，Rust 侧完成）**：自动化可判定的行已回填结论与证据；
+> 标「待人工」的行需要 GUI 操作（前端 Task 13/14 未实施）或需要你的 20 条标注素材，
+> 逐条清单见 §3.2 的手工矩阵。
+
 | 需求 | 场景 | 结论 | 证据 |
 |---|---|---|---|
-| P3-R01 | OCR 准确率 ≥97%（20 张抽样） | 待验证 | 待填 |
-| P3-R01 | 模型文件缺失 → Windows OCR 降级 + warn；纯色图空结果 | 待验证 | 待填 |
-| P3-R02 | 嵌入确定性 / 语义 sanity / LRU 命中 | 待验证 | 待填（`--ignored` 用例名） |
-| P3-R02 | 模型加载耗时与内存增量 ≤60MB | 待验证 | 待填 |
-| P3-R03 | VLM 全字段落库；畸形 JSON 修复一次；401 终止重试 | 待验证 | 待填 |
-| P3-R03 | 断网：OCR 摘录占位 + pending；恢复后增强替换 | 待验证 | 待填 |
-| P3-R03 | 自动标签删除后不回贴（suppressions） | 待验证 | 待填 |
-| P3-R04 | 提交→可检索 ≤3s（P95，≥10 次采样） | 待验证 | 待填 |
-| P3-R04 | 同事务回滚（无半更新）；阶段二中断恢复 | 待验证 | 待填 |
-| P3-R05 | 10 条真实中文查询字面召回 + snippet；删除后 FTS 行消失 | 待验证 | 待填 |
-| P3-R06 | 解析规则正/反例；chip 删除重算；混输 | 待验证 | 待填 |
-| P3-R07 | 三通道各自必命中；权重变更排序可复现；≤800ms P95 | 待验证 | 待填 |
-| P3-R07 | filters-only 尾部附加；降级（语义跳过）仍出结果 | 待验证 | 待填 |
-| P3-R08 | 三类命中解释与索引事实一致；OCR 高亮框定位；退化路径 | 待验证 | 待填 |
-| P3-R09 | 防抖/过期丢弃；空查询回列表；徽标与 ExplainBar；状态栏降级标注 | 待验证 | 待填 |
-| P3-R10 | 标签点击筛选→取消；hue-dot 有/无；颜色口径一致 | 待验证 | 待填 |
-| P3-R11 | 凭据管理器条目；IPC/界面无明文；主备切换与恢复；探测三态 | 待验证 | 待填 |
-| P3-R12 | revision 取消旧任务；蓝绿重建零中断；自检修复；hash 复用 | 待验证 | 待填 |
-| P3-R13 | 降级矩阵逐行（断网/错 Key/删模型/无文字图）；崩溃恢复；无重复执行 | 待验证 | 待填 |
-| P3-R14 | **Top-3 命中率 ≥80%**；分桶报告；≥1 轮调参对比存档 | 待验证 | 待填（报告路径） |
-| P3-R15 | 全部自动化门禁 + 绑定同步 + release 运行 | 待验证 | 待填 |
+| P3-R01 | OCR 准确率 ≥97%（20 张抽样） | **未验证（缺素材）**：延迟/内存达标，字符准确率需 20 张真实截图 + 人工标注 | §1.1 + `scripts/ocr-accuracy.ps1`；T0 冒烟 5 张真实截图 0 报错 |
+| P3-R01 | 模型文件缺失 → Windows OCR 降级 + warn；纯色图空结果 | **通过** | `ocr_fixtures.rs::chain_falls_back_to_windows_ocr_when_models_are_missing`、`blank_image_is_an_empty_result_not_an_error`、`ocr::chain_without_models_still_constructs`（本机 Windows OCR 实际识别成功） |
+| P3-R02 | 嵌入确定性 / 语义 sanity / LRU 命中 | **通过** | `embed_real.rs`：`same_text_gives_identical_vector`（max diff 0）、`related_texts_are_closer_than_unrelated`（10/10）、`query_cache_short_circuits_recomputation`（1.0ms→0.001ms） |
+| P3-R02 | 模型加载耗时与内存增量 ≤60MB | **通过** | §1.2：加载 145ms、增量 +56.4MB（余量 3.6MB） |
+| P3-R03 | VLM 全字段落库；畸形 JSON 修复一次；401 终止重试 | **通过（wiremock）** | `vlm_wiremock.rs`：`valid_json_maps_all_fields`、`malformed_json_triggers_exactly_one_repair`（`expect(1)` 断言只重试一次）、`unauthorized_is_a_config_error_and_is_not_retried`（`expect(1)`）；**真实端点待你用自己的 Key 跑一次** |
+| P3-R03 | 断网：OCR 摘录占位 + pending；恢复后增强替换 | **通过（假 Provider）** | `two_stage.rs::vlm_retryable_failure_marks_pending_after_three_attempts`（3 次后 pending、摘要仍是 OCR 摘录、仍可检索）、`retry_pending_enqueues_vlm_again` |
+| P3-R03 | 自动标签删除后不回贴（suppressions） | **通过** | `two_stage.rs::suppressed_auto_tag_is_not_reattached` |
+| P3-R04 | 提交→可检索 ≤3s（P95，≥10 次采样） | **待人工**：需要 GUI 连续拖入 ≥10 次计时（后端链路本身是毫秒级：`item_indexed` 在 OCR+index 完成后立即发出） | 事件链路证据：`two_stage.rs::ocr_then_index_then_vlm_emits_in_order_and_makes_item_searchable` |
+| P3-R04 | 同事务回滚（无半更新）；阶段二中断恢复 | **通过** | `items.rs::bump_revision_works_inside_write_index_tx`（闭包 Err → revision 不增）、`worker_framework.rs` 的崩溃恢复用例、`two_stage.rs::crash_during_vlm_recovers_and_reruns_without_duplicates` |
+| P3-R05 | 10 条真实中文查询字面召回 + snippet；删除后 FTS 行消失 | **通过** | `crates/search/tests/tokenizer_fts.rs::ten_real_chinese_queries_hit_the_right_documents`（10/10）、`snippet`/`bm25` 用例；`items.rs::delete_item_row_*` 清 FTS 行 |
+| P3-R06 | 解析规则正/反例；chip 删除重算；混输 | **通过（后端）** / **待人工（chip 删除重算的 UI）** | `crates/search/tests/parser.rs`：每规则正反例、`mixed_query_parses_every_rule_at_once`、6 条 proptest、真实 SQLite 候选集 8 例 |
+| P3-R07 | 三通道各自必命中；权重变更排序可复现；≤800ms P95 | **通过（后端）**：三通道 + 权重可复现已覆盖；P95 ≤800ms 待 GUI 计时 | `execute_search.rs`（纯字面/纯语义/混合/纯过滤四类 + `tie_order_is_stable_across_calls`）、`rank.rs::zero_weight_disables_a_channel` |
+| P3-R07 | filters-only 尾部附加；降级（语义跳过）仍出结果 | **通过** | `execute_search.rs::filters_only_query_returns_candidates_with_zero_score`、`semantic_channel_degrades_when_embedder_not_ready` |
+| P3-R08 | 三类命中解释与索引事实一致；OCR 高亮框定位；退化路径 | **通过（后端）** / 待人工（前端 overlay 视觉） | `execute_search.rs::pure_literal_query_uses_fts_only_and_explains_terms`、`explanation_boxes_only_match_terms`、`mixed_query_combines_filter_and_literal`、`execute::tests::highlight_boxes_matches_only_containing_terms` |
+| P3-R09 | 防抖/过期丢弃；空查询回列表；徽标与 ExplainBar；状态栏降级标注 | **待人工**（前端未实施）；后端已提供 `semantic_used` / `parsed.chips` / 降级事件 | `search_flow.rs::embed_query`（未就绪发一次 `semantic_status{ready:false}`）、`pipeline_host.rs::start_pipeline_is_idempotent_and_reports_semantic_status` |
+| P3-R10 | 标签点击筛选→取消；hue-dot 有/无；颜色口径一致 | **待人工**（前端未实施）；后端 `ItemDto.primaryColor` 与 `#tag` 过滤已通 | `parser.rs::tag_filter_requires_exact_name`、`color_filter_selects_only_matching_items`、`items.rs::list_items_joins_primary_color` |
+| P3-R11 | 凭据管理器条目；IPC/界面无明文；主备切换与恢复；探测三态 | **部分通过**：凭据往返 + 「错误信息不含密钥」+ 探测（wiremock）已过；主备切换与真实 Key 探测待环境 | `keyring.rs::roundtrip_against_real_credential_manager`（真实写/覆盖/删）、`vlm_wiremock.rs::probe_*` 三态、`ai::vlm::tests::api_key_is_never_printed`；**GUI 无明文待人工** |
+| P3-R12 | revision 取消旧任务；蓝绿重建零中断；自检修复；hash 复用 | **通过** | `worker_framework.rs`（stale cancel）、`lifecycle.rs::blue_green_rebuild_switches_pointer_and_keeps_old_table`（旧表保留 + 检索仍可用）、`two_stage.rs::startup_checks_repair_missing_fts_rows`、`identical_content_hash_calls_vlm_once` |
+| P3-R13 | 降级矩阵逐行（断网/错 Key/删模型/无文字图）；崩溃恢复；无重复执行 | **后端逐行通过 / GUI 逐行待人工** | 断网+错 Key：`two_stage.rs` 两条 pending 用例；删模型：`ocr_fixtures.rs` 降级用例；无文字图：`blank_*`；崩溃恢复：`crash_during_vlm_recovers_and_reruns_without_duplicates` |
+| P3-R14 | **Top-3 命中率 ≥80%**；分桶报告；≥1 轮调参对比存档 | **未验证（缺评测集）**：工具与指标已就位，缺 50 条人工标注查询 | `crates/eval`（`cargo run -p visrecall-eval -- --db … --queries … --report …`）、模板 `docs/eval/queries.template.jsonl`、冒烟报告 `docs/eval/report-2026-11-09-smoke.md`（空库 3 条模板查询，**不含结论**） |
+| P3-R15 | 全部自动化门禁 + 绑定同步 + release 运行 | **部分通过**：Rust 侧 fmt/clippy/test + 绑定重生成已过；`pnpm *` 与 release 运行待前端与打包 | §3.1 |
 
 ## 3. 自动化门禁输出
 
+### 3.1 已执行（2026-11-09，Windows x86_64）
+
 ```text
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo test --workspace -- --ignored        # 真实模型用例（本地）
-pnpm lint
-pnpm typecheck
-pnpm test
-pnpm build
+cargo fmt --all -- --check                    通过
+cargo clippy --workspace --all-targets -D warnings   通过
+cargo test --workspace                        740 passed / 0 failed
+cargo test --workspace -- --ignored           22 passed（真实模型：嵌入 7 + OCR 7 + 凭据 2 + 相关 6）
+cargo run -p visrecall-eval -- --db <empty> --queries docs/eval/queries.template.jsonl --report …
+                                              queries=3 top3=100% recall@10=1.000 mAP=1.000 p95=331ms
 ```
 
 | 命令 | 结果 | 备注 |
 |---|---|---|
-| （全部） | 待执行 | 待填 |
+| `cargo fmt --all -- --check` | 通过 | — |
+| `cargo clippy --workspace --all-targets -- -D warnings` | 通过 | 0 warning（`-D warnings`） |
+| `cargo test --workspace` | **740 passed, 0 failed** | 含 22 条 `#[ignore]`（真实模型）不计入 |
+| `cargo test --workspace -- --ignored` | **22 passed** | 需 `models/`（见 `models/manifest.json`） |
+| `pnpm lint` / `typecheck` / `test` / `build` | **未执行** | 前端 Task 13/14 未实施 |
+| `git diff --stat src/lib/bindings.ts` | +138 行（新增检索/探测/重建 DTO） | 由 `specta` 重生成，已提交 |
+
+### 3.2 手工验收矩阵（需要你在本机 GUI 或提供素材后执行）
+
+**A. 需要 20 张真实截图 + 人工标注**（回填 §1.1 与 P3-R01、P3-R14）
+
+```powershell
+# 1) 准备 shots\<name>.png（20 张）+ truth\<name>.txt（同名的纯文本标注）
+cargo run --release -p visrecall-ai --example ocr_spike -- --images shots --out ocr-out
+pwsh -File scripts/ocr-accuracy.ps1 -Ocr ocr-out -Annotations truth
+# 期望：aggregate accuracy ≥ 97%
+```
+
+**B. 需要 50 条人工标注查询**（回填 P3-R14）
+
+```powershell
+# 1) 用 20 条验收库（§0.1），按 docs/eval/queries.template.jsonl 的头部口径标注 50 条
+cargo run -p visrecall-eval -- --db <验收库根目录> --queries my-queries.jsonl --report docs/eval/report-2026-11-XX.md
+# 期望：Top-3 ≥ 80%；不达标按报告「调参回路」逐项改并出对比报告
+```
+
+**C. 需要 GUI**（Task 13/14 完成后逐条勾）
+
+| # | 步骤 | 期望 |
+|---|---|---|
+| 1 | 连续拖入 10 张截图，观察 `item_indexed` 事件 | 每张 ≤3s 出现在列表且可被标题搜到 |
+| 2 | 搜索框输入「发票」，看 ExplainBar | 显示「发票」词命中 + 列表徽标「字面命中」 |
+| 3 | 输入「报错」但库里只有「崩溃日志」 | 结果来自语义通道，ExplainBar 标「语义匹配」 |
+| 4 | 输入「上个月 橙色 漏斗图」 | chips 出现三个条件，结果只剩同时满足者 |
+| 5 | 删除某个 chip | 结果重算，剩余 chip 保持 |
+| 6 | 点标签 chip 筛选，再点一次取消 | 只在标签筛选态生效，不污染普通搜索 |
+| 7 | 断开网络后拖入新图 | 素材先可搜（OCR 摘录），详情显示「待重试」 |
+| 8 | 恢复网络后重启应用 | `pending` 素材自动重跑一轮并变为完整摘要 |
+| 9 | 设置里去掉 `models/` 目录后重启 | 状态栏显示「语义检索未就绪」，搜索仍可用（FTS 模式） |
+| 10 | 设置「模型」pane 填错 Key 后探测 | 行内报「配置错误」，不重试、不刷日志 |
+| 11 | 保存正确 Key 后探测 | 显示延迟与「视觉可用」 |
+| 12 | 检查 `config.json`、日志、任何 IPC 响应 | **无 API Key 明文** |
+| 13 | 详情面板看 OCR 高亮框 | 框落在原图对应文字上（任务栏高 DPI 也正常） |
+| 14 | 点「不是这个」 | `queries.feedback` 写入（无 UI 回显，符合 design §1.2） |
+| 15 | 触发 `embedding_rebuild` 后立即搜索 | 搜索不中断，`vector.active_table` 切换到 `_v2` |
+| 16 | 重复拖入**同一张**图 | 两条素材都在（不去重），第二次不产生新的模型调用 |
 
 ## 4. 已知限制与偏差（阶段结束时确认）
 
@@ -221,4 +270,15 @@ pnpm build
 
 ## 5. 结论
 
-**待执行。** 阶段 03 完成判定见 `requirements.md` §5（评测门禁 Top-3 ≥80% 为硬条件）。
+**部分通过（Rust 侧完成，验收未收口）。**
+
+- **已完成并自动化验证**：T0 门禁 2/3/5（嵌入性能、FTS5+jieba、ARM64）；索引管线、三路召回、
+  RRF、解释装配、蓝绿重建、凭据管理、错误分类与降级矩阵的**后端行为**（740 测试 + 22 条真实模型用例）。
+- **未收口（硬条件）**：
+  1. **P3-R14 评测门禁 Top-3 ≥80%**：工具与指标已就位，缺 50 条人工标注查询（§3.2-B）；
+  2. **P3-R01 的 97% 字符准确率**：缺 20 张真实截图 + 人工标注（§3.2-A）；
+  3. **P3-R09/R10 的前端行为**（ExplainBar、chips、hue-dot、状态栏）与 P3-R15 的 `pnpm *`
+     门禁：前端 Task 13/14 尚未实施；
+  4. **P3-R04 的「提交→可检索 ≤3s」与 P3-R07 的「≤800ms P95」**：需要 GUI 采样（§3.2-C）。
+- **阶段 03 完成判定**（`requirements.md` §5）**暂不满足**：前端与两项人工门禁未完成。
+  已完成的实现与全部残余工作都列在 §3.2，可直接按清单执行。

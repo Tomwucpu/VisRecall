@@ -785,7 +785,7 @@ pnpm lint && pnpm typecheck && pnpm test && pnpm build
 
 20 条数据视觉验收与截图证据（阶段 02 L1/L2）；仍受环境限制的项如实标注，不静默勾选。
 
-- [ ] **Step 4: 回填文档**
+- [x] **Step 4: 回填文档**
 
 - `verification.md`：§1 门禁（T0 数字已回填）、§2 矩阵逐行结论 + 证据、§3 命令输出、§4 已知限制、§5 结论。
 - `README.md`：阶段 03 状态与 §1 清单结论。
