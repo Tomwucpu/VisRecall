@@ -1,7 +1,19 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { toOriginalSrc, toThumbSrc } from "../../lib/format";
+import { resetToasts } from "../../lib/toast";
 import { ItemCard, type ItemCardData } from "./ItemCard";
 import { toItemCardData } from "./useItems";
+
+const commands = vi.hoisted(() => ({
+  copyItemOriginal: vi.fn(async () => undefined),
+}));
+
+vi.mock("../../lib/bindings", () => ({ commands }));
+
+afterEach(() => {
+  resetToasts();
+  vi.clearAllMocks();
+});
 
 const base: ItemCardData = {
   id: "1",
@@ -21,6 +33,26 @@ test("shows parsing status", () => {
 test("shows ready thumbnail", () => {
   render(<ItemCard item={{ ...base, id: "2", status: "ready", thumbUrl: "visrecall://thumb/2" }} />);
   expect(screen.getByRole("img")).toHaveAttribute("src", "visrecall://thumb/2");
+});
+
+test("hides the status badge for a normal item but keeps it for abnormal ones", () => {
+  const { rerender } = render(<ItemCard item={{ ...base, status: "ready" }} />);
+  expect(screen.queryByText("正常")).not.toBeInTheDocument();
+
+  rerender(<ItemCard item={{ ...base, status: "failed" }} />);
+  expect(screen.getByText("失败")).toBeInTheDocument();
+});
+
+test("copies the original from the card without opening the detail", async () => {
+  const onOpen = vi.fn();
+  render(<ItemCard item={{ ...base, status: "ready" }} onOpen={onOpen} />);
+
+  fireEvent.click(screen.getByRole("button", { name: "复制原图" }));
+
+  await waitFor(() => {
+    expect(commands.copyItemOriginal).toHaveBeenCalledWith("1");
+  });
+  expect(onOpen).not.toHaveBeenCalled();
 });
 
 test("shows status label for pending and failed", () => {

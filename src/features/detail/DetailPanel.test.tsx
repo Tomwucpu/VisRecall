@@ -86,7 +86,29 @@ test("renders real metadata from get_item_ext and hides absent size as a dash", 
   expect(commands.getItemExt).toHaveBeenCalledWith("abc123");
 });
 
-test("debounces the note and persists it through note_set", async () => {
+test("shows the note actions only while editing or after a change", () => {
+  renderPanel(<DetailPanel item={item} onClose={() => {}} />);
+  const note = screen.getByLabelText("备注");
+
+  // 没点备注框、内容也没改：按钮不占位。
+  expect(screen.queryByRole("button", { name: "保存" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "取消" })).not.toBeInTheDocument();
+
+  fireEvent.focusIn(note);
+  expect(screen.getByRole("button", { name: "保存" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "取消" })).toBeInTheDocument();
+
+  // 失焦且没有改动 → 收起。
+  fireEvent.focusOut(note);
+  expect(screen.queryByRole("button", { name: "保存" })).not.toBeInTheDocument();
+
+  // 有未保存改动时，即使失焦也保留，否则改完就没处保存了。
+  fireEvent.change(note, { target: { value: "改了" } });
+  fireEvent.focusOut(note);
+  expect(screen.getByRole("button", { name: "保存" })).toBeInTheDocument();
+});
+
+test("saves the note only when the save button is clicked", async () => {
   renderPanel(<DetailPanel item={item} onClose={() => {}} />);
 
   const note = screen.getByLabelText("备注");
@@ -94,13 +116,31 @@ test("debounces the note and persists it through note_set", async () => {
   fireEvent.change(note, { target: { value: "记一条备注" } });
   expect(note).toHaveValue("记一条备注");
 
-  // 300ms 防抖：只提交最后一次输入。
+  // 不做自动保存：改完不点「保存」就不会落盘。
+  expect(commands.noteSet).not.toHaveBeenCalled();
+  // 元信息行把字数与状态拼在一起（`6 / 10000 · 未保存`），因此用正则匹配。
+  expect(await screen.findByText(/未保存/)).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
   await waitFor(() => {
-    expect(commands.noteSet).toHaveBeenCalledTimes(1);
+    expect(commands.noteSet).toHaveBeenCalledWith("abc123", "记一条备注");
   });
-  expect(commands.noteSet).toHaveBeenCalledWith("abc123", "记一条备注");
-  // 元信息行把字数与状态拼在一起（`6 / 10000 · 已保存`），因此用正则匹配。
   expect(await screen.findByText(/已保存/)).toBeInTheDocument();
+});
+
+test("cancelling the note restores the saved content without writing", async () => {
+  renderPanel(<DetailPanel item={item} onClose={() => {}} />);
+
+  const note = screen.getByLabelText("备注");
+  fireEvent.change(note, { target: { value: "写了一半的草稿" } });
+  expect(note).toHaveValue("写了一半的草稿");
+
+  fireEvent.click(screen.getByRole("button", { name: "取消" }));
+
+  // 默认备注是空字符串，取消即回到它。
+  expect(note).toHaveValue("");
+  expect(commands.noteSet).not.toHaveBeenCalled();
 });
 
 test("blocks input beyond the 10000 character limit instead of saving an overflow", () => {
@@ -198,6 +238,7 @@ test("keeps the note text and reports failure when saving fails", async () => {
 
   const note = screen.getByLabelText("备注");
   fireEvent.change(note, { target: { value: "写不进也要留着" } });
+  fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
   expect(await screen.findByText(/保存失败/)).toBeInTheDocument();
   // 失败不回滚用户输入。

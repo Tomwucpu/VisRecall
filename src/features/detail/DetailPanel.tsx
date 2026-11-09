@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, SUMMARY_PLACEHOLDER, type TagChip } from "../../lib/api";
 import { errorCode, errorMessage } from "../../lib/errors";
 import {
+  copyLabel,
   formatAbsoluteTime,
   formatRelativeTime,
   kindLabel,
@@ -20,7 +21,6 @@ type Props = {
   onClose: () => void;
 };/** 备注上限（契约草案：10000 字，超限阻止输入而不是截断保存）。 */
 const NOTE_LIMIT = 10_000;
-const NOTE_DEBOUNCE_MS = 300;
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
@@ -34,12 +34,6 @@ const SUMMARY_SOURCE_LABEL: Record<string, string> = {
   extractive: "原文摘录",
   user: "已编辑",
 };
-
-function copyLabelOf(kind: string): string {
-  if (kind === "image") return "复制原图";
-  if (kind === "link") return "复制链接";
-  return "复制原文";
-}
 
 /**
  * 详情面板（T4）。
@@ -56,116 +50,82 @@ export function DetailPanel({ item, onClose }: Props) {
   });
 
   const [note, setNote] = useState<string | null>(null);
+  /** 已落盘的备注：点「取消」回到它，保存成功后同步成新值。 */
+  const [savedNote, setSavedNote] = useState("");
+  /** 备注区（输入框 + 按钮）是否获得焦点：用于「没在编辑且没改动」时收起按钮。 */
+  const [noteFocused, setNoteFocused] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [tagDraft, setTagDraft] = useState<string | null>(null);
   const [overlayMode, setOverlayMode] = useState<OverlayMode>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [reparseBusy, setReparseBusy] = useState(false);
 
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pending = useRef<string | null>(null);
-  const savedText = useRef<string>("");
+  // 保存是异步的：期间切到别的素材时，旧的结果不能写进新素材的本地状态。
+  const activeId = useRef(item.id);
 
   // 换素材时重置全部本地状态，避免上一条的备注/草稿串到下一条。
   useEffect(() => {
+    activeId.current = item.id;
     setNote(null);
+    setSavedNote("");
+    setNoteFocused(false);
     setSaveState("idle");
     setTagDraft(null);
     setOverlayMode(null);
     setConfirmOpen(false);
     setReparseBusy(false);
-    pending.current = null;
-    savedText.current = "";
-    if (timer.current !== null) {
-      clearTimeout(timer.current);
-      timer.current = null;
-    }
   }, [item.id]);
 
   // 真实备注到达后作为初始值；用户已经开始编辑则不覆盖。
   useEffect(() => {
     if (detail.data !== undefined && note === null) {
       setNote(detail.data.item.note);
-      savedText.current = detail.data.item.note;
+      setSavedNote(detail.data.item.note);
     }
   }, [detail.data, note]);
-
-  const flushNote = useCallback(
-    async (text: string) => {
-      if (text === savedText.current) {
-        return;
-      }
-      setSaveState("saving");
-      try {
-        await api.saveNote(item.id, text);
-        savedText.current = text;
-        setSaveState("saved");
-      } catch (error) {
-        // 失败时不回滚用户输入：文本还在输入框里，用户可以直接重试。
-        setSaveState("error");
-        pushToast(errorMessage(error), "error");
-      }
-    },
-    [item.id],
-  );
-
-  const scheduleSave = useCallback(
-    (text: string) => {
-      pending.current = text;
-      if (timer.current !== null) {
-        clearTimeout(timer.current);
-      }
-      timer.current = setTimeout(() => {
-        timer.current = null;
-        const value = pending.current;
-        pending.current = null;
-        if (value !== null) {
-          void flushNote(value);
-        }
-      }, NOTE_DEBOUNCE_MS);
-    },
-    [flushNote],
-  );
-
-  // 卸载前把未落盘的草稿冲一次，避免「打了字就切走」丢内容。
-  useEffect(() => {
-    return () => {
-      if (timer.current !== null) {
-        clearTimeout(timer.current);
-        timer.current = null;
-      }
-      if (pending.current !== null) {
-        const value = pending.current;
-        pending.current = null;
-        void flushNote(value);
-      }
-    };
-  }, [flushNote]);
 
   const onNoteChange = (value: string) => {
     // 上限阻止：超出部分直接不接受，而不是存进去再报错。
     const next = value.length > NOTE_LIMIT ? value.slice(0, NOTE_LIMIT) : value;
     setNote(next);
     setSaveState("idle");
-    scheduleSave(next);
   };
 
-  const flushNow = () => {
-    if (timer.current !== null) {
-      clearTimeout(timer.current);
-      timer.current = null;
+  /** 只有点「保存」才落盘：草稿与已保存内容不同才算有改动。 */
+  const commitNote = async () => {
+    if (note === null || note === savedNote) {
+      return;
     }
-    const value = pending.current;
-    pending.current = null;
-    if (value !== null) {
-      void flushNote(value);
+    const id = item.id;
+    const text = note;
+    setSaveState("saving");
+    try {
+      await api.saveNote(id, text);
+      if (activeId.current !== id) {
+        return;
+      }
+      setSavedNote(text);
+      setSaveState("saved");
+    } catch (error) {
+      // 失败不回滚输入：文本还在框里，用户可以直接再点保存。
+      pushToast(errorMessage(error), "error");
+      if (activeId.current !== id) {
+        return;
+      }
+      setSaveState("error");
     }
+  };
+
+  /** 取消：丢弃草稿，恢复到上次保存的内容。 */
+  const cancelNote = () => {
+    setNote(savedNote);
+    setSaveState("idle");
   };
 
   const copy = async () => {
     try {
       await api.copyOriginal(item.id, item.kind);
-      pushToast(`已复制${copyLabelOf(item.kind).replace(/^复制/, "")}`);
+      pushToast(`已复制${copyLabel(item.kind).replace(/^复制/, "")}`);
     } catch (error) {
       // 按错误码给出可操作的提示，而不是把后端 message 原样抛给用户。
       const code = errorCode(error);
@@ -276,14 +236,19 @@ export function DetailPanel({ item, onClose }: Props) {
     full?.width != null && full.height != null ? `${full.width} × ${full.height}` : "—";
 
   const noteText = note ?? "";
-  const noteMeta =
-    saveState === "saving"
-      ? "保存中…"
+  const noteDirty = note !== null && note !== savedNote;
+  const noteSaving = saveState === "saving";
+  // 只在「正在写」或「有未保存改动」时露出按钮：失焦后若仍有改动则保留，避免改完没处保存。
+  const noteActionsVisible = noteFocused || noteDirty;
+  const noteMeta = noteSaving
+    ? "保存中…"
+    : saveState === "error"
+      ? "保存失败 · 文本未丢失"
       : saveState === "saved"
         ? "已保存"
-        : saveState === "error"
-          ? "保存失败 · 文本未丢失"
-          : "行内编辑 · 自动保存";
+        : noteDirty
+          ? "未保存"
+          : "";
 
   return (
     <>
@@ -450,27 +415,58 @@ export function DetailPanel({ item, onClose }: Props) {
                 {noteMeta}
               </span>
             </div>
-            <textarea
-              className="d-note"
-              value={noteText}
-              placeholder="点击添加备注…"
-              spellCheck={false}
-              aria-label="备注"
-              onChange={(event) => onNoteChange(event.target.value)}
-              onBlur={flushNow}
-              onKeyDown={(event) => {
-                if (event.key === "Escape") {
-                  event.stopPropagation();
-                  flushNow();
-                  event.currentTarget.blur();
+            <div
+              className={`d-note-wrap${noteActionsVisible ? " has-actions" : ""}`}
+              onFocus={() => setNoteFocused(true)}
+              onBlur={(event) => {
+                // 焦点只是在输入框和按钮之间移动时不算离开，按钮不能半路消失。
+                if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                  setNoteFocused(false);
                 }
               }}
-            />
+            >
+              <textarea
+                className="d-note"
+                value={noteText}
+                placeholder="点击添加备注…"
+                spellCheck={false}
+                aria-label="备注"
+                onChange={(event) => onNoteChange(event.target.value)}
+                onKeyDown={(event) => {
+                  // Esc 等同于「取消」：丢弃草稿回到已保存内容，不顺手关掉面板。
+                  if (event.key === "Escape") {
+                    event.stopPropagation();
+                    cancelNote();
+                    event.currentTarget.blur();
+                  }
+                }}
+              />
+              {noteActionsVisible && (
+                <div className="d-note-actions">
+                  <button
+                    type="button"
+                    className="mini-btn"
+                    disabled={!noteDirty || noteSaving}
+                    onClick={cancelNote}
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    className="mini-btn primary"
+                    disabled={!noteDirty || noteSaving}
+                    onClick={() => void commitNote()}
+                  >
+                    保存
+                  </button>
+                </div>
+              )}
+            </div>
           </section>
 
           <div className="d-actions">
             <button type="button" className="btn primary" onClick={() => void copy()}>
-              {copyLabelOf(item.kind)}
+              {copyLabel(item.kind)}
             </button>
             <button
               type="button"

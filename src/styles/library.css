@@ -157,10 +157,11 @@
   opacity: 0.9;
 }
 
+/* 徽标只在异常状态出现（正常状态不渲染），占左上角；右上角留给复制按钮。 */
 .badge {
   position: absolute;
   top: 8px;
-  right: 8px;
+  left: 8px;
   z-index: 2;
   height: 20px;
   padding: 0 7px;
@@ -187,6 +188,60 @@
 .card.is-pending .card-thumb > img,
 .card.is-pending .thumb-fallback {
   opacity: 0.4;
+}
+
+/* 右上角复制原图：平时收起，悬停/聚焦时浮现（键盘 Tab 也能拿到）。 */
+.card-copy {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 4;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+  border: 1px solid var(--line-2);
+  color: var(--ink-2);
+  backdrop-filter: blur(6px);
+  opacity: 0;
+  transform: translateY(-3px) scale(0.96);
+  transition:
+    opacity 0.18s var(--ease),
+    transform 0.22s var(--ease),
+    background 0.16s var(--ease),
+    color 0.16s var(--ease);
+}
+
+.card:hover .card-copy,
+.card:focus-within .card-copy {
+  opacity: 1;
+  transform: none;
+}
+
+.card-copy:hover:not(:disabled) {
+  background: var(--inv-bg);
+  border-color: var(--inv-bg);
+  color: var(--inv-ink);
+}
+
+.card-copy:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.card-copy:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* 触屏/无悬停设备没有 hover 态，按钮常显，否则永远点不到。 */
+@media (hover: none) {
+  .card-copy {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .shimmer {

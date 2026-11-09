@@ -58,6 +58,18 @@ export function statusTone(status: string): string {
   return (KNOWN_STATUSES as readonly string[]).includes(status) ? status : "unknown";
 }
 
+/** 主复制按钮文案：按素材类型显示「复制原图 / 复制原文 / 复制链接」。 */
+export function copyLabel(kind: string): string {
+  switch (kind) {
+    case "image":
+      return "复制原图";
+    case "link":
+      return "复制链接";
+    default:
+      return "复制原文";
+  }
+}
+
 /** 素材类型文案；未知值给中文兜底。 */
 export function kindLabel(kind: string): string {
   switch (kind) {

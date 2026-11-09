@@ -1,11 +1,15 @@
 import { useEffect, useState, type CSSProperties } from "react";
+import { api } from "../../lib/api";
+import { errorCode, errorMessage } from "../../lib/errors";
 import {
+  copyLabel,
   formatAbsoluteTime,
   formatRelativeTime,
   kindLabel,
   statusLabel,
   statusTone,
 } from "../../lib/format";
+import { pushToast } from "../../lib/toast";
 
 /** 卡片只需要列表展示字段；`thumbUrl` 已是可直接给 `<img>` 用的地址。 */
 export type ItemCardData = {
@@ -43,7 +47,12 @@ function badgeClass(status: string): string {
   return "badge";
 }
 
-/** 单张素材卡：缩略图（无图时占位）、状态徽标、标题与来源/时间元信息。 */
+/** 正常状态不挂徽标：每张都写「正常」只是噪声，异常才需要被看见。 */
+function showsBadge(status: string): boolean {
+  return statusTone(status) !== "ready";
+}
+
+/** 单张素材卡：缩略图（无图时占位）、状态徽标、复制按钮、标题与来源/时间元信息。 */
 export function ItemCard({ item, onOpen, selected = false }: Props) {
   const kind = kindLabel(item.kind);
   const title = item.sourceTitle ?? "未命名来源";
@@ -58,10 +67,39 @@ export function ItemCard({ item, onOpen, selected = false }: Props) {
     setFailed(false);
   }, [item.thumbUrl]);
 
+  // 复制在飞行中禁用按钮，避免连点触发多次 IPC。
+  const [copying, setCopying] = useState(false);
+
   const thumbSrc = item.thumbUrl !== null && !failed ? item.thumbUrl : null;
   const busy = item.status === "parsing" || item.status === "pending";
   const hueStyle = { "--hue": item.hue ?? "var(--hue-ash)" } as CSSProperties;
   const interactive = onOpen !== undefined;
+  const copyText = copyLabel(item.kind);
+
+  const copy = async (event: { stopPropagation: () => void }) => {
+    // 卡片本身也是按钮：复制不能顺手把详情打开。
+    event.stopPropagation();
+    if (copying) {
+      return;
+    }
+    setCopying(true);
+    try {
+      await api.copyOriginal(item.id, item.kind);
+      pushToast(`已复制${copyText.replace(/^复制/, "")}`);
+    } catch (error) {
+      // 与详情页同一套错误码文案：把「文件没了 / 剪贴板被占用」说清楚。
+      const code = errorCode(error);
+      if (code === "FILE_MISSING") {
+        pushToast("原图文件缺失", "error");
+      } else if (code === "CLIPBOARD_BUSY") {
+        pushToast("剪贴板被占用，请重试", "error");
+      } else {
+        pushToast(errorMessage(error), "error");
+      }
+    } finally {
+      setCopying(false);
+    }
+  };
 
   return (
     <article
@@ -97,7 +135,35 @@ export function ItemCard({ item, onOpen, selected = false }: Props) {
           <span className="thumb-fallback">{kind}</span>
         )}
         {busy && <span className="shimmer" />}
-        <span className={badgeClass(item.status)}>{statusLabel(item.status)}</span>
+        {showsBadge(item.status) && (
+          <span className={badgeClass(item.status)}>{statusLabel(item.status)}</span>
+        )}
+        <button
+          type="button"
+          className="card-copy"
+          title={copyText}
+          aria-label={copyText}
+          disabled={copying}
+          onClick={copy}
+          onKeyDown={(event) => event.stopPropagation()}
+        >
+          <svg
+            width="13"
+            height="13"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <rect x="8.6" y="8.6" width="11" height="11" rx="2.2" />
+            <path
+              d="M15.4 5.6A2.6 2.6 0 0012.8 3H6.6A2.6 2.6 0 004 5.6v6.2a2.6 2.6 0 002.6 2.6"
+              strokeLinecap="round"
+            />
+          </svg>
+        </button>
       </div>
 
       <div className="card-body">
