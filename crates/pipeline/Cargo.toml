@@ -1,0 +1,16 @@
+[package]
+name = "visrecall-pipeline"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+visrecall-domain = { path = "../domain" }
+visrecall-library = { path = "../library" }
+visrecall-search = { path = "../search" }
+tracing = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

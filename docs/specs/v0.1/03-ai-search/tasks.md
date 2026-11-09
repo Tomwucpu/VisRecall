@@ -400,15 +400,15 @@ cargo clippy -p visrecall-ai --all-targets -- -D warnings
   - handler 注册：`stage -> Arc<dyn JobHandler>`（`JobHandler::run(&JobCtx) -> Result<(), AppError>`）
   - `enqueue(library, item_id, stage, priority) -> Result<(), AppError>`（revision 取当前 `items.revision`；`INSERT ... ON CONFLICT(item_id,stage,revision) DO NOTHING`）
 
-- [ ] **Step 1: claim 与状态机**
+- [x] **Step 1: claim 与状态机**
 
 design §6.2 的 `UPDATE ... RETURNING` 原子 claim；成功 → 调 handler；`Ok` → `succeeded`；`Err(Provider)` → 退避（`next_run_at = now + [2,5,15]s`，attempts≥3 → `failed`）；`Err(ProviderConfig)` → 立即 `failed` 并 `last_error` 记配置错误；`Err` 其他 → 同退避。claim 后读 `items.revision` 比对，不匹配 → `cancelled`。
 
-- [ ] **Step 2: 循环与水位**
+- [x] **Step 2: 循环与水位**
 
 worker 空闲 500ms 轮询；`pipeline_status { queued, running }` 事件 100ms 合并窗口（`Mutex<Option<Payload>>` + 定时 flush 线程，或简单地在每次状态变化后发、上限每 100ms 一条）。
 
-- [ ] **Step 3: 测试（假 handler）**
+- [x] **Step 3: 测试（假 handler）**
 
 - 两个任务两个 worker 并发执行无重复（假 handler 计数 + 断言）。
 - 失败退避：attempts 1→2→3 → `failed`；`ProviderConfig` 一次即 `failed`。

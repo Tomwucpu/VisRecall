@@ -5804,6 +5804,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "visrecall-pipeline"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "visrecall-domain",
+ "visrecall-library",
+ "visrecall-search",
+]
+
+[[package]]
 name = "visrecall-search"
 version = "0.1.0"
 dependencies = [
