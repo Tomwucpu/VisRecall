@@ -37,7 +37,7 @@ pub enum AppError {
     /// 本地模型（嵌入/OCR）未就绪或加载失败：检索降级、索引任务退避重试。
     #[error("model not ready: {0}")]
     ModelNotReady(String),
-    /// 可重试的云端失败（连接/超时/5xx/429）：走退避 + 主备切换。
+    /// 可重试的云端失败（连接/超时/5xx/429）：同模型退避重试，不做主备降级。
     #[error("provider unavailable: {0}")]
     Provider(String),
     /// 配置错误（401/403、地址非法）：**终止重试**，要求用户改配置。

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, SUMMARY_PLACEHOLDER, type TagChip } from "../../lib/api";
 import { errorCode, errorMessage } from "../../lib/errors";
 import {
@@ -49,6 +49,7 @@ function copyLabelOf(kind: string): string {
  * AI 描述区块只渲染 `SUMMARY_PLACEHOLDER`，复制按钮始终禁用（红线）。
  */
 export function DetailPanel({ item, onClose }: Props) {
+  const queryClient = useQueryClient();
   const detail = useQuery({
     queryKey: queryKeys.detail(item.id),
     queryFn: () => api.loadDetail(item.id),
@@ -59,6 +60,7 @@ export function DetailPanel({ item, onClose }: Props) {
   const [tagDraft, setTagDraft] = useState<string | null>(null);
   const [overlayMode, setOverlayMode] = useState<OverlayMode>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [reparseBusy, setReparseBusy] = useState(false);
 
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pending = useRef<string | null>(null);
@@ -71,6 +73,7 @@ export function DetailPanel({ item, onClose }: Props) {
     setTagDraft(null);
     setOverlayMode(null);
     setConfirmOpen(false);
+    setReparseBusy(false);
     pending.current = null;
     savedText.current = "";
     if (timer.current !== null) {
@@ -202,6 +205,26 @@ export function DetailPanel({ item, onClose }: Props) {
         return;
       }
       pushToast(errorMessage(error), "error");
+    }
+  };
+
+  const reparse = async () => {
+    setReparseBusy(true);
+    try {
+      await api.reparseItem(item.id);
+      // `item_updated` 事件只刷列表不刷详情；这里手动失效一次让状态行立即更新，
+      // 解析完成后 `item_enriched` 会再自动刷新摘要与标签。
+      void queryClient.invalidateQueries({ queryKey: queryKeys.detail(item.id) });
+      pushToast("已重新开始解析", "info");
+    } catch (error) {
+      if (errorCode(error) === "NOT_FOUND") {
+        pushToast("该素材已不存在", "error");
+        onClose();
+        return;
+      }
+      pushToast(errorMessage(error), "error");
+    } finally {
+      setReparseBusy(false);
     }
   };
 
@@ -448,6 +471,15 @@ export function DetailPanel({ item, onClose }: Props) {
           <div className="d-actions">
             <button type="button" className="btn primary" onClick={() => void copy()}>
               {copyLabelOf(item.kind)}
+            </button>
+            <button
+              type="button"
+              className="btn"
+              disabled={reparseBusy}
+              title="用当前选用模型重新运行 OCR、索引与 AI 摘要"
+              onClick={() => void reparse()}
+            >
+              {reparseBusy ? "重新解析中…" : "重新解析"}
             </button>
             <button
               type="button"

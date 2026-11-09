@@ -33,6 +33,7 @@ use crate::capture_flow::{
 use crate::detail::{load_detail, ItemDetail};
 use crate::events::{
     AppEvent, AppRecoveredEvent, CaptureFailedEvent, EventSink, HotkeyConflictEvent, ItemEvent,
+    ItemUpdatedEvent,
 };
 use crate::import_flow::ImportFlow;
 
@@ -100,31 +101,39 @@ pub struct SettingsPatchInput {
     pub hide_in_fullscreen: Option<bool>,
 }
 
-/// 一个 Provider 槽位的输入（`api_key` 只在内存里出现一次，随后写入凭据管理器）。
+/// 一个自定义模型的输入（`api_key` 只在内存里出现一次，随后写入凭据管理器）。
 #[derive(Clone, Default, PartialEq, Eq)]
-pub struct ProviderEntryInput {
-    pub base_url: String,
+pub struct ModelEntryInput {
+    pub id: String,
+    pub name: String,
     pub model: String,
-    /// `None` = 不改密钥；`Some("")` = 清除该槽位密钥；`Some(key)` = 覆盖写。
+    pub base_url: String,
+    pub protocol: String,
+    pub protocol_id: String,
+    /// `None` = 不改密钥；`Some("")` = 清除该模型密钥；`Some(key)` = 覆盖写。
     pub api_key: Option<String>,
 }
 
-impl std::fmt::Debug for ProviderEntryInput {
+impl std::fmt::Debug for ModelEntryInput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ProviderEntryInput")
+        f.debug_struct("ModelEntryInput")
+            .field("id", &self.id)
+            .field("name", &self.name)
             .field("base_url", &self.base_url)
             .field("model", &self.model)
+            .field("protocol", &self.protocol)
             // 密钥绝不出现在日志/错误链里（P3-R11）
             .field("api_key", &self.api_key.as_ref().map(|_| "***"))
             .finish()
     }
 }
 
-/// 模型配置补丁：`None` = 不动该槽位。
+/// 模型配置整表提交：新建 / 修改 / 删除 / 启用都提交同一份列表，
+/// 与原型「一次保存整份 models」的语义一致。
 #[derive(Clone, Debug, Default)]
 pub struct ModelConfigPatch {
-    pub primary: Option<ProviderEntryInput>,
-    pub backup: Option<ProviderEntryInput>,
+    pub entries: Vec<ModelEntryInput>,
+    pub active_id: Option<String>,
 }
 
 /// Tauri 托管的应用状态。
@@ -151,7 +160,7 @@ pub struct AppCore {
     ball_enabled: Arc<AtomicBool>,
     /// 长任务闸门（迁移 / 待重启）；捕获循环与 `preflight` 都读它。
     gate: Arc<AtomicU8>,
-    /// 阶段 03：云端模型主备注册表（热更新）。
+    /// 阶段 03：云端模型注册表（热更新；选用哪个就用哪个，不降级）。
     providers: Arc<crate::pipeline_host::ProviderRegistry>,
     /// 阶段 03：索引管线 worker（`start_pipeline` 之后才有值）。
     pipeline: Mutex<Option<visrecall_pipeline::PipelineHandle>>,
@@ -655,6 +664,43 @@ impl AppCore {
         Ok(())
     }
 
+    /// 重新解析：对该素材强制重跑完整解析链（当前选用模型），成功后发 `item_updated`。
+    ///
+    /// `bump_revision` 让进行中的旧任务作废（worker 的 stale 检查），点击立即生效；
+    /// 图片从 `ocr` 重跑（handler 接力 index + vlm），文本/链接显式入队 index + vlm
+    /// （`index` handler 不接力 vlm，入库时也只入队了 index）。旧结果无需清理：
+    /// ocr/index/insights 都是覆盖写，vlm 的 content_hash 复用排除了素材自身。
+    pub fn reparse_item(&self, id: &str) -> Result<(), AppError> {
+        let library = self.library_required()?;
+        let item = library.get_item(id)?.ok_or(AppError::NotFound)?;
+        // 状态回 parsing：卡片/详情立即出现「解析中」反馈，由 vlm 结果再翻 Ready/Pending
+        library.update_status(id, visrecall_domain::ItemStatus::Parsing, None)?;
+        if item.kind == ItemKind::Image {
+            library.bump_revision_and_enqueue(
+                id,
+                visrecall_pipeline::STAGE_OCR,
+                visrecall_pipeline::PRIORITY_NEW,
+            )?;
+        } else {
+            let revision = library.bump_revision_and_enqueue(
+                id,
+                visrecall_pipeline::STAGE_INDEX,
+                visrecall_pipeline::PRIORITY_NEW,
+            )?;
+            library.enqueue_stage_at(
+                id,
+                visrecall_pipeline::STAGE_VLM,
+                revision,
+                visrecall_pipeline::PRIORITY_NEW,
+            )?;
+        }
+        self.sink.emit(AppEvent::ItemUpdated(ItemUpdatedEvent {
+            id: id.to_string(),
+            fields: vec!["status".to_string()],
+        }));
+        Ok(())
+    }
+
     /// 全库清空的确认信息：待删条数 + 确认词。
     pub fn purge_preview(&self) -> Result<u64, AppError> {
         self.library_required()?.count_items()
@@ -1105,29 +1151,65 @@ impl AppCore {
         self.providers.config()
     }
 
-    /// 保存模型配置：地址/模型名写 `config.json`，密钥写凭据管理器，保存即热生效。
+    /// 保存模型列表：显示名称 / 模型 ID / 地址 / 协议写 `config.json`，
+    /// 密钥按模型 id 写凭据管理器，保存即热生效。
     ///
-    /// 请求里 `api_key = Some("")` 表示清除该槽位密钥；`None` 表示保持不变。
+    /// `api_key = Some("")` 清除该模型密钥；`None` 保持不变。
+    /// 从列表里移除的模型会顺带清掉它的凭据，避免留下孤儿条目。
     pub fn set_model_config(&self, patch: ModelConfigPatch) -> Result<ModelConfig, AppError> {
-        let mut next = {
-            let guard = self.lock_config();
-            guard.models.clone()
-        };
+        let previous = self.lock_config().models.clone();
 
-        if let Some(input) = &patch.primary {
-            crate::pipeline_host::apply_entry(
-                &mut next.primary,
-                input,
-                visrecall_ai::KeySlot::Primary,
-            )?;
+        let mut entries = Vec::with_capacity(patch.entries.len());
+        let mut ids = std::collections::HashSet::new();
+        for input in &patch.entries {
+            let protocol = input.protocol.trim();
+            let entry = visrecall_library::ModelEntry {
+                id: input.id.trim().to_string(),
+                name: input.name.trim().to_string(),
+                model: input.model.trim().to_string(),
+                base_url: input.base_url.trim().to_string(),
+                protocol: if protocol.is_empty() {
+                    "openai".to_string()
+                } else {
+                    protocol.to_string()
+                },
+                protocol_id: input.protocol_id.trim().trim_matches('/').to_string(),
+            };
+            entry.validate()?;
+            if !ids.insert(entry.id.clone()) {
+                return Err(AppError::InvalidInput(format!(
+                    "duplicate model id: {}",
+                    entry.id
+                )));
+            }
+            entries.push(entry);
         }
-        if let Some(input) = &patch.backup {
-            crate::pipeline_host::apply_entry(
-                &mut next.backup,
-                input,
-                visrecall_ai::KeySlot::Backup,
-            )?;
+
+        for (entry, input) in entries.iter().zip(patch.entries.iter()) {
+            let key_slot = visrecall_ai::KeySlot::for_model(&entry.id);
+            match input.api_key.as_deref() {
+                Some("") => visrecall_ai::delete_key(&key_slot)?,
+                Some(key) => visrecall_ai::save_key(&key_slot, key)?,
+                None => {}
+            }
         }
+        for removed in previous
+            .entries
+            .iter()
+            .filter(|entry| !ids.contains(&entry.id))
+        {
+            visrecall_ai::delete_key(&visrecall_ai::KeySlot::for_model(&removed.id))?;
+        }
+
+        let active_id = match patch.active_id.map(|id| id.trim().to_string()) {
+            Some(id) if ids.contains(&id) => Some(id),
+            _ => entries.first().map(|entry| entry.id.clone()),
+        };
+        let next = ModelConfig {
+            entries,
+            active_id,
+            ..ModelConfig::default()
+        };
 
         {
             let mut guard = self.lock_config();
@@ -1137,30 +1219,31 @@ impl AppCore {
             *guard = config;
         }
 
-        // 热生效：注册表重建，下一轮任务立刻用新地址（无需重启）
+        // 热生效：注册表重建，下一轮任务立刻用新模型（无需重启）
         self.providers.reload(&next);
-        tracing::info!("model configuration updated");
+        tracing::info!(models = next.entries.len(), "model configuration updated");
         Ok(next)
     }
 
-    /// 探测指定槽位（连通性 + 视觉能力 + 延迟）。`slot` 接受 `primary`/`backup`。
-    pub fn probe_model(&self, slot: &str) -> Result<visrecall_ai::ProbeOutcome, AppError> {
-        let key_slot = visrecall_ai::KeySlot::parse(slot)
-            .ok_or_else(|| AppError::InvalidInput(format!("unknown slot: {slot}")))?;
+    /// 探测指定模型 id（连通性 + 视觉能力 + 延迟），协议与地址取**已保存**配置。
+    pub fn probe_model(&self, id: &str) -> Result<visrecall_ai::ProbeOutcome, AppError> {
         let config = self.lock_config().models.clone();
-        let entry = match key_slot {
-            visrecall_ai::KeySlot::Primary => config.primary,
-            visrecall_ai::KeySlot::Backup => config.backup,
-        }
-        .ok_or(AppError::ConfigMissing)?;
+        let entry = config.find(id).cloned().ok_or(AppError::ConfigMissing)?;
         entry.validate()?;
-        let api_key = visrecall_ai::load_key(key_slot).unwrap_or(None);
+        let api_key =
+            visrecall_ai::load_key(&visrecall_ai::KeySlot::for_model(&entry.id)).unwrap_or(None);
         let runtime = self
             .lock_pipeline_runtime()
             .as_ref()
             .map(|runtime| runtime.handle().clone())
             .ok_or_else(|| AppError::Internal("async runtime unavailable".to_string()))?;
-        Ok(runtime.block_on(visrecall_ai::probe(&entry.base_url, &entry.model, api_key)))
+        Ok(runtime.block_on(visrecall_ai::probe_with(
+            &entry.base_url,
+            &entry.model,
+            api_key,
+            &entry.protocol,
+            &entry.protocol_id,
+        )))
     }
 
     /// 触发向量蓝绿重建（管理/评测用，无 UI）。重建期间检索零中断。

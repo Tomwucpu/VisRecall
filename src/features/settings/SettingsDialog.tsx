@@ -17,7 +17,7 @@ type PaneId = "capture" | "storage" | "models";
 const PANE_META: Record<PaneId, { title: string; sub: string }> = {
   capture: { title: "捕获", sub: "快捷键 · 悬浮球" },
   storage: { title: "存储", sub: "位置 · 容量 · 保留策略" },
-  models: { title: "模型", sub: "主备 VLM · 凭据" },
+  models: { title: "模型", sub: "自定义模型与协议" },
 };
 
 /** `Ctrl+Shift+S` → `["Ctrl","Shift","S"]`，用于渲染 kbd 芯片。 */

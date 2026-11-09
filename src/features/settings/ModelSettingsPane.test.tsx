@@ -2,18 +2,33 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, test, vi } from "vitest";
 
-import { api, type ModelConfigDto } from "../../lib/api";
+import { api, type ModelConfigDto, type ModelConfigPatchDto } from "../../lib/api";
 import { ModelSettingsPane } from "./ModelSettingsPane";
 
-const EMPTY: ModelConfigDto = { primary: null, backup: null };
+const EMPTY: ModelConfigDto = { entries: [], activeId: null };
 
 const CONFIGURED: ModelConfigDto = {
-  primary: {
-    baseUrl: "https://api.example.com/v1",
-    model: "gpt-4o-mini",
-    hasApiKey: true,
-  },
-  backup: null,
+  entries: [
+    {
+      id: "m1",
+      name: "本地 VL 模型",
+      model: "qwen2.5-vl-7b",
+      baseUrl: "http://localhost:11434/v1",
+      protocol: "ollama",
+      protocolId: "",
+      hasApiKey: true,
+    },
+    {
+      id: "m2",
+      name: "自研协议接口",
+      model: "my-vl-v2",
+      baseUrl: "https://api.example.com/v1",
+      protocol: "rest",
+      protocolId: "my-proto/v1",
+      hasApiKey: false,
+    },
+  ],
+  activeId: "m1",
 };
 
 function renderPane() {
@@ -25,97 +40,162 @@ function renderPane() {
   );
 }
 
+/** 后端视图：只回 hasApiKey，绝不回明文密钥。 */
+function echoConfig(patch: ModelConfigPatchDto): ModelConfigDto {
+  return {
+    entries: patch.entries.map((entry) => ({
+      id: entry.id,
+      name: entry.name,
+      model: entry.model,
+      baseUrl: entry.baseUrl,
+      protocol: entry.protocol,
+      protocolId: entry.protocolId,
+      hasApiKey: entry.apiKey !== null && entry.apiKey !== undefined && entry.apiKey !== "",
+    })),
+    activeId: patch.activeId ?? null,
+  };
+}
+
+async function openNewForm() {
+  fireEvent.click(await screen.findByText("+ 新建模型"));
+  fireEvent.change(screen.getByLabelText("显示名称"), { target: { value: "我的视觉模型" } });
+  fireEvent.change(screen.getByLabelText("模型 ID"), {
+    target: { value: "qwen2.5-vl-72b" },
+  });
+  fireEvent.change(screen.getByLabelText("接口地址 / Base URL"), {
+    target: { value: "https://api.example.com/v1" },
+  });
+}
+
 beforeEach(() => {
   vi.restoreAllMocks();
 });
 
-test("shows two slots and only a boolean key badge, never the secret", async () => {
+test("renders the model cards with only a boolean key state, never the secret", async () => {
   vi.spyOn(api, "getModelConfig").mockResolvedValue(CONFIGURED);
   renderPane();
 
-  expect(await screen.findByText("已设置")).toBeInTheDocument();
-  expect(screen.getByLabelText("主模型接口地址")).toHaveValue("https://api.example.com/v1");
-  expect(screen.getByLabelText("主模型模型名")).toHaveValue("gpt-4o-mini");
-  expect(screen.getByLabelText("主模型 API Key")).toHaveValue("");
-  expect(screen.getAllByLabelText(/API Key/)).toHaveLength(2);
-  expect(screen.queryByText(/sk-/)).not.toBeInTheDocument();
+  expect(await screen.findByText("本地 VL 模型")).toBeInTheDocument();
+  expect(screen.getByText("自研协议接口")).toBeInTheDocument();
+  expect(screen.getByText("使用中")).toBeInTheDocument();
+  const card = screen.getByText("本地 VL 模型").closest(".mc");
+  expect(card).toHaveTextContent("密钥已配置");
+  expect(document.body.textContent).not.toContain("sk-");
+});
+
+test("creating a model sends the whole list and clears the password box", async () => {
+  vi.spyOn(api, "getModelConfig").mockResolvedValue(EMPTY);
+  const save = vi
+    .spyOn(api, "setModelConfig")
+    .mockImplementation(async (patch) => echoConfig(patch));
+
+  renderPane();
+  await openNewForm();
+  const keyInput = screen.getByLabelText("API 密钥") as HTMLInputElement;
+  fireEvent.change(keyInput, { target: { value: "sk-secret" } });
+  fireEvent.click(screen.getByText("保存并启用"));
+
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  const patch = save.mock.calls[0][0];
+  expect(patch.entries).toHaveLength(1);
+  expect(patch.entries[0].name).toBe("我的视觉模型");
+  expect(patch.entries[0].model).toBe("qwen2.5-vl-72b");
+  expect(patch.entries[0].protocol).toBe("openai");
+  expect(patch.entries[0].apiKey).toBe("sk-secret");
+  expect(patch.activeId).toBe(patch.entries[0].id);
+
+  expect(await screen.findByText("我的视觉模型")).toBeInTheDocument();
+  expect(screen.queryByLabelText("API 密钥")).not.toBeInTheDocument();
+  expect(document.body.textContent).not.toContain("sk-secret");
 });
 
 test("invalid base url shows an inline error and does not save", async () => {
   vi.spyOn(api, "getModelConfig").mockResolvedValue(EMPTY);
   const save = vi.spyOn(api, "setModelConfig");
   renderPane();
-  await screen.findByText("保存配置");
 
-  fireEvent.change(screen.getByLabelText("主模型接口地址"), {
+  await openNewForm();
+  fireEvent.change(screen.getByLabelText("接口地址 / Base URL"), {
     target: { value: "api.example.com" },
   });
-  fireEvent.change(screen.getByLabelText("主模型模型名"), {
-    target: { value: "m" },
-  });
-  fireEvent.click(screen.getByText("保存配置"));
+  fireEvent.click(screen.getByText("保存并启用"));
 
   expect(await screen.findByRole("alert")).toHaveTextContent("http://");
   expect(save).not.toHaveBeenCalled();
 });
 
-test("saving clears the password box and sends no plaintext back into the form", async () => {
+test("protocol menu writes the protocol and custom REST requires an id", async () => {
   vi.spyOn(api, "getModelConfig").mockResolvedValue(EMPTY);
-  const save = vi.spyOn(api, "setModelConfig").mockImplementation(async (patch) => {
-    // 后端视图只回 hasApiKey，绝不回传密钥
-    expect(patch.primary?.apiKey).toBe("sk-secret");
-    return {
-      primary: {
-        baseUrl: "https://api.example.com/v1",
-        model: "m",
-        hasApiKey: true,
-      },
-      backup: null,
-    };
-  });
-
+  const save = vi
+    .spyOn(api, "setModelConfig")
+    .mockImplementation(async (patch) => echoConfig(patch));
   renderPane();
-  await screen.findByText("保存配置");
-  fireEvent.change(screen.getByLabelText("主模型接口地址"), {
-    target: { value: "https://api.example.com/v1" },
+
+  await openNewForm();
+  fireEvent.click(screen.getByRole("button", { name: /OpenAI 兼容/ }));
+  fireEvent.click(screen.getByRole("menuitemradio", { name: /自定义 REST/ }));
+  expect(screen.getByLabelText("协议标识")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByText("保存并启用"));
+  expect(await screen.findByRole("alert")).toHaveTextContent("协议标识");
+  expect(save).not.toHaveBeenCalled();
+
+  fireEvent.change(screen.getByLabelText("协议标识"), {
+    target: { value: "my-proto/v1" },
   });
-  fireEvent.change(screen.getByLabelText("主模型模型名"), {
-    target: { value: "m" },
-  });
-  const keyInput = screen.getByLabelText("主模型 API Key") as HTMLInputElement;
-  fireEvent.change(keyInput, { target: { value: "sk-secret" } });
-  fireEvent.click(screen.getByText("保存配置"));
+  fireEvent.click(screen.getByText("保存并启用"));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  expect(save.mock.calls[0][0].entries[0].protocol).toBe("rest");
+  expect(save.mock.calls[0][0].entries[0].protocolId).toBe("my-proto/v1");
+});
+
+test("clearing a saved key sends an empty string, not plaintext", async () => {
+  vi.spyOn(api, "getModelConfig").mockResolvedValue(CONFIGURED);
+  const save = vi
+    .spyOn(api, "setModelConfig")
+    .mockImplementation(async (patch) => echoConfig(patch));
+  renderPane();
+
+  expect(await screen.findByText("本地 VL 模型")).toBeInTheDocument();
+  fireEvent.click(screen.getAllByText("修改")[0]);
+  fireEvent.click(screen.getByText("清除已保存密钥"));
+  fireEvent.click(screen.getByText("保存修改"));
 
   await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
-  await waitFor(() => expect(keyInput).toHaveValue(""));
-  expect(await screen.findByText("已设置")).toBeInTheDocument();
-  expect(document.body.textContent).not.toContain("sk-secret");
+  expect(save.mock.calls[0][0].entries[0].apiKey).toBe("");
+  expect(save.mock.calls[0][0].entries[1].apiKey).toBeNull();
 });
-test("probe on an unsaved slot asks to save first", async () => {
-  vi.spyOn(api, "getModelConfig").mockResolvedValue(EMPTY);
-  const probe = vi.spyOn(api, "probeModel");
+
+test("selecting and deleting a model persists the whole list", async () => {
+  vi.spyOn(api, "getModelConfig").mockResolvedValue(CONFIGURED);
+  const save = vi
+    .spyOn(api, "setModelConfig")
+    .mockImplementation(async (patch) => echoConfig(patch));
   renderPane();
-  await screen.findByText("保存配置");
 
-  fireEvent.click(screen.getAllByText("探测")[0]);
-  expect(await screen.findByText("探测失败：请先保存该槽位再探测")).toBeInTheDocument();
-  expect(probe).not.toHaveBeenCalled();
+  expect(await screen.findByText("本地 VL 模型")).toBeInTheDocument();
+  fireEvent.click(screen.getByText("自研协议接口"));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  expect(save.mock.calls[0][0].activeId).toBe("m2");
+
+  fireEvent.click(screen.getAllByText("删除")[0]);
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+  expect(save.mock.calls[1][0].entries.map((entry) => entry.id)).toEqual(["m2"]);
 });
 
-test("probe reports success and failure states", async () => {
+test("test connection reports success and failure states", async () => {
   vi.spyOn(api, "getModelConfig").mockResolvedValue(CONFIGURED);
   const probe = vi
     .spyOn(api, "probeModel")
     .mockResolvedValueOnce({ ok: true, latencyMs: 42, vision: true, message: null })
     .mockRejectedValueOnce({ code: "PROVIDER_CONFIG", message: "HTTP 401" });
   renderPane();
-  await screen.findByText("已设置");
 
-  const buttons = screen.getAllByText("探测");
-  fireEvent.click(buttons[0]);
+  expect(await screen.findByText("本地 VL 模型")).toBeInTheDocument();
+  fireEvent.click(screen.getByText("测试连接"));
   expect(await screen.findByText(/连通 42ms · 视觉可用/)).toBeInTheDocument();
-  expect(probe).toHaveBeenCalledWith("primary");
+  expect(probe).toHaveBeenCalledWith("m1");
 
-  fireEvent.click(buttons[0]);
-  expect(await screen.findByText("探测失败：HTTP 401")).toBeInTheDocument();
+  fireEvent.click(screen.getByText("测试连接"));
+  expect(await screen.findByText("测试失败：HTTP 401")).toBeInTheDocument();
 });

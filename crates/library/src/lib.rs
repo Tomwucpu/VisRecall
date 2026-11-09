@@ -26,7 +26,8 @@ pub mod vectors;
 
 pub use cleanup::StartupCleanup;
 pub use config::{
-    AppConfig, BallConfig, CaptureConfig, HotkeyConfig, ModelConfig, PrivacyConfig, ProviderEntry,
+    AppConfig, BallConfig, CaptureConfig, HotkeyConfig, ModelConfig, ModelEntry, PrivacyConfig,
+    ProviderEntry, MODEL_PROTOCOLS,
 };
 pub use db::{IndexCounts, Library};
 pub use fts::{fts_delete_tx, fts_upsert_tx, FtsColumns, FtsHit};

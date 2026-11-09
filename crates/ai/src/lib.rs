@@ -18,4 +18,4 @@ pub use models::{
 };
 pub use ocr::{OcrChain, PpocrOcr, WindowsOcr};
 pub use runtime::{environment, resolve_ort_dylib, ORT_DYLIB};
-pub use vlm::{probe, OpenAiCompatible, ProbeOutcome};
+pub use vlm::{probe, probe_with, OpenAiCompatible, ProbeOutcome, Protocol};

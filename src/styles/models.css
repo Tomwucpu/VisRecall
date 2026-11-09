@@ -1,0 +1,437 @@
+/*
+ * 设置 · 模型 pane：逐项对齐 docs/prototype/index.html 的「自定义模型与协议」区块。
+ * 这是既有设计世界内的局部扩展：令牌、圆角、动效曲线全部沿用 tokens.css。
+ */
+
+.mc-hidden {
+  display: none !important;
+}
+
+.mc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0 0 10px;
+}
+
+.mc-head .label {
+  letter-spacing: 0.1em;
+}
+
+.mc-head .mono {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--ink-3);
+  margin-left: 5px;
+}
+
+.mc-head .mini-btn {
+  border: 1px solid var(--line);
+  padding: 4px 9px;
+}
+
+.mc-head .mini-btn:hover:not(:disabled) {
+  border-color: var(--line-2);
+  color: var(--ink);
+}
+
+.model-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-bottom: 14px;
+}
+
+.mc {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  transition:
+    border-color 0.16s var(--ease),
+    background 0.16s var(--ease);
+}
+
+.mc:hover {
+  border-color: var(--line-2);
+  background: var(--surface-2);
+}
+
+.mc:focus-visible {
+  outline: 1px solid var(--ink-3);
+  outline-offset: 2px;
+}
+
+.mc.on {
+  border-color: var(--ink);
+  background: var(--surface-2);
+}
+
+.mc-main {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex: 1;
+  min-width: 0;
+}
+
+.mc-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--line-2);
+  flex: 0 0 6px;
+}
+
+.mc.on .mc-dot {
+  background: var(--seal);
+}
+
+.mc-info {
+  min-width: 0;
+  flex: 1;
+}
+
+.mc-name {
+  font-size: 12px;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.mc-active {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--seal);
+  border: 1px solid color-mix(in srgb, var(--seal) 40%, transparent);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+
+.mc-meta {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--ink-3);
+  margin-top: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mc-ops {
+  display: flex;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.mc-ops .mini-btn {
+  border: 1px solid var(--line);
+  padding: 3px 7px;
+}
+
+.mc-ops .mini-btn:hover:not(:disabled) {
+  border-color: var(--line-2);
+  color: var(--ink);
+}
+
+.mc-empty {
+  padding: 18px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--ink-3);
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+}
+
+.cm-note {
+  font-size: 10px;
+  color: var(--ink-3);
+  line-height: 1.6;
+  padding-top: 5px;
+}
+
+.cm-key-clear {
+  align-self: flex-start;
+  margin-top: 5px;
+  border: 1px solid var(--line);
+  padding: 3px 7px;
+  color: var(--ink-2);
+}
+
+.custom-model {
+  display: none;
+  margin: 0 0 16px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+}
+
+.custom-model.show {
+  display: block;
+  animation: cm-in 0.2s var(--ease);
+}
+
+.cm-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.cm-head .label {
+  letter-spacing: 0.1em;
+}
+
+.cm-head .mini-btn {
+  border: 1px solid var(--line);
+  padding: 3px 8px;
+}
+
+.cm-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.cm-grid-gap {
+  margin-top: 10px;
+}
+
+.cm-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.cm-field > span,
+.cm-k {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--ink-3);
+  letter-spacing: 0.03em;
+}
+
+.cm-field .field {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.cm-proto-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 11px;
+  flex-wrap: wrap;
+}
+
+.proto-wrap {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.proto-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 9px;
+  min-width: 150px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-2);
+  transition:
+    background 0.16s var(--ease),
+    color 0.16s var(--ease);
+}
+
+.proto-btn:hover,
+.proto-wrap.open .proto-btn {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.proto-btn .chev {
+  margin-left: auto;
+  transition: transform 0.2s var(--ease);
+}
+
+.proto-wrap.open .chev {
+  transform: rotate(180deg);
+}
+
+.proto-menu {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 5px);
+  min-width: 180px;
+  background: var(--surface);
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  box-shadow: var(--shadow-md);
+  padding: 5px;
+  z-index: 45;
+}
+
+.proto-menu.open {
+  animation: proto-menu-in 0.18s var(--ease);
+}
+
+.proto-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  white-space: nowrap;
+  padding: 6px 8px;
+  border-radius: 5px;
+  font-size: 11.5px;
+  color: var(--ink-2);
+  transition:
+    background 0.14s var(--ease),
+    color 0.14s var(--ease);
+}
+
+.proto-opt:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.proto-opt.on {
+  color: var(--ink);
+}
+
+.proto-opt .tick {
+  margin-left: auto;
+  font-style: normal;
+  font-size: 11px;
+  color: var(--seal);
+  opacity: 0;
+}
+
+.proto-opt.on .tick {
+  opacity: 1;
+}
+
+.cm-proto-id {
+  width: 158px;
+  min-width: 0;
+  flex: 0 0 auto;
+}
+
+.cm-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 13px;
+}
+
+.cm-btn {
+  height: 30px;
+  min-width: 92px;
+  padding: 0 14px;
+  border-radius: 6px;
+  border: 1px solid var(--line-2);
+  font-size: 11.5px;
+  letter-spacing: 0.01em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  transition:
+    background 0.16s var(--ease),
+    border-color 0.16s var(--ease),
+    color 0.16s var(--ease),
+    transform 0.16s var(--ease);
+}
+
+.cm-btn.ghost {
+  background: transparent;
+  color: var(--ink-2);
+}
+
+.cm-btn.ghost:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--ink);
+  border-color: var(--ink-3);
+}
+
+.cm-btn.primary {
+  background: var(--inv-bg);
+  color: var(--inv-ink);
+  border-color: var(--inv-bg);
+}
+
+.cm-btn.primary:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.cm-btn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.cm-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.cm-msg {
+  font-size: 10px;
+  color: var(--seal);
+  margin-right: auto;
+}
+
+.model-probe {
+  margin: 6px 0 0 0;
+  font-size: 11px;
+  color: var(--hue-jade);
+}
+
+.model-probe.is-error {
+  color: var(--seal);
+}
+
+@keyframes cm-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes proto-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 设置弹窗变窄时表单改单列，避免两个 170px 输入框挤在一行。 */
+@media (max-width: 720px) {
+  .cm-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .cm-proto-id {
+    width: 100%;
+  }
+}

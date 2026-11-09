@@ -158,6 +158,29 @@ fn partial_config_fills_defaults() {
 }
 
 #[test]
+fn legacy_primary_backup_models_are_migrated() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    fs::write(
+        &path,
+        r#"{"models":{"primary":{"base_url":"https://a.example.com/v1","model":"m1"},"backup":{"base_url":"https://b.example.com/v1","model":"m2"}}}"#,
+    )
+    .unwrap();
+
+    let cfg = AppConfig::load_or_default(&path);
+    assert_eq!(cfg.models.entries.len(), 2);
+    assert_eq!(cfg.models.entries[0].id, "primary");
+    assert_eq!(cfg.models.entries[0].name, "主模型");
+    assert_eq!(cfg.models.entries[0].protocol, "openai");
+    assert_eq!(cfg.models.entries[0].model, "m1");
+    assert_eq!(cfg.models.entries[1].id, "backup");
+    assert_eq!(cfg.models.active_id.as_deref(), Some("primary"));
+    // 迁移只改 models，其它字段仍按默认值补齐
+    assert_eq!(cfg.hotkeys.capture, "Ctrl+Shift+S");
+    assert!(cfg.capture.realtime_fallback);
+}
+
+#[test]
 fn corrupt_config_is_backed_up_and_defaults_returned() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.json");

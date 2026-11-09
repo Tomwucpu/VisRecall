@@ -187,9 +187,7 @@
   background: var(--surface-3);
 }
 
-.explain-warn,
-.model-probe.is-error,
-.model-error {
+.explain-warn {
   color: var(--seal);
 }
 
@@ -246,41 +244,3 @@
   font-size: 10px;
 }
 
-.model-slot {
-  display: block;
-  padding: 10px 0;
-}
-
-.model-key-badge {
-  margin-left: 8px;
-  padding: 1px 6px;
-  border-radius: 3px;
-  background: var(--surface-3);
-  color: var(--ink-2);
-  font-size: 10px;
-}
-
-.model-fields {
-  display: grid;
-  gap: 6px;
-  margin-top: 8px;
-}
-
-.model-field {
-  display: grid;
-  grid-template-columns: 72px 1fr;
-  align-items: center;
-  gap: 8px;
-  color: var(--ink-2);
-  font-size: 11px;
-}
-
-.model-field .field {
-  width: 100%;
-}
-
-.model-probe,
-.model-error {
-  margin: 6px 0 0;
-  font-size: 11px;
-}

@@ -66,7 +66,7 @@ test("shows the capture, storage and model panes", () => {
 
   expect(screen.getByRole("button", { name: "捕获" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "存储" })).toBeInTheDocument();
-  // 阶段 03 新增「模型」pane（主备 VLM 配置）
+  // 阶段 03 新增「模型」pane（自定义模型列表与协议）
   expect(screen.getByRole("button", { name: "模型" })).toBeInTheDocument();
   for (const hidden of ["隐私", "关于"]) {
     expect(screen.queryByRole("button", { name: hidden })).not.toBeInTheDocument();

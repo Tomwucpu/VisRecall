@@ -1,11 +1,15 @@
-//! OpenAI 兼容的云端 Provider（`chat/completions`）与探测（design §6.5、P3-R03/R11）。
+//! 云端 Provider 与探测（design §6.5、P3-R03/R11）。
 //!
-//! 错误分类决定重试与主备切换：
+//! 一个模型可选四种通信协议：`openai` / `ollama` 走 `chat/completions`，
+//! `anthropic` 走 Messages API，`rest` 把「协议标识」作为请求路径、复用
+//! chat/completions 报文。`chat_completions()` 是统一入口，报文在内部转译。
+//!
+//! 错误分类决定重试（同一模型直连，不做主备降级）：
 //! - `401/403` → [`AppError::ProviderConfig`]：**终止重试**，UI 明示「密钥或地址配置错误」；
-//! - 连接失败/超时/5xx/429 → [`AppError::Provider`]：退避重试并切备用；
+//! - 连接失败/超时/5xx/429 → [`AppError::Provider`]：同模型退避重试，全失败即提示用户；
 //! - 返回体不是合法 JSON / 不符合 schema → 修复一次，仍失败 [`AppError::SchemaViolation`]。
 //!
-//! 密钥只在内存里用于 `Authorization` 头，绝不进日志与错误消息。
+//! 密钥只在内存里用于请求头，绝不进日志与错误消息。
 
 pub mod schema;
 
@@ -45,7 +49,28 @@ pub const VISION_PROMPT: &str =
 pub const TEXT_PROMPT: &str = "你是文本摘要助手。只输出一个 JSON 对象，不要 Markdown 代码块。\
 字段与类型：{\"summary\": \"≤120 字中文摘要\", \"tags\": [\"≤8 个中文短标签\"], \"confidence\": 0.0}";
 
-/// OpenAI 兼容 Provider（一个槽位：主或备）。
+/// 通信协议（与 `config.json` 里的字符串、界面下拉选项同源）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Protocol {
+    #[default]
+    OpenAi,
+    Anthropic,
+    Ollama,
+    CustomRest,
+}
+
+impl Protocol {
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "anthropic" => Self::Anthropic,
+            "ollama" => Self::Ollama,
+            "rest" => Self::CustomRest,
+            _ => Self::OpenAi,
+        }
+    }
+}
+
+/// 云端 Provider（绑定到一个具体模型）。
 ///
 /// 手写 `Debug`：`api_key` 绝不能出现在日志或错误链里（P3-R11）。
 #[derive(Clone)]
@@ -54,6 +79,8 @@ pub struct OpenAiCompatible {
     base_url: String,
     model: String,
     api_key: Option<String>,
+    protocol: Protocol,
+    protocol_id: String,
     client: reqwest::Client,
 }
 
@@ -63,6 +90,7 @@ impl std::fmt::Debug for OpenAiCompatible {
             .field("slot", &self.slot)
             .field("base_url", &self.base_url)
             .field("model", &self.model)
+            .field("protocol", &self.protocol)
             .field("api_key", &self.api_key.as_ref().map(|_| "***"))
             .finish()
     }
@@ -85,8 +113,17 @@ impl OpenAiCompatible {
             base_url: base_url.into(),
             model: model.into(),
             api_key,
+            protocol: Protocol::OpenAi,
+            protocol_id: String::new(),
             client,
         }
+    }
+
+    /// 按配置里的协议标识选择报文与端点；未知值回落到 OpenAI 兼容。
+    pub fn with_protocol(mut self, protocol: &str, protocol_id: &str) -> Self {
+        self.protocol = Protocol::parse(protocol);
+        self.protocol_id = protocol_id.trim().trim_matches('/').to_string();
+        self
     }
 
     /// 覆盖请求超时（测试与「探测超时」场景用；生产走 [`REQUEST_TIMEOUT`]）。
@@ -109,16 +146,37 @@ impl OpenAiCompatible {
         &self.base_url
     }
 
+    pub fn protocol(&self) -> Protocol {
+        self.protocol
+    }
+
     pub fn has_api_key(&self) -> bool {
         self.api_key.as_deref().is_some_and(|k| !k.is_empty())
     }
 
     fn endpoint(&self) -> String {
-        format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
+        let base = self.base_url.trim_end_matches('/');
+        match self.protocol {
+            Protocol::Anthropic => format!("{base}/messages"),
+            Protocol::CustomRest => format!("{base}/{}", self.protocol_id),
+            Protocol::OpenAi | Protocol::Ollama => format!("{base}/chat/completions"),
+        }
     }
 
-    /// 单次 `chat/completions` 调用，返回 `choices[0].message.content`。
+    /// 统一调用入口：内部把 OpenAI 风格消息转译到目标协议。
     pub async fn chat_completions(
+        &self,
+        messages: Value,
+        max_tokens: u32,
+    ) -> Result<String, AppError> {
+        match self.protocol {
+            Protocol::Anthropic => self.anthropic_messages(messages, max_tokens).await,
+            _ => self.openai_chat_completions(messages, max_tokens).await,
+        }
+    }
+
+    /// `chat/completions` 报文（openai / ollama / rest 共用）。
+    async fn openai_chat_completions(
         &self,
         messages: Value,
         max_tokens: u32,
@@ -134,27 +192,8 @@ impl OpenAiCompatible {
             request = request.bearer_auth(key);
         }
 
-        let response = request.send().await.map_err(|err| {
-            if err.is_timeout() {
-                AppError::Provider(format!("timeout after {}s", REQUEST_TIMEOUT.as_secs()))
-            } else {
-                AppError::Provider(format!("request failed: {err}"))
-            }
-        })?;
-
-        let status = response.status();
-        if status.as_u16() == 401 || status.as_u16() == 403 {
-            return Err(AppError::ProviderConfig(format!(
-                "HTTP {} (检查 API Key 与 base URL)",
-                status.as_u16()
-            )));
-        }
-        if status.as_u16() == 429 {
-            return Err(AppError::Provider("HTTP 429 rate limited".into()));
-        }
-        if !status.is_success() {
-            return Err(AppError::Provider(format!("HTTP {}", status.as_u16())));
-        }
+        let response = request.send().await.map_err(map_send_error)?;
+        check_status(response.status())?;
 
         let payload: Value = response
             .json()
@@ -165,6 +204,37 @@ impl OpenAiCompatible {
             .ok_or_else(|| {
                 AppError::Provider("response has no choices[0].message.content".into())
             })?;
+        Ok(content.to_string())
+    }
+
+    /// Anthropic Messages API：`system` 独立字段，图片走 base64 source。
+    async fn anthropic_messages(
+        &self,
+        messages: Value,
+        max_tokens: u32,
+    ) -> Result<String, AppError> {
+        let body = anthropic_payload(&messages, &self.model, max_tokens);
+        let mut request = self
+            .client
+            .post(self.endpoint())
+            .header("anthropic-version", "2023-06-01")
+            .json(&body);
+        if let Some(key) = self.api_key.as_deref().filter(|k| !k.is_empty()) {
+            request = request.header("x-api-key", key);
+        }
+
+        let response = request.send().await.map_err(map_send_error)?;
+        check_status(response.status())?;
+
+        let payload: Value = response
+            .json()
+            .await
+            .map_err(|e| AppError::Provider(format!("invalid response body: {e}")))?;
+        let content = payload["content"]
+            .as_array()
+            .and_then(|blocks| blocks.iter().find(|block| block["type"] == "text"))
+            .and_then(|block| block["text"].as_str())
+            .ok_or_else(|| AppError::Provider("response has no content[].text".into()))?;
         Ok(content.to_string())
     }
 
@@ -227,6 +297,86 @@ impl OpenAiCompatible {
     }
 }
 
+fn map_send_error(err: reqwest::Error) -> AppError {
+    if err.is_timeout() {
+        AppError::Provider(format!("timeout after {}s", REQUEST_TIMEOUT.as_secs()))
+    } else {
+        AppError::Provider(format!("request failed: {err}"))
+    }
+}
+
+fn check_status(status: reqwest::StatusCode) -> Result<(), AppError> {
+    let code = status.as_u16();
+    if code == 401 || code == 403 {
+        return Err(AppError::ProviderConfig(format!(
+            "HTTP {code} (检查 API Key 与 base URL)"
+        )));
+    }
+    if code == 429 {
+        return Err(AppError::Provider("HTTP 429 rate limited".into()));
+    }
+    if !status.is_success() {
+        return Err(AppError::Provider(format!("HTTP {code}")));
+    }
+    Ok(())
+}
+
+/// OpenAI 风格 messages → Anthropic `system` + `messages` 内容块。
+fn anthropic_payload(messages: &Value, model: &str, max_tokens: u32) -> Value {
+    let mut system: Vec<Value> = Vec::new();
+    let mut out: Vec<Value> = Vec::new();
+
+    if let Some(items) = messages.as_array() {
+        for item in items {
+            let role = item["role"].as_str().unwrap_or("user");
+            let content = &item["content"];
+            if role == "system" {
+                if let Some(text) = content.as_str() {
+                    system.push(json!({"type": "text", "text": text}));
+                }
+                continue;
+            }
+            let blocks: Vec<Value> = match content {
+                Value::String(text) => vec![json!({"type": "text", "text": text})],
+                Value::Array(parts) => parts
+                    .iter()
+                    .filter_map(|part| match part["type"].as_str() {
+                        Some("text") => part["text"]
+                            .as_str()
+                            .map(|text| json!({"type": "text", "text": text})),
+                        Some("image_url") => {
+                            let url = part["image_url"]["url"].as_str()?;
+                            let (media_type, data) =
+                                url.strip_prefix("data:")?.split_once(";base64,")?;
+                            Some(json!({
+                                "type": "image",
+                                "source": {"type": "base64", "media_type": media_type, "data": data}
+                            }))
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            if !blocks.is_empty() {
+                out.push(json!({"role": role, "content": blocks}));
+            }
+        }
+    }
+
+    let mut body = json!({
+        "model": model,
+        "max_tokens": max_tokens,
+        "temperature": 0,
+        "messages": out,
+    });
+    // 探测 ping 没有系统提示词；空数组会被 Anthropic 判为非法输入，索性不发。
+    if !system.is_empty() {
+        body["system"] = Value::Array(system);
+    }
+    body
+}
+
 #[async_trait]
 impl VisionProvider for OpenAiCompatible {
     fn id(&self) -> &str {
@@ -260,9 +410,21 @@ pub struct ProbeOutcome {
     pub message: Option<String>,
 }
 
-/// 探测：文本 ping + 视觉请求，返回延迟与能力。失败信息**不含密钥**。
+/// 探测（默认 OpenAI 兼容协议）：文本 ping + 视觉请求，返回延迟与能力。
 pub async fn probe(base_url: &str, model: &str, api_key: Option<String>) -> ProbeOutcome {
-    let client = OpenAiCompatible::new("probe", base_url, model, api_key);
+    probe_with(base_url, model, api_key, "openai", "").await
+}
+
+/// 按指定协议探测某个已保存模型；失败信息**不含密钥**。
+pub async fn probe_with(
+    base_url: &str,
+    model: &str,
+    api_key: Option<String>,
+    protocol: &str,
+    protocol_id: &str,
+) -> ProbeOutcome {
+    let client = OpenAiCompatible::new("probe", base_url, model, api_key)
+        .with_protocol(protocol, protocol_id);
     let started = std::time::Instant::now();
 
     let text_messages = json!([
@@ -338,6 +500,51 @@ mod tests {
             provider.endpoint(),
             "https://api.example.com/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn protocol_changes_endpoint() {
+        let base = "https://api.anthropic.com/v1";
+        let anthropic = OpenAiCompatible::new("vlm-primary", base, "m", None)
+            .with_protocol("anthropic", "");
+        assert_eq!(anthropic.endpoint(), format!("{base}/messages"));
+
+        let rest = OpenAiCompatible::new("vlm-primary", base, "m", None)
+            .with_protocol("rest", "/my-proto/v1/");
+        assert_eq!(rest.endpoint(), format!("{base}/my-proto/v1"));
+
+        let ollama = OpenAiCompatible::new("vlm-primary", base, "m", None)
+            .with_protocol("ollama", "");
+        assert_eq!(ollama.protocol(), Protocol::Ollama);
+        assert_eq!(ollama.endpoint(), format!("{base}/chat/completions"));
+    }
+
+    #[test]
+    fn anthropic_payload_splits_system_and_translates_images() {
+        let messages = json!([
+            {"role": "system", "content": "只输出 JSON"},
+            {"role": "user", "content": [
+                {"type": "text", "text": "描述这张图"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+            ]}
+        ]);
+        let body = anthropic_payload(&messages, "claude-3", 16);
+        assert_eq!(body["model"], "claude-3");
+        assert_eq!(body["system"][0]["text"], "只输出 JSON");
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["messages"][0]["content"][0]["text"], "描述这张图");
+        assert_eq!(
+            body["messages"][0]["content"][1]["source"]["media_type"],
+            "image/png"
+        );
+        assert_eq!(body["messages"][0]["content"][1]["source"]["data"], "AAAA");
+    }
+
+    #[test]
+    fn anthropic_ping_omits_empty_system() {
+        let body = anthropic_payload(&json!([{"role": "user", "content": "ping"}]), "m", 1);
+        assert!(body.get("system").is_none());
+        assert_eq!(body["messages"][0]["content"][0]["text"], "ping");
     }
 
     #[test]

@@ -66,6 +66,18 @@ pub struct SemanticStatusEvent {
     pub ready: bool,
 }
 
+/// `job_failed` 载荷：pipeline 任务终态失败；`code` 与 IPC 错误码一致，
+/// `model` 是当时启用的云端模型 id（仅 vlm 阶段有值）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobFailedEvent {
+    pub item_id: String,
+    pub stage: String,
+    pub code: String,
+    pub message: String,
+    pub model: Option<String>,
+}
+
 /// `storage_migration_progress` 载荷；`phase ∈ { prepare, copy, verify, done }`。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -118,6 +130,8 @@ pub enum AppEvent {
     PipelineStatus(PipelineStatusEvent),
     /// 语义检索通道就绪状态。
     SemanticStatus(SemanticStatusEvent),
+    /// pipeline 任务终态失败（模型调用失败等）；前端弹 toast 明确提示用户。
+    JobFailed(JobFailedEvent),
 }
 
 impl AppEvent {
@@ -141,6 +155,7 @@ impl AppEvent {
             AppEvent::ItemEnriched(_) => "item_enriched",
             AppEvent::PipelineStatus(_) => "pipeline_status",
             AppEvent::SemanticStatus(_) => "semantic_status",
+            AppEvent::JobFailed(_) => "job_failed",
         }
     }
 
@@ -164,6 +179,7 @@ impl AppEvent {
             AppEvent::ItemEnriched(payload) => json(payload),
             AppEvent::PipelineStatus(payload) => json(payload),
             AppEvent::SemanticStatus(payload) => json(payload),
+            AppEvent::JobFailed(payload) => json(payload),
         }
     }
 }
@@ -291,6 +307,32 @@ mod tests {
         let event = AppEvent::SemanticStatus(SemanticStatusEvent { ready: false });
         assert_eq!(event.name(), "semantic_status");
         assert_eq!(event.payload()["ready"], false);
+    }
+
+    #[test]
+    fn job_failed_event_names_and_payloads_are_stable() {
+        let event = AppEvent::JobFailed(JobFailedEvent {
+            item_id: "item-1".into(),
+            stage: "vlm".into(),
+            code: "PROVIDER".into(),
+            message: "timeout after 30s".into(),
+            model: Some("test-model".into()),
+        });
+        assert_eq!(event.name(), "job_failed");
+        assert_eq!(event.payload()["itemId"], "item-1");
+        assert_eq!(event.payload()["stage"], "vlm");
+        assert_eq!(event.payload()["code"], "PROVIDER");
+        assert_eq!(event.payload()["message"], "timeout after 30s");
+        assert_eq!(event.payload()["model"], "test-model");
+
+        let event = AppEvent::JobFailed(JobFailedEvent {
+            item_id: "item-1".into(),
+            stage: "index".into(),
+            code: "MODEL_NOT_READY".into(),
+            message: "bge".into(),
+            model: None,
+        });
+        assert!(event.payload()["model"].is_null());
     }
 
     #[test]

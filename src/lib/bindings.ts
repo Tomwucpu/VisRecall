@@ -23,6 +23,7 @@ export const commands = {
 	/**  复制原始内容：图片 `CF_DIB` + `PNG`，文本/链接 `CF_UNICODETEXT`。 */
 	copyItemOriginal: (itemId: string) => __TAURI_INVOKE<null>("copy_item_original", { itemId }),
 	itemDelete: (id: string) => __TAURI_INVOKE<null>("item_delete", { id }),
+	itemReparse: (id: string) => __TAURI_INVOKE<null>("item_reparse", { id }),
 	libraryPurgePreview: () => __TAURI_INVOKE<PurgePreview>("library_purge_preview"),
 	libraryPurge: (confirm: string) => __TAURI_INVOKE<null>("library_purge", { confirm }),
 	storageUsageGet: () => __TAURI_INVOKE<StorageUsageDto>("storage_usage_get"),
@@ -63,11 +64,11 @@ export const commands = {
 	searchItems: (raw: string, limit: number | null) => __TAURI_INVOKE<SearchResponseDto_Serialize>("search_items", { raw, limit }),
 	/**  「不是这个」反馈；`queryId` 不存在返回 `NOT_FOUND`。 */
 	searchFeedback: (queryId: string, itemId: string, signal: string) => __TAURI_INVOKE<null>("search_feedback", { queryId, itemId, signal }),
-	/**  探测指定槽位（`primary` / `backup`）：连通性 + 视觉能力 + 延迟。 */
-	modelProbe: (slot: string) => __TAURI_INVOKE<ProbeOutcomeDto_Serialize>("model_probe", { slot }),
-	/**  读取模型配置（地址/模型名 + 是否已设置密钥）。 */
+	/**  探测指定模型 id：连通性 + 视觉能力 + 延迟（按该模型已保存的协议）。 */
+	modelProbe: (id: string) => __TAURI_INVOKE<ProbeOutcomeDto_Serialize>("model_probe", { id }),
+	/**  读取模型配置（自定义模型列表 + 是否已设置密钥）。 */
 	getModelConfig: () => __TAURI_INVOKE<ModelConfigDto_Serialize>("get_model_config"),
-	/**  保存模型配置：地址/模型名写 `config.json`，密钥写凭据管理器，保存即热生效。 */
+	/**  保存模型列表：配置写 `config.json`，密钥写凭据管理器，保存即热生效。 */
 	setModelConfig: (patch: ModelConfigPatchDto_Deserialize) => __TAURI_INVOKE<ModelConfigDto_Serialize>("set_model_config", { patch }),
 	/**  触发向量蓝绿重建（当前模型 id/维度；重建期间检索零中断）。 */
 	embeddingRebuild: () => __TAURI_INVOKE<EmbeddingRebuildDto>("embedding_rebuild"),
@@ -192,34 +193,70 @@ export type ItemDto_Serialize = {
 	primaryColor: string | null,
 };
 
-/**  模型配置读取视图。 */
+/**  模型配置读取视图：列表 + 当前启用项。 */
 export type ModelConfigDto = ModelConfigDto_Serialize | ModelConfigDto_Deserialize;
 
-/**  模型配置读取视图。 */
+/**  模型配置读取视图：列表 + 当前启用项。 */
 export type ModelConfigDto_Deserialize = {
-	primary?: ProviderEntryDto | null,
-	backup?: ProviderEntryDto | null,
+	entries: ModelEntryDto[],
+	activeId?: string | null,
 };
 
-/**  模型配置读取视图。 */
+/**  模型配置读取视图：列表 + 当前启用项。 */
 export type ModelConfigDto_Serialize = {
-	primary: ProviderEntryDto | null,
-	backup: ProviderEntryDto | null,
+	entries: ModelEntryDto[],
+	activeId: string | null,
 };
 
-/**  模型配置补丁：`null` = 不动该槽位。 */
+/**  模型配置整表提交：一次写入完整列表与当前启用项。 */
 export type ModelConfigPatchDto = ModelConfigPatchDto_Serialize | ModelConfigPatchDto_Deserialize;
 
-/**  模型配置补丁：`null` = 不动该槽位。 */
+/**  模型配置整表提交：一次写入完整列表与当前启用项。 */
 export type ModelConfigPatchDto_Deserialize = {
-	primary?: ProviderEntryInputDto_Deserialize | null,
-	backup?: ProviderEntryInputDto_Deserialize | null,
+	entries: ModelEntryInputDto_Deserialize[],
+	activeId?: string | null,
 };
 
-/**  模型配置补丁：`null` = 不动该槽位。 */
+/**  模型配置整表提交：一次写入完整列表与当前启用项。 */
 export type ModelConfigPatchDto_Serialize = {
-	primary: ProviderEntryInputDto_Serialize | null,
-	backup: ProviderEntryInputDto_Serialize | null,
+	entries: ModelEntryInputDto_Serialize[],
+	activeId: string | null,
+};
+
+/**  一个自定义模型的读取视图：**永远不含密钥**，只告诉界面「是否已设置」。 */
+export type ModelEntryDto = {
+	id: string,
+	name: string,
+	model: string,
+	baseUrl: string,
+	protocol: string,
+	protocolId: string,
+	hasApiKey: boolean,
+};
+
+/**  模型输入：`api_key` 缺省 = 不改；空串 = 清除；非空 = 覆盖写入凭据管理器。 */
+export type ModelEntryInputDto = ModelEntryInputDto_Serialize | ModelEntryInputDto_Deserialize;
+
+/**  模型输入：`api_key` 缺省 = 不改；空串 = 清除；非空 = 覆盖写入凭据管理器。 */
+export type ModelEntryInputDto_Deserialize = {
+	id: string,
+	name: string,
+	model: string,
+	baseUrl: string,
+	protocol: string,
+	protocolId: string,
+	apiKey?: string | null,
+};
+
+/**  模型输入：`api_key` 缺省 = 不改；空串 = 清除；非空 = 覆盖写入凭据管理器。 */
+export type ModelEntryInputDto_Serialize = {
+	id: string,
+	name: string,
+	model: string,
+	baseUrl: string,
+	protocol: string,
+	protocolId: string,
+	apiKey: string | null,
 };
 
 /**  一个 OCR 包围盒（归一化到 `[0,1]`，前端按百分比定位）。 */
@@ -286,30 +323,6 @@ export type ProbeOutcomeDto_Serialize = {
 	latencyMs: number,
 	vision: boolean,
 	message: string | null,
-};
-
-/**  一个 Provider 槽位的读取视图：**永远不含密钥**，只告诉界面「是否已设置」。 */
-export type ProviderEntryDto = {
-	baseUrl: string,
-	model: string,
-	hasApiKey: boolean,
-};
-
-/**  槽位输入：`api_key` 缺省 = 不改；空串 = 清除；非空 = 覆盖写入凭据管理器。 */
-export type ProviderEntryInputDto = ProviderEntryInputDto_Serialize | ProviderEntryInputDto_Deserialize;
-
-/**  槽位输入：`api_key` 缺省 = 不改；空串 = 清除；非空 = 覆盖写入凭据管理器。 */
-export type ProviderEntryInputDto_Deserialize = {
-	baseUrl: string,
-	model: string,
-	apiKey?: string | null,
-};
-
-/**  槽位输入：`api_key` 缺省 = 不改；空串 = 清除；非空 = 覆盖写入凭据管理器。 */
-export type ProviderEntryInputDto_Serialize = {
-	baseUrl: string,
-	model: string,
-	apiKey: string | null,
 };
 
 /**  清理结果：成功 N / 失败 M。 */

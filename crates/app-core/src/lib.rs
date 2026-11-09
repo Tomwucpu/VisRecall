@@ -14,7 +14,7 @@ pub mod thumbnail;
 
 pub use app::{
     gate_message, gate_rejection, handle_shell_event, AppCore, CaptureGate, ModelConfigPatch,
-    ProviderEntryInput, RelocateResult, SettingsPatchInput,
+    ModelEntryInput, RelocateResult, SettingsPatchInput,
 };
 pub use capture_flow::{
     persist_capture, CaptureCoordinator, NoopWindowVisibility, OverlayPresenter, WindowVisibility,
@@ -34,7 +34,9 @@ pub use storage_flow::{check_quota, prune_expired};
 pub use thumbnail::{generate_thumbnail, load_thumb_bytes};
 pub use visrecall_domain::AppError;
 pub use visrecall_library::paths::AppPaths;
-pub use visrecall_library::{AppConfig, Library, ModelConfig, ProviderEntry};
+pub use visrecall_library::{
+    AppConfig, Library, ModelConfig, ModelEntry, ProviderEntry, MODEL_PROTOCOLS,
+};
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

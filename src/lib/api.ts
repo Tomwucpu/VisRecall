@@ -18,6 +18,8 @@ import {
   type ItemDto,
   type ModelConfigDto,
   type ModelConfigPatchDto,
+  type ModelEntryDto,
+  type ModelEntryInputDto,
   type OrphanStatsDto,
   type ProbeOutcomeDto,
   type PruneReportDto,
@@ -39,6 +41,8 @@ export type {
   ItemDto,
   ModelConfigDto,
   ModelConfigPatchDto,
+  ModelEntryDto,
+  ModelEntryInputDto,
   OrphanStatsDto,
   ProbeOutcomeDto,
   PruneReportDto,
@@ -129,6 +133,11 @@ export const api = {
     await commands.itemDelete(id);
   },
 
+  /** 重新解析：强制重跑该素材的完整解析链（当前选用模型）。 */
+  reparseItem: async (id: string): Promise<void> => {
+    await commands.itemReparse(id);
+  },
+
   /** 用量：已用 / 容量 / 条数。 */
   getStorageUsage: (): Promise<StorageUsage> => commands.storageUsageGet(),
 
@@ -175,14 +184,13 @@ export const api = {
   searchFeedback: (queryId: string, itemId: string, signal: string): Promise<null> =>
     commands.searchFeedback(queryId, itemId, signal),
 
-  /** 模型探测：连通性 + 视觉能力 + 延迟。`slot` 取 `primary` / `backup`。 */
-  probeModel: (slot: "primary" | "backup"): Promise<ProbeOutcomeDto> =>
-    commands.modelProbe(slot),
+  /** 按模型 id 探测：连通性 + 视觉能力 + 延迟（使用已保存配置）。 */
+  probeModel: (id: string): Promise<ProbeOutcomeDto> => commands.modelProbe(id),
 
-  /** 读取模型配置（只回「是否已设置密钥」，永不回传明文）。 */
+  /** 读取模型列表（只回「是否已设置密钥」，永不回传明文）。 */
   getModelConfig: (): Promise<ModelConfigDto> => commands.getModelConfig(),
 
-  /** 保存模型配置：密钥写凭据管理器，保存即热生效。 */
+  /** 整表保存模型列表：密钥写凭据管理器，保存即热生效。 */
   setModelConfig: (patch: ModelConfigPatchDto): Promise<ModelConfigDto> =>
     commands.setModelConfig(patch),
 

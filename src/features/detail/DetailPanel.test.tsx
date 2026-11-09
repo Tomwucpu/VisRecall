@@ -35,6 +35,7 @@ const commands = vi.hoisted(() => {
     noteSet: vi.fn(async () => undefined),
     copyItemOriginal: vi.fn(async () => undefined),
     itemDelete: vi.fn(async () => undefined),
+    itemReparse: vi.fn(async () => undefined),
     tagAdd: vi.fn(async () => ({ id: "t1", name: "work", auto: false, hue: null, itemCount: 1 })),
     tagDetach: vi.fn(async () => undefined),
     tagsList: vi.fn(async () => []),
@@ -122,6 +123,26 @@ test("asks for confirmation before deleting, then closes the panel", async () =>
   await waitFor(() => {
     expect(commands.itemDelete).toHaveBeenCalledWith("abc123");
   });
+  expect(onClose).toHaveBeenCalledTimes(1);
+});
+
+test("reparse triggers the command and reports it with a toast", async () => {
+  renderPanel(<DetailPanel item={item} onClose={() => {}} />);
+
+  fireEvent.click(screen.getByRole("button", { name: "重新解析" }));
+  await waitFor(() => {
+    expect(commands.itemReparse).toHaveBeenCalledWith("abc123");
+  });
+  expect(await screen.findByText("已重新开始解析")).toBeInTheDocument();
+});
+
+test("reparse reports a missing item and closes the panel", async () => {
+  const onClose = vi.fn();
+  commands.itemReparse.mockRejectedValueOnce({ code: "NOT_FOUND", message: "not found" });
+  renderPanel(<DetailPanel item={item} onClose={onClose} />);
+
+  fireEvent.click(screen.getByRole("button", { name: "重新解析" }));
+  expect(await screen.findByText("该素材已不存在")).toBeInTheDocument();
   expect(onClose).toHaveBeenCalledTimes(1);
 });
 

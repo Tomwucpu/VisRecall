@@ -1,4 +1,8 @@
 //! 应用配置（`config.json`）：带默认值的 serde 结构与原子持久化。
+//!
+//! 模型配置是「任意数量的自定义模型 + active 指针」（原型 §模型 pane），
+//! 不含密钥：密钥按模型 id 单独存 Windows 凭据管理器。
+//! 旧版 `primary` / `backup` 双槽位配置由 [`ModelConfig::normalize`] 就地迁移。
 
 use std::collections::HashMap;
 use std::fs;
@@ -14,6 +18,8 @@ use crate::paths;
 pub const DEFAULT_CAPTURE_HOTKEY: &str = "Ctrl+Shift+S";
 /// 悬浮球默认边长（逻辑像素）。
 pub const DEFAULT_BALL_SIZE: u32 = 48;
+/// 支持的通信协议标识（与原型 `PROTOS` 及 `Protocol::parse` 同口径）。
+pub const MODEL_PROTOCOLS: [&str; 4] = ["openai", "anthropic", "ollama", "rest"];
 
 /// 应用配置，字段见 design §10.3；缺失字段一律回落到 [`AppConfig::default`]。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -24,7 +30,7 @@ pub struct AppConfig {
     pub ball: BallConfig,
     pub capture: CaptureConfig,
     pub privacy: PrivacyConfig,
-    /// 阶段 03：云端模型主备配置（**不含密钥**，密钥只在 Windows 凭据管理器）。
+    /// 自定义模型列表与当前启用项（**不含密钥**）。
     pub models: ModelConfig,
 }
 
@@ -32,29 +38,137 @@ pub struct AppConfig {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelConfig {
+    /// 用户定义的模型，顺序即界面列表顺序。
+    pub entries: Vec<ModelEntry>,
+    /// 当前启用的模型 id；`None` = 未配置。
+    pub active_id: Option<String>,
+    /// 旧版主槽位：**只读**，读入后由 `normalize()` 转成 `entries`，写出时忽略。
+    #[serde(skip_serializing)]
     pub primary: Option<ProviderEntry>,
+    /// 旧版备槽位：同上。
+    #[serde(skip_serializing)]
     pub backup: Option<ProviderEntry>,
 }
 
 impl ModelConfig {
-    /// 是否有任何可用槽位（无 Key 时仍会排队等用户配置）。
     pub fn is_empty(&self) -> bool {
-        self.primary.is_none() && self.backup.is_none()
+        self.entries.is_empty() && self.primary.is_none() && self.backup.is_none()
+    }
+
+    /// 旧配置迁移：`primary` / `backup` → id 为 `primary` / `backup` 的两个模型。
+    ///
+    /// 这两个 id 生成的凭据 account 恰好仍是 `vlm-primary` / `vlm-backup`，
+    /// 所以旧密钥无需搬移即可继续使用。
+    pub fn normalize(&mut self) {
+        if self.primary.is_none() && self.backup.is_none() {
+            return;
+        }
+        if self.entries.is_empty() {
+            if let Some(entry) = self.primary.take() {
+                self.entries.push(ModelEntry::from_legacy("primary", "主模型", entry));
+            }
+            if let Some(entry) = self.backup.take() {
+                self.entries
+                    .push(ModelEntry::from_legacy("backup", "备用模型", entry));
+            }
+            if let Some(first) = self.entries.first() {
+                self.active_id = Some(first.id.clone());
+            }
+        } else {
+            self.primary = None;
+            self.backup = None;
+        }
+    }
+
+    /// 当前启用的模型；`active_id` 失效时回落到列表第一项。
+    pub fn active_entry(&self) -> Option<&ModelEntry> {
+        match self.active_id.as_deref() {
+            Some(id) => self
+                .entries
+                .iter()
+                .find(|entry| entry.id == id)
+                .or_else(|| self.entries.first()),
+            None => self.entries.first(),
+        }
+    }
+
+    pub fn find(&self, id: &str) -> Option<&ModelEntry> {
+        self.entries.iter().find(|entry| entry.id == id)
     }
 }
 
-/// 单个 Provider 槽位：**只有地址与模型名**，API Key 存凭据管理器。
+/// 一个自定义模型（显示名称 / 模型 ID / 地址 / 协议；**不含密钥**）。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelEntry {
+    /// 稳定 id，同时决定凭据 account（`vlm-<id>`）。
+    pub id: String,
+    /// 用户给定的显示名称。
+    pub name: String,
+    /// 模型 ID（发给接口的 `model` 字段）。
+    pub model: String,
+    /// 接口基地址。
+    pub base_url: String,
+    /// `MODEL_PROTOCOLS` 之一。
+    pub protocol: String,
+    /// `rest` 协议的请求路径标识；其它协议为空。
+    pub protocol_id: String,
+}
+
+impl ModelEntry {
+    /// 旧版双槽位 → 新列表项；沿用 OpenAI 兼容协议。
+    fn from_legacy(id: &str, name: &str, entry: ProviderEntry) -> Self {
+        Self {
+            id: id.to_string(),
+            name: name.to_string(),
+            model: entry.model,
+            base_url: entry.base_url,
+            protocol: "openai".to_string(),
+            protocol_id: String::new(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), AppError> {
+        if self.id.trim().is_empty() {
+            return Err(AppError::InvalidInput("model id is empty".to_string()));
+        }
+        if self.name.trim().is_empty() {
+            return Err(AppError::InvalidInput("display name is empty".to_string()));
+        }
+        if self.model.trim().is_empty() {
+            return Err(AppError::InvalidInput("model name is empty".to_string()));
+        }
+        let url = self.base_url.trim();
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return Err(AppError::InvalidInput(
+                "base URL must start with http:// or https://".to_string(),
+            ));
+        }
+        if !MODEL_PROTOCOLS.contains(&self.protocol.as_str()) {
+            return Err(AppError::InvalidInput(format!(
+                "unknown protocol: {}",
+                self.protocol
+            )));
+        }
+        if self.protocol == "rest" && self.protocol_id.trim().is_empty() {
+            return Err(AppError::InvalidInput(
+                "custom REST requires a protocol id".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// 旧版槽位结构（只有地址与模型名），仅用于反序列化 `config.json`。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderEntry {
-    /// OpenAI 兼容 base URL（如 `https://api.example.com/v1`）。
     pub base_url: String,
-    /// 模型名（如 `gpt-4o-mini` / `qwen-vl-max`）。
     pub model: String,
 }
 
 impl ProviderEntry {
-    /// 最小可用性校验：地址必须以 `http(s)://` 开头且模型名非空。
+    /// 最小可用性校验（旧版语义，保留给迁移路径使用）。
     pub fn validate(&self) -> Result<(), AppError> {
         let url = self.base_url.trim();
         if !(url.starts_with("http://") || url.starts_with("https://")) {
@@ -161,8 +275,11 @@ impl AppConfig {
             }
         };
 
-        match serde_json::from_str(&text) {
-            Ok(config) => config,
+        match serde_json::from_str::<AppConfig>(&text) {
+            Ok(mut config) => {
+                config.models.normalize();
+                config
+            }
             Err(err) => {
                 tracing::warn!(path = %path.display(), %err, "failed to parse config; using defaults");
                 files::backup_corrupt(path);

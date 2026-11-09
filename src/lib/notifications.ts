@@ -2,7 +2,8 @@
  * 通知类事件 → Toast。
  *
  * 这些事件不改变查询数据（不失效缓存），只负责让「后台发生的事」在界面上可见：
- * 捕获失败、快捷键冲突、崩溃后任务恢复。与 `events.ts` 的查询失效职责分开，
+ * 捕获失败、快捷键冲突、崩溃后任务恢复、pipeline 任务失败（模型选用哪个就用哪个，
+ * 失败必须让用户看见）。与 `events.ts` 的查询失效职责分开，
  * 避免把「刷新数据」和「提示用户」混在一条分支里。
  */
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -47,6 +48,73 @@ export function describeCaptureFailure(payload: unknown): string | null {
     return null;
   }
   return CODE_TEXT[code] ?? `捕获失败（${code}）`;
+}
+
+/** pipeline 阶段 → 中文短语（`job_failed` 提示用）。 */
+const STAGE_TEXT: Record<string, string> = {
+  vlm: "摘要与描述生成",
+  index: "向量索引",
+  ocr: "OCR 解析",
+};
+
+/**
+ * 把 `job_failed` 载荷翻成一句提示：模型选用哪个就用哪个，失败必须让用户看见。
+ * `message` 是内部英文细节，只对 `PROVIDER`（超时/HTTP 码等）直接可见。
+ */
+export function describeJobFailure(payload: unknown): string {
+  if (typeof payload !== "object" || payload === null) {
+    return "后台任务失败";
+  }
+  const { stage, code, message, model } = payload as {
+    stage?: unknown;
+    code?: unknown;
+    message?: unknown;
+    model?: unknown;
+  };
+  const stageText =
+    typeof stage === "string" ? (STAGE_TEXT[stage] ?? stage) : "后台任务";
+  const modelText =
+    typeof model === "string" && model !== "" ? `「${model}」` : "";
+  const detail = (() => {
+    switch (code) {
+      case "PROVIDER_CONFIG":
+        return "密钥或地址配置错误，请在 设置 → 模型 中检查";
+      case "SCHEMA_VIOLATION":
+        return "模型返回格式异常";
+      case "MODEL_NOT_READY":
+        return "本地模型未就绪";
+      case "PROVIDER":
+        return typeof message === "string" && message !== ""
+          ? message
+          : "服务暂不可用";
+      default:
+        return typeof code === "string" && code !== ""
+          ? `失败（${code}）`
+          : "失败";
+    }
+  })();
+  return `${modelText}${stageText}失败：${detail}`;
+}
+
+/** 10 秒内相同文案只弹一次：批量素材一起失败时不刷屏。 */
+const DEDUPE_WINDOW_MS = 10_000;
+let lastJobFailure: { text: string; at: number } | null = null;
+
+/** 供测试重置去重状态。 */
+export function resetJobFailureDedupe(): void {
+  lastJobFailure = null;
+}
+
+function shouldShowJobFailure(text: string, now: number): boolean {
+  if (
+    lastJobFailure !== null &&
+    lastJobFailure.text === text &&
+    now - lastJobFailure.at < DEDUPE_WINDOW_MS
+  ) {
+    return false;
+  }
+  lastJobFailure = { text, at: now };
+  return true;
 }
 
 /**
@@ -96,6 +164,13 @@ export function subscribeNotifications(): () => void {
         : null;
     if (typeof count === "number" && count > 0) {
       pushToast(`已恢复 ${count} 个未完成任务`, "info");
+    }
+  });
+
+  bind("job_failed", (payload) => {
+    const text = describeJobFailure(payload);
+    if (shouldShowJobFailure(text, Date.now())) {
+      pushToast(text, "error");
     }
   });
 

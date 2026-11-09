@@ -1,4 +1,9 @@
-import { describeCaptureFailure, subscribeNotifications } from "./notifications";
+import {
+  describeCaptureFailure,
+  describeJobFailure,
+  resetJobFailureDedupe,
+  subscribeNotifications,
+} from "./notifications";
 import { getToastsSnapshot, resetToasts } from "./toast";
 
 const mocks = vi.hoisted(() => ({
@@ -20,6 +25,7 @@ beforeEach(() => {
   mocks.handlers.length = 0;
   mocks.listen.mockImplementation(async () => mocks.unlisten);
   resetToasts();
+  resetJobFailureDedupe();
 });
 
 afterEach(() => {
@@ -36,7 +42,7 @@ function emit(name: string, payload: unknown = {}): void {
   }
 }
 
-test("subscribes to the three notification channels", async () => {
+test("subscribes to the four notification channels", async () => {
   const cleanup = subscribeNotifications();
   await flush();
 
@@ -44,10 +50,11 @@ test("subscribes to the three notification channels", async () => {
     "capture_failed",
     "hotkey_conflict",
     "app_recovered",
+    "job_failed",
   ]);
 
   cleanup();
-  expect(mocks.unlisten).toHaveBeenCalledTimes(3);
+  expect(mocks.unlisten).toHaveBeenCalledTimes(4);
 });
 
 test("turns a capture failure code into a readable toast", async () => {
@@ -97,4 +104,76 @@ test("describeCaptureFailure ignores non-object payloads", () => {
   expect(describeCaptureFailure({ code: "STORAGE_FULL" })).toBe(
     "存储已满，请清理或调整容量",
   );
+});
+
+test("describeJobFailure maps stage and code to readable text", () => {
+  expect(
+    describeJobFailure({
+      itemId: "i1",
+      stage: "vlm",
+      code: "PROVIDER_CONFIG",
+      message: "HTTP 401 (检查 API Key 与 base URL)",
+      model: "my-vision-model",
+    }),
+  ).toBe("「my-vision-model」摘要与描述生成失败：密钥或地址配置错误，请在 设置 → 模型 中检查");
+
+  expect(
+    describeJobFailure({
+      itemId: "i1",
+      stage: "vlm",
+      code: "PROVIDER",
+      message: "timeout after 30s",
+      model: "my-vision-model",
+    }),
+  ).toBe("「my-vision-model」摘要与描述生成失败：timeout after 30s");
+
+  expect(
+    describeJobFailure({
+      itemId: "i1",
+      stage: "vlm",
+      code: "SCHEMA_VIOLATION",
+      message: "missing summary",
+      model: "my-vision-model",
+    }),
+  ).toBe("「my-vision-model」摘要与描述生成失败：模型返回格式异常");
+
+  // 非云端阶段没有模型名；未知码兜底
+  expect(
+    describeJobFailure({
+      itemId: "i1",
+      stage: "index",
+      code: "MODEL_NOT_READY",
+      message: "bge",
+      model: null,
+    }),
+  ).toBe("向量索引失败：本地模型未就绪");
+
+  expect(describeJobFailure(null)).toBe("后台任务失败");
+  expect(describeJobFailure({ stage: "vlm", code: "SOMETHING_NEW" })).toBe(
+    "摘要与描述生成失败：失败（SOMETHING_NEW）",
+  );
+});
+
+test("job failures toast once per identical text inside the dedupe window", async () => {
+  const cleanup = subscribeNotifications();
+  await flush();
+
+  const payload = {
+    itemId: "i1",
+    stage: "vlm",
+    code: "PROVIDER",
+    message: "HTTP 502",
+    model: "my-vision-model",
+  };
+  emit("job_failed", payload);
+  emit("job_failed", { ...payload, itemId: "i2" });
+
+  const messages = getToastsSnapshot().map((toast) => toast.message);
+  expect(messages).toEqual(["「my-vision-model」摘要与描述生成失败：HTTP 502"]);
+
+  // 不同文案不被吞掉
+  emit("job_failed", { ...payload, message: "HTTP 503" });
+  expect(getToastsSnapshot()).toHaveLength(2);
+
+  cleanup();
 });

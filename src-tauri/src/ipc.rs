@@ -658,6 +658,15 @@ pub async fn item_delete(app: tauri::AppHandle, id: String) -> Result<(), ApiErr
 
 #[tauri::command]
 #[specta::specta]
+pub async fn item_reparse(app: tauri::AppHandle, id: String) -> Result<(), ApiError> {
+    run_blocking(app, move |core| {
+        core.reparse_item(&id).map_err(|err| ApiError::from(&err))
+    })
+    .await
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn library_purge_preview(app: tauri::AppHandle) -> Result<PurgePreview, ApiError> {
     run_blocking(app, move |core| {
         let item_count = core.purge_preview().map_err(|err| ApiError::from(&err))?;
@@ -884,63 +893,80 @@ pub async fn search_feedback(
     .await
 }
 
-/// 一个 Provider 槽位的读取视图：**永远不含密钥**，只告诉界面「是否已设置」。
+/// 一个自定义模型的读取视图：**永远不含密钥**，只告诉界面「是否已设置」。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
-pub struct ProviderEntryDto {
-    pub base_url: String,
+pub struct ModelEntryDto {
+    pub id: String,
+    pub name: String,
     pub model: String,
+    pub base_url: String,
+    pub protocol: String,
+    pub protocol_id: String,
     pub has_api_key: bool,
 }
 
-/// 模型配置读取视图。
+/// 模型配置读取视图：列表 + 当前启用项。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelConfigDto {
-    pub primary: Option<ProviderEntryDto>,
-    pub backup: Option<ProviderEntryDto>,
+    pub entries: Vec<ModelEntryDto>,
+    pub active_id: Option<String>,
 }
 
-/// 槽位输入：`api_key` 缺省 = 不改；空串 = 清除；非空 = 覆盖写入凭据管理器。
+/// 模型输入：`api_key` 缺省 = 不改；空串 = 清除；非空 = 覆盖写入凭据管理器。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
-pub struct ProviderEntryInputDto {
-    pub base_url: String,
+pub struct ModelEntryInputDto {
+    pub id: String,
+    pub name: String,
     pub model: String,
+    pub base_url: String,
+    pub protocol: String,
+    pub protocol_id: String,
     pub api_key: Option<String>,
 }
 
-/// 模型配置补丁：`null` = 不动该槽位。
+/// 模型配置整表提交：一次写入完整列表与当前启用项。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelConfigPatchDto {
-    pub primary: Option<ProviderEntryInputDto>,
-    pub backup: Option<ProviderEntryInputDto>,
+    pub entries: Vec<ModelEntryInputDto>,
+    pub active_id: Option<String>,
 }
 
 fn model_config_dto(config: &visrecall_app_core::ModelConfig) -> ModelConfigDto {
-    let view = |entry: &Option<visrecall_app_core::ProviderEntry>, slot| {
-        entry.as_ref().map(|entry| ProviderEntryDto {
-            base_url: entry.base_url.clone(),
+    let entries = config
+        .entries
+        .iter()
+        .map(|entry| ModelEntryDto {
+            id: entry.id.clone(),
+            name: entry.name.clone(),
             model: entry.model.clone(),
+            base_url: entry.base_url.clone(),
+            protocol: entry.protocol.clone(),
+            protocol_id: entry.protocol_id.clone(),
             // 只看「有没有」，绝不回传内容
-            has_api_key: visrecall_ai::load_key(slot).ok().flatten().is_some(),
+            has_api_key: visrecall_ai::load_key(&visrecall_ai::KeySlot::for_model(&entry.id))
+                .ok()
+                .flatten()
+                .is_some(),
         })
-    };
+        .collect();
     ModelConfigDto {
-        primary: view(&config.primary, visrecall_ai::KeySlot::Primary),
-        backup: view(&config.backup, visrecall_ai::KeySlot::Backup),
+        entries,
+        active_id: config.active_entry().map(|entry| entry.id.clone()),
     }
 }
 
-/// 读取模型配置（地址/模型名 + 是否已设置密钥）。
+/// 读取模型配置（自定义模型列表 + 是否已设置密钥）。
 #[tauri::command]
 #[specta::specta]
 pub async fn get_model_config(app: tauri::AppHandle) -> Result<ModelConfigDto, ApiError> {
     run_blocking(app, move |core| Ok(model_config_dto(&core.model_config()))).await
 }
 
-/// 保存模型配置：地址/模型名写 `config.json`，密钥写凭据管理器，保存即热生效。
+/// 保存模型列表：配置写 `config.json`，密钥写凭据管理器，保存即热生效。
 #[tauri::command]
 #[specta::specta]
 pub async fn set_model_config(
@@ -949,20 +975,20 @@ pub async fn set_model_config(
 ) -> Result<ModelConfigDto, ApiError> {
     run_blocking(app, move |core| {
         let patch = visrecall_app_core::ModelConfigPatch {
-            primary: patch
-                .primary
-                .map(|entry| visrecall_app_core::ProviderEntryInput {
-                    base_url: entry.base_url,
+            entries: patch
+                .entries
+                .into_iter()
+                .map(|entry| visrecall_app_core::ModelEntryInput {
+                    id: entry.id,
+                    name: entry.name,
                     model: entry.model,
-                    api_key: entry.api_key,
-                }),
-            backup: patch
-                .backup
-                .map(|entry| visrecall_app_core::ProviderEntryInput {
                     base_url: entry.base_url,
-                    model: entry.model,
+                    protocol: entry.protocol,
+                    protocol_id: entry.protocol_id,
                     api_key: entry.api_key,
-                }),
+                })
+                .collect(),
+            active_id: patch.active_id,
         };
         let saved = core
             .set_model_config(patch)
@@ -972,12 +998,12 @@ pub async fn set_model_config(
     .await
 }
 
-/// 探测指定槽位（`primary` / `backup`）：连通性 + 视觉能力 + 延迟。
+/// 探测指定模型 id：连通性 + 视觉能力 + 延迟（按该模型已保存的协议）。
 #[tauri::command]
 #[specta::specta]
-pub async fn model_probe(app: tauri::AppHandle, slot: String) -> Result<ProbeOutcomeDto, ApiError> {
+pub async fn model_probe(app: tauri::AppHandle, id: String) -> Result<ProbeOutcomeDto, ApiError> {
     run_blocking(app, move |core| {
-        core.probe_model(&slot)
+        core.probe_model(&id)
             .map(ProbeOutcomeDto::from)
             .map_err(|err| ApiError::from(&err))
     })
@@ -1031,6 +1057,7 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tag_delete,
             copy_item_original,
             item_delete,
+            item_reparse,
             library_purge_preview,
             library_purge,
             storage_usage_get,
