@@ -20,7 +20,9 @@ pub use capture_flow::{
     persist_capture, CaptureCoordinator, NoopWindowVisibility, OverlayPresenter, WindowVisibility,
     MIN_FREE_BYTES,
 };
-pub use detail::{load_detail, DetailExtras, ItemDetail, BODY_TEXT_LIMIT};
+pub use detail::{
+    load_detail, read_preview, DetailExtras, ItemDetail, BODY_TEXT_LIMIT, PREVIEW_CHARS,
+};
 pub use events::{
     AppEvent, AppRecoveredEvent, CaptureFailedEvent, EventSink, HotkeyConflictEvent, ItemEvent,
     ItemUpdatedEvent, NullEventSink, PipelineStatusEvent, RecordingSink, SemanticStatusEvent,

@@ -29,6 +29,11 @@ export type ItemCardData = {
   hit?: string | null;
   /** 命中词或摘要首行（搜索态显示，列表态为空）。 */
   summary?: string | null;
+  /**
+   * 没有缩略图时的文本预览（文本原文 / 链接 URL 的前 160 字符）。
+   * 由后端列表接口填充；图片素材与读不到原文时为 `null`，回退到类型占位。
+   */
+  preview?: string | null;
 };
 
 type Props = {
@@ -71,6 +76,7 @@ export function ItemCard({ item, onOpen, selected = false }: Props) {
   const [copying, setCopying] = useState(false);
 
   const thumbSrc = item.thumbUrl !== null && !failed ? item.thumbUrl : null;
+  const preview = item.preview ?? "";
   const busy = item.status === "parsing" || item.status === "pending";
   const hueStyle = { "--hue": item.hue ?? "var(--hue-ash)" } as CSSProperties;
   const interactive = onOpen !== undefined;
@@ -131,6 +137,14 @@ export function ItemCard({ item, onOpen, selected = false }: Props) {
             draggable={false}
             onError={() => setFailed(true)}
           />
+        ) : preview.length > 0 ? (
+          <p
+            className={`card-text-preview${item.kind === "link" ? " is-link" : ""}`}
+            title={preview}
+            aria-hidden="true"
+          >
+            {preview}
+          </p>
         ) : (
           <span className="thumb-fallback">{kind}</span>
         )}

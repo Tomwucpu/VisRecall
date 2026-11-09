@@ -20,6 +20,7 @@ export function toItemCardData(dto: ItemDto): ItemCardData {
     thumbUrl: toThumbSrc(dto.thumbUrl ?? null),
     // 阶段 03：主色 → 主题色令牌（未解析为 null，落到中性灰）
     hue: hueForColor(dto.primaryColor ?? null),
+    preview: dto.preview ?? null,
   };
 }
 

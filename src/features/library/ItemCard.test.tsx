@@ -70,6 +70,56 @@ test("shows source metadata and placeholder without thumb", () => {
   expect(screen.queryByRole("img")).not.toBeInTheDocument();
 });
 
+test("renders the text body in the thumb area instead of the type label", () => {
+  const { container } = render(
+    <ItemCard
+      item={{ ...base, kind: "text", status: "ready", preview: "会议纪要：下周一前确认设计稿" }}
+    />,
+  );
+
+  expect(screen.getByText("会议纪要：下周一前确认设计稿")).toBeInTheDocument();
+  // 类型徽标仍在，但缩略区不再退到「文字」占位。
+  expect(container.querySelector(".thumb-fallback")).toBeNull();
+  expect(container.querySelector(".card-text-preview")).not.toHaveClass("is-link");
+});
+
+test("renders the link preview with the url style", () => {
+  const { container } = render(
+    <ItemCard item={{ ...base, kind: "link", status: "ready", preview: "example.com/a/b" }} />,
+  );
+
+  expect(container.querySelector(".card-text-preview")).toHaveClass("is-link");
+});
+
+test("falls back to the type label when a text item has no preview", () => {
+  const { container } = render(
+    <ItemCard item={{ ...base, kind: "text", status: "ready", preview: null }} />,
+  );
+
+  expect(container.querySelector(".thumb-fallback")).toHaveTextContent("文字");
+});
+
+test("keeps the preview from the dto", () => {
+  const dto = {
+    id: "t1",
+    kind: "text",
+    status: "ready",
+    capturedAt: 1_700_000_000_000,
+    sourceApp: null,
+    sourceTitle: null,
+    sourceUrl: null,
+    width: null,
+    height: null,
+    charCount: 12,
+    note: "",
+    thumbUrl: null,
+    preview: "一段原文",
+  };
+
+  expect(toItemCardData(dto).preview).toBe("一段原文");
+  expect(toItemCardData({ ...dto, preview: null }).preview).toBeNull();
+});
+
 test("maps dto thumb url to a custom-protocol address", () => {
   const dto = {
     id: "abc123",

@@ -31,6 +31,7 @@ function toCardData(hit: SearchHit): ItemCardData & { hit: string; summary: stri
     // 检索命中的 item 是原始 ItemDto：和 useItems 一样必须转成可加载的协议地址。
     thumbUrl: toThumbSrc(item.thumbUrl ?? null),
     hue: hueForColor(item.primaryColor),
+    preview: item.preview ?? null,
     hit: hitSourceLabel(hitSource(hit.explanation)),
     // 摘要首行：解释里没有摘要字段，详情面板才展示完整摘要；
     // 列表只显示「命中词」，避免把 200 字摘要塞进卡片。

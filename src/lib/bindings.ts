@@ -173,6 +173,8 @@ export type ItemDto_Deserialize = {
 	thumbUrl?: string | null,
 	/**  主色（`insights.primary_color`；未解析或未给色为 `null`）。P3-R10 的卡片色点用。 */
 	primaryColor?: string | null,
+	/**  卡片缩略区的文本预览（文本原文 / 链接 URL 的前 160 字符）；图片或读不到为 `null`。 */
+	preview?: string | null,
 };
 
 /**  列表/详情共用的素材 DTO；`thumb_url` 只在存在缩略图时由后端拼接。 */
@@ -191,6 +193,8 @@ export type ItemDto_Serialize = {
 	thumbUrl: string | null,
 	/**  主色（`insights.primary_color`；未解析或未给色为 `null`）。P3-R10 的卡片色点用。 */
 	primaryColor: string | null,
+	/**  卡片缩略区的文本预览（文本原文 / 链接 URL 的前 160 字符）；图片或读不到为 `null`。 */
+	preview: string | null,
 };
 
 /**  模型配置读取视图：列表 + 当前启用项。 */

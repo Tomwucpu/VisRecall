@@ -100,6 +100,35 @@
   color: var(--ink-3);
 }
 
+/*
+ * 文本/链接素材没有缩略图：缩略区直接铺原文片段，而不是只写「文字」两个字。
+ * 保留 16:10 的缩略区尺寸与内边距，网格节奏不变；底部用渐隐遮罩暗示还有更多，
+ * 比截断省略号更克制（原文本来就没有「完整」的概念）。
+ */
+.card-text-preview {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: 9px 11px 16px;
+  overflow: hidden;
+  color: var(--ink-2);
+  font-size: 11.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  -webkit-mask-image: linear-gradient(180deg, #000 70%, transparent 100%);
+  mask-image: linear-gradient(180deg, #000 70%, transparent 100%);
+}
+
+/* 链接用等宽字体：URL 与正文一眼可分，且长路径优先在斜杠处断行。 */
+.card-text-preview.is-link {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.01em;
+  word-break: break-all;
+  color: var(--ink-3);
+}
+
 .card-body {
   flex: 1;
   padding: 11px 13px 10px;
@@ -186,7 +215,8 @@
 }
 
 .card.is-pending .card-thumb > img,
-.card.is-pending .thumb-fallback {
+.card.is-pending .thumb-fallback,
+.card.is-pending .card-text-preview {
   opacity: 0.4;
 }
 

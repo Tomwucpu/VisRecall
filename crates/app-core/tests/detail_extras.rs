@@ -2,7 +2,9 @@
 
 use std::fs;
 
-use visrecall_app_core::detail::{load_detail, BODY_TEXT_LIMIT, TRUNCATED_MARKER};
+use visrecall_app_core::detail::{
+    load_detail, read_preview, BODY_TEXT_LIMIT, PREVIEW_CHARS, TRUNCATED_MARKER,
+};
 use visrecall_domain::item::{ItemKind, NewItem};
 use visrecall_domain::AppError;
 use visrecall_library::Library;
@@ -170,4 +172,56 @@ fn missing_item_is_not_found() {
         load_detail(&lib, "no-such-item"),
         Err(AppError::NotFound)
     ));
+}
+
+#[test]
+fn text_preview_reads_only_the_head_and_truncates_by_chars() {
+    let (dir, lib) = library();
+    let body = "字".repeat(5_000);
+    let id = insert_text(&lib, dir.path(), &body);
+    let stored = lib.get_item(&id).unwrap().unwrap();
+
+    let preview = read_preview(&lib, &stored).unwrap();
+    assert_eq!(preview.chars().count(), PREVIEW_CHARS);
+    assert!(body.starts_with(&preview), "preview must be a prefix");
+}
+
+#[test]
+fn text_preview_drops_a_duplicated_title_prefix() {
+    let (dir, lib) = library();
+    let body = format!("标题\n{}", "正文".repeat(50));
+    let id = insert_text(&lib, dir.path(), &body);
+    let stored = lib.get_item(&id).unwrap().unwrap();
+
+    let preview = read_preview(&lib, &stored).unwrap();
+    assert!(preview.starts_with("正文"), "{preview}");
+    assert!(!preview.contains("标题"), "{preview}");
+}
+
+#[test]
+fn preview_is_none_for_images_and_unreadable_text() {
+    let (dir, lib) = library();
+    let created = lib
+        .insert_item(item(1, ItemKind::Image, "originals/images/a.png"))
+        .unwrap();
+    assert!(read_preview(&lib, &created).is_none());
+
+    let text_id = insert_text(&lib, dir.path(), "临时内容");
+    fs::remove_file(dir.path().join("texts/a.txt")).unwrap();
+    let stored = lib.get_item(&text_id).unwrap().unwrap();
+    assert!(read_preview(&lib, &stored).is_none());
+}
+
+#[test]
+fn link_preview_uses_the_url_and_skips_links_without_one() {
+    let (_dir, lib) = library();
+    let link = lib
+        .insert_item(item(1, ItemKind::Link, "texts/a.txt"))
+        .unwrap();
+    assert_eq!(read_preview(&lib, &link).as_deref(), Some("example.com/a"));
+
+    let mut bare = item(2, ItemKind::Link, "");
+    bare.source_url = None;
+    let bare = lib.insert_item(bare).unwrap();
+    assert!(read_preview(&lib, &bare).is_none());
 }

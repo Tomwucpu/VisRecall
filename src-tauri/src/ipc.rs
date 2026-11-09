@@ -73,6 +73,8 @@ pub struct ItemDto {
     pub thumb_url: Option<String>,
     /// 主色（`insights.primary_color`；未解析或未给色为 `null`）。P3-R10 的卡片色点用。
     pub primary_color: Option<String>,
+    /// 卡片缩略区的文本预览（文本原文 / 链接 URL 的前 160 字符）；图片或读不到为 `null`。
+    pub preview: Option<String>,
 }
 
 impl From<visrecall_domain::Item> for ItemDto {
@@ -95,8 +97,19 @@ impl From<visrecall_domain::Item> for ItemDto {
             note: item.note,
             thumb_url,
             primary_color: item.primary_color,
+            // 预览要读原文文件，`From<Item>` 拿不到库；由返回卡片的命令用
+            // [`dto_with_preview`] 补填。
+            preview: None,
         }
     }
+}
+
+/// 给列表/检索卡片补上缩略区预览（`read_preview` 需要读 `texts/` 下的原文头部）。
+fn dto_with_preview(library: &Library, item: visrecall_domain::Item) -> ItemDto {
+    let preview = visrecall_app_core::read_preview(library, &item);
+    let mut dto = ItemDto::from(item);
+    dto.preview = preview;
+    dto
 }
 
 // ----- 阶段 03：检索相关 DTO（design §5.2） -----
@@ -841,6 +854,7 @@ pub async fn search_items(
 ) -> Result<SearchResponseDto, ApiError> {
     let limit = limit.unwrap_or(50);
     run_blocking(app, move |core| {
+        let library = core.library().map_err(ApiError::from)?;
         let outcome = core
             .search(&raw, limit)
             .map_err(|err| ApiError::from(&err))?;
@@ -848,7 +862,7 @@ pub async fn search_items(
             .hits
             .into_iter()
             .map(|hit| SearchHitDto {
-                item: ItemDto::from(hit.item),
+                item: dto_with_preview(library, hit.item),
                 score: hit.score,
                 explanation: ExplanationDto {
                     filters: hit.explanation.filters,
@@ -1170,7 +1184,10 @@ pub async fn list_items(
         let items = library
             .list_items(cursor, limit)
             .map_err(|err| ApiError::from(&err))?;
-        Ok(items.into_iter().map(ItemDto::from).collect())
+        Ok(items
+            .into_iter()
+            .map(|item| dto_with_preview(library, item))
+            .collect())
     })
     .await
 }
@@ -1184,7 +1201,7 @@ pub async fn get_item(app: tauri::AppHandle, id: String) -> Result<ItemDto, ApiE
             .get_item(&id)
             .map_err(|err| ApiError::from(&err))?
             .ok_or_else(|| ApiError::new("NOT_FOUND", format!("item {id} not found")))?;
-        Ok(ItemDto::from(item))
+        Ok(dto_with_preview(library, item))
     })
     .await
 }
