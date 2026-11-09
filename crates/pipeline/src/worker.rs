@@ -64,6 +64,8 @@ pub trait PipelineEvents: Send + Sync {
     fn item_enriched(&self, _item_id: &str) {}
     /// 任务进入终态失败（`attempts` 用尽或配置错误）。
     fn job_failed(&self, _job: &Job, _error: &AppError) {}
+    /// 素材进入 `pending`（阶段二终态失败，等待重试轮）：适配成 `item_updated`。
+    fn item_pending(&self, _item_id: &str) {}
 }
 
 /// 丢弃所有事件（测试/一次性场景）。
@@ -78,6 +80,8 @@ pub struct JobCtx<'a> {
     pub deps: &'a PipelineDeps,
     pub events: &'a Arc<dyn PipelineEvents>,
     pub job: &'a Job,
+    /// 单任务尝试上限（handler 据此判断「这次失败后就是终态」）。
+    pub max_attempts: i64,
 }
 
 impl JobCtx<'_> {
@@ -96,6 +100,11 @@ impl JobCtx<'_> {
     /// 本任务已尝试次数（claim 时 +1，第一次执行即为 1）。
     pub fn attempts(&self) -> i64 {
         self.job.attempts
+    }
+
+    /// 本次失败后是否不再重试（`vlm` handler 据此把素材置 `pending`）。
+    pub fn is_final_attempt(&self) -> bool {
+        self.job.attempts >= self.max_attempts
     }
 }
 
@@ -368,6 +377,7 @@ fn run_job(shared: &Arc<Shared>, job: Job) {
         deps: &shared.deps,
         events: &shared.events,
         job: &job,
+        max_attempts: shared.config.max_attempts,
     };
 
     match handler.run(&ctx) {

@@ -9,6 +9,7 @@ pub mod config;
 pub mod db;
 pub mod files;
 pub mod fts;
+pub mod hooks;
 pub mod insights;
 pub mod items;
 pub mod jobs;
@@ -26,18 +27,16 @@ pub mod vectors;
 pub use cleanup::StartupCleanup;
 pub use config::{AppConfig, BallConfig, CaptureConfig, HotkeyConfig, PrivacyConfig};
 pub use db::{IndexCounts, Library};
-pub use fts::{FtsColumns, FtsHit};
+pub use fts::{fts_delete_tx, fts_upsert_tx, FtsColumns, FtsHit};
+pub use hooks::MetadataHook;
+pub use insights::insight_upsert_tx;
 pub use jobs::{Job, JobState};
 pub use paths::{ensure_library_root, AppPaths, LibraryMeta};
 pub use purge::{DeletedItem, PurgeReport};
 pub use queries_log::QueryLog;
 pub use vector_index::BruteForceInt8;
-pub use vectors::{VectorRow, DEFAULT_VECTOR_TABLE};
-
-// 同事务写入原语（`write_index_tx` 的闭包内使用；pipeline 的 handlers 直接引用这些函数）。
-pub use fts::{fts_delete_tx, fts_upsert_tx};
-pub use insights::insight_upsert_tx;
 pub use vectors::{vector_delete_tx, vector_upsert_tx};
+pub use vectors::{VectorRow, DEFAULT_VECTOR_TABLE};
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

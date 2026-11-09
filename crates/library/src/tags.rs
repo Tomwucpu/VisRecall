@@ -138,6 +138,9 @@ impl Library {
             )
             .map_err(db_error)?;
         tx.commit().map_err(db_error)?;
+        drop(conn);
+        // 标签进 FTS：提交后通知上层重算索引（钩子内部可以安全读库）。
+        self.notify_metadata_changed(&[item_id.to_string()]);
 
         let origin_source = TagSource::parse(&origin)?;
         Ok(ItemTag::new(
@@ -199,45 +202,149 @@ impl Library {
         )
         .map_err(db_error)?;
         tx.commit().map_err(db_error)?;
+        drop(conn);
+        self.notify_metadata_changed(&[item_id.to_string()]);
         Ok(())
     }
 
-    /// 重命名标签；撞名（大小写不敏感）返回 `INVALID_INPUT`。
-    pub fn tag_rename(&self, tag_id: &str, raw_name: &str) -> Result<(), AppError> {
-        let name = normalize_tag_name(raw_name)?;
-        let conn = self.conn()?;
-        let updated = conn
-            .execute(
-                "UPDATE tags SET name = ?2 WHERE id = ?1",
-                params![tag_id, &name],
-            )
-            .map_err(rename_error)?;
-        if updated == 0 {
+    /// 自动贴标签（VLM 结果用）：`origin='auto'`，**过滤 `tag_suppressions`**（用户删过的
+    /// 自动标签不得回贴），同名标签复用既有行。
+    ///
+    /// 与 [`Library::tag_add`] 的区别：不解抑制（自动路径没有「用户明确要它」的语义）、
+    /// 关联来源为 `auto`。返回实际贴上的标签名（被抑制/非法的跳过）。
+    pub fn tag_add_auto(&self, item_id: &str, raw_name: &str) -> Result<Option<String>, AppError> {
+        let Ok(name) = normalize_tag_name(raw_name) else {
+            return Ok(None);
+        };
+        if self.get_item(item_id)?.is_none() {
             return Err(AppError::NotFound);
         }
+        if self
+            .tag_suppressions_for(item_id)?
+            .iter()
+            .any(|suppressed| suppressed.eq_ignore_ascii_case(&name))
+        {
+            return Ok(None);
+        }
+
+        let mut conn = self.conn()?;
+        let tx = conn.transaction().map_err(db_error)?;
+        let now = now_millis();
+
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT id FROM tags WHERE name = ?1 COLLATE NOCASE",
+                [&name],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_error)?;
+
+        let tag_id = match existing {
+            Some(id) => id,
+            None => {
+                let id = uuid::Uuid::new_v4().to_string();
+                tx.execute(
+                    "INSERT INTO tags (id, name, source, created_at) VALUES (?1, ?2, 'auto', ?3)",
+                    params![&id, &name, now],
+                )
+                .map_err(db_error)?;
+                id
+            }
+        };
+
+        // 已有关联（可能是用户手动贴的）保持原样：不降级成 auto。
+        tx.execute(
+            "INSERT OR IGNORE INTO item_tags (item_id, tag_id, origin, created_at)
+             VALUES (?1, ?2, 'auto', ?3)",
+            params![item_id, &tag_id, now],
+        )
+        .map_err(db_error)?;
+        tx.commit().map_err(db_error)?;
+        drop(conn);
+
+        self.notify_metadata_changed(&[item_id.to_string()]);
+        Ok(Some(name))
+    }
+
+    /// 该素材的抑制标签名（`tag_suppressions`），自动标签写入前用它过滤。
+    pub fn tag_suppressions_for(&self, item_id: &str) -> Result<Vec<String>, AppError> {
+        let conn = self.conn()?;
+        let mut stmt = conn
+            .prepare("SELECT tag_name FROM tag_suppressions WHERE item_id = ?1")
+            .map_err(db_error)?;
+        let rows = stmt
+            .query_map([item_id], |row| row.get::<_, String>(0))
+            .map_err(db_error)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(db_error)?);
+        }
+        Ok(out)
+    }
+
+    /// 重命名标签；撞名（大小写不敏感）返回 `INVALID_INPUT`。
+    ///
+    /// 标签名进 FTS，因此受影响素材（关联了该标签的所有素材）都要重算索引。
+    pub fn tag_rename(&self, tag_id: &str, raw_name: &str) -> Result<(), AppError> {
+        let name = normalize_tag_name(raw_name)?;
+        let affected = self.item_ids_for_tag(tag_id)?;
+        {
+            let conn = self.conn()?;
+            let updated = conn
+                .execute(
+                    "UPDATE tags SET name = ?2 WHERE id = ?1",
+                    params![tag_id, &name],
+                )
+                .map_err(rename_error)?;
+            if updated == 0 {
+                return Err(AppError::NotFound);
+            }
+        }
+        self.notify_metadata_changed(&affected);
         Ok(())
     }
 
     /// 删除标签（关联靠外键级联），返回解除的关联条数。
     pub fn tag_delete(&self, tag_id: &str) -> Result<u64, AppError> {
-        let mut conn = self.conn()?;
-        let tx = conn.transaction().map_err(db_error)?;
-
-        let links: i64 = tx
-            .query_row(
-                "SELECT COUNT(*) FROM item_tags WHERE tag_id = ?1",
-                [tag_id],
-                |row| row.get(0),
-            )
-            .map_err(db_error)?;
-        let deleted = tx
-            .execute("DELETE FROM tags WHERE id = ?1", [tag_id])
-            .map_err(db_error)?;
-        if deleted == 0 {
-            return Err(AppError::NotFound);
-        }
-        tx.commit().map_err(db_error)?;
+        let affected = self.item_ids_for_tag(tag_id)?;
+        let links = {
+            let mut conn = self.conn()?;
+            let tx = conn.transaction().map_err(db_error)?;
+            let links: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM item_tags WHERE tag_id = ?1",
+                    [tag_id],
+                    |row| row.get(0),
+                )
+                .map_err(db_error)?;
+            let deleted = tx
+                .execute("DELETE FROM tags WHERE id = ?1", [tag_id])
+                .map_err(db_error)?;
+            if deleted == 0 {
+                return Err(AppError::NotFound);
+            }
+            tx.commit().map_err(db_error)?;
+            links
+        };
+        self.notify_metadata_changed(&affected);
         Ok(links as u64)
+    }
+
+    /// 关联了该标签的素材 id（改名/删除后要重算它们的 FTS）。
+    pub fn item_ids_for_tag(&self, tag_id: &str) -> Result<Vec<String>, AppError> {
+        let conn = self.conn()?;
+        let mut stmt = conn
+            .prepare("SELECT item_id FROM item_tags WHERE tag_id = ?1 ORDER BY item_id")
+            .map_err(db_error)?;
+        let rows = stmt
+            .query_map([tag_id], |row| row.get::<_, String>(0))
+            .map_err(db_error)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(db_error)?);
+        }
+        Ok(out)
     }
 
     /// 测试辅助：把一个 `source='auto'` 的标签贴到素材上（阶段 03 的自动标注会用同一条路径）。

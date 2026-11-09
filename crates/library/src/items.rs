@@ -138,17 +138,22 @@ impl Library {
         Ok(())
     }
     /// 更新备注（混合拖放的图片 + 文字片段，design §9.2）并刷新 `updated_at`。
+    ///
+    /// 备注进 FTS，因此提交后触发元数据钩子（`app-core` 注册的 bump_revision + 入队 index）。
     pub fn set_item_note(&self, id: &str, note: &str) -> Result<(), AppError> {
-        let conn = self.conn()?;
-        let updated = conn
-            .execute(
-                "UPDATE items SET note = ?2, updated_at = ?3 WHERE id = ?1",
-                rusqlite::params![id, note, now_millis()],
-            )
-            .map_err(db_error)?;
-        if updated == 0 {
-            return Err(AppError::NotFound);
+        {
+            let conn = self.conn()?;
+            let updated = conn
+                .execute(
+                    "UPDATE items SET note = ?2, updated_at = ?3 WHERE id = ?1",
+                    rusqlite::params![id, note, now_millis()],
+                )
+                .map_err(db_error)?;
+            if updated == 0 {
+                return Err(AppError::NotFound);
+            }
         }
+        self.notify_metadata_changed(&[id.to_string()]);
         Ok(())
     }
 
@@ -163,6 +168,30 @@ impl Library {
             )));
         }
         self.set_item_note(id, text)
+    }
+
+    /// 按状态取素材（启动的 pending 重试轮用），按 `captured_at ASC, rowid ASC`。
+    pub fn items_with_status(&self, status: ItemStatus, limit: u32) -> Result<Vec<Item>, AppError> {
+        let conn = self.conn()?;
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {COLUMNS} FROM {FROM}
+                 WHERE i.status = ?1
+                 ORDER BY i.captured_at ASC, i.rowid ASC
+                 LIMIT ?2"
+            ))
+            .map_err(db_error)?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![status_str(status), i64::from(limit.clamp(1, 1000))],
+                row_to_item,
+            )
+            .map_err(db_error)?;
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row.map_err(db_error)?);
+        }
+        Ok(items)
     }
 
     /// 素材总数。

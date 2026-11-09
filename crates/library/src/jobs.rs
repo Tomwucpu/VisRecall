@@ -139,32 +139,26 @@ impl Library {
         revision: i64,
         priority: i64,
     ) -> Result<(), AppError> {
-        let now = now_millis();
         let conn = self.conn()?;
-        conn.execute(
-            "INSERT INTO jobs
-               (id, item_id, stage, revision, state, priority, attempts, next_run_at, last_error,
-                created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, 'queued', ?5, 0, NULL, NULL, ?6, ?6)
-             ON CONFLICT(item_id, stage, revision) DO UPDATE SET
-               state = 'queued',
-               priority = excluded.priority,
-               attempts = 0,
-               next_run_at = NULL,
-               last_error = NULL,
-               updated_at = excluded.updated_at
-             WHERE jobs.state IN ('failed', 'cancelled', 'succeeded')",
-            params![
-                uuid::Uuid::new_v4().to_string(),
-                item_id,
-                stage,
-                revision,
-                priority,
-                now
-            ],
-        )
-        .map_err(db_error)?;
-        Ok(())
+        enqueue_tx(&conn, item_id, stage, revision, priority, now_millis())
+    }
+
+    /// `bump_revision` + 入队**同一事务**（design §7.6 的顺序不变量）。
+    ///
+    /// 拆成两次调用的话，进程在中间崩溃会留下「revision 已增但任务没入队」的半状态——
+    /// 新 revision 的索引永远不会被计算，而旧任务又因 revision 不匹配被取消。
+    pub fn bump_revision_and_enqueue(
+        &self,
+        item_id: &str,
+        stage: &str,
+        priority: i64,
+    ) -> Result<i64, AppError> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction().map_err(db_error)?;
+        let revision = Library::bump_revision_tx(&tx, item_id)?;
+        enqueue_tx(&tx, item_id, stage, revision, priority, now_millis())?;
+        tx.commit().map_err(db_error)?;
+        Ok(revision)
     }
 
     /// 素材当前 revision；素材不存在返回 `Ok(None)`。
@@ -264,6 +258,41 @@ impl Library {
         .optional()
         .map_err(db_error)
     }
+}
+
+/// 入队 SQL（`Connection` 与 `Transaction` 都实现 `Deref<Target = Connection>`）。
+fn enqueue_tx(
+    conn: &rusqlite::Connection,
+    item_id: &str,
+    stage: &str,
+    revision: i64,
+    priority: i64,
+    now: i64,
+) -> Result<(), AppError> {
+    conn.execute(
+        "INSERT INTO jobs
+           (id, item_id, stage, revision, state, priority, attempts, next_run_at, last_error,
+            created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, 'queued', ?5, 0, NULL, NULL, ?6, ?6)
+         ON CONFLICT(item_id, stage, revision) DO UPDATE SET
+           state = 'queued',
+           priority = excluded.priority,
+           attempts = 0,
+           next_run_at = NULL,
+           last_error = NULL,
+           updated_at = excluded.updated_at
+         WHERE jobs.state IN ('failed', 'cancelled', 'succeeded')",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            item_id,
+            stage,
+            revision,
+            priority,
+            now
+        ],
+    )
+    .map_err(db_error)?;
+    Ok(())
 }
 
 fn row_to_job(row: &Row<'_>) -> rusqlite::Result<Job> {

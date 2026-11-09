@@ -208,6 +208,15 @@ pnpm build
 | ARM64 | 仅 `cargo check` | 阶段 04 |
 | entities 详情展示 | 参与索引与解释，不展示 | P1 |
 
+### 4.1 实施阶段新增的实现偏差（Task 8/9）
+
+| 项 | design/tasks 原文 | 实际做法 | 原因与影响 |
+|---|---|---|---|
+| `vlm` 入队时机 | Task 10 Step 3「提交成功后图片 `enqueue(ocr)`、文本/链接 `enqueue(index)`；**全部 `enqueue(vlm)`**」 | capture 路径只入队**第一阶段**（图片 `ocr`、文本/链接 `index`）；`vlm` 由 `ocr` handler 在入队 `index` **之后**接力入队 | 若 capture 同时入队 `vlm`，同优先级下 `vlm` 可能先于 `index` 被 claim，导致 `item_enriched` 早于 `item_indexed`，违背 P3-R04「阶段一先完成、立即可检索」与 Task 9 Step 6 的事件顺序断言。同一优先级按 rowid 先进先出，接力入队后顺序天然成立 |
+| 蓝绿重建的驱动方式 | Task 9 Step 4「`start_rebuild` → 入队批量 `rebuild` 任务（每批 100 rowid）→ 全部完成后计数比对 → 切指针」 | `lifecycle::rebuild_embeddings` **同步**完成（每批 100 条，20 条规模一次跑完）；`rebuild` **任务**只用于单条素材的派生数据修复（与 `index` 同一份代码） | `jobs` 表没有 payload 列，「目标表名/新模型 id」只能塞 `settings` 或额外建表；20 条规模下 job 调度是纯开销。验收口径（新建表 → 行数校验 → 原子切指针 → 旧表保留 → 检索零中断）全部满足，见 `lifecycle.rs` 测试 |
+| `fts.tokenizer_version` 记录点 | design §4.2「写入时取当前」 | `Library::open` 的自检里首次写入、之后不一致只 `warn` | 与原意一致，明确记录时机 |
+| 单条 FTS 修复 | 无 | 新增 `lifecycle::rebuild_fts_row`（无 UI 的管理入口） | 排障/评测用，未改变任何需求行为 |
+
 ## 5. 结论
 
 **待执行。** 阶段 03 完成判定见 `requirements.md` §5（评测门禁 Top-3 ≥80% 为硬条件）。

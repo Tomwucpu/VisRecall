@@ -99,16 +99,23 @@ pub struct FakeEmbed {
     pub calls: AtomicUsize,
     ready: AtomicBool,
     dim: usize,
+    id: &'static str,
 }
 
 impl FakeEmbed {
     pub const ID: &'static str = "fake-embed";
 
     pub fn new() -> Self {
+        Self::with_id(Self::ID, 8)
+    }
+
+    /// 指定模型 id 与维度（模拟「换模型 → 蓝绿重建」）。
+    pub fn with_id(id: &'static str, dim: usize) -> Self {
         Self {
             calls: AtomicUsize::new(0),
             ready: AtomicBool::new(true),
-            dim: 8,
+            dim,
+            id,
         }
     }
 
@@ -152,7 +159,7 @@ impl Default for FakeEmbed {
 #[async_trait]
 impl EmbeddingProvider for FakeEmbed {
     fn id(&self) -> &str {
-        Self::ID
+        self.id
     }
 
     fn dim(&self) -> usize {

@@ -439,27 +439,27 @@ cargo clippy -p visrecall-pipeline --all-targets -- -D warnings
 - Consumes: Task 3 `document.rs`/`tokenizer.rs`、Task 5/6/7 Provider、Task 8 worker、Task 2 `write_index_tx`
 - Produces: `handlers::ocr/index/vlm/rebuild`（注册进 `Pipeline::spawn`）；`lifecycle::{run_startup_checks, retry_pending, start_rebuild}`；`Library` 的 `set_note`/`tag_add`/`tag_detach`/`tag_rename` 完成后通过注入的 `MetadataHook` 触发 `bump_revision + enqueue(index)`
 
-- [ ] **Step 1: handlers::ocr**
+- [x] **Step 1: handlers::ocr**
 
 读 `items.original_path`（图片）→ `OcrChain.recognize` → `write_index_tx` 内 `insight_upsert`（只动 ocr_* 字段，UPSERT 保序合并：读旧值-合并-写回）→ `enqueue(index)`。OCR `Err`（两级都失败）→ insights 建行（无 ocr 字段）→ 照常 `enqueue(index)`（素材仍可被元数据搜到）。
 
-- [ ] **Step 2: handlers::index**
+- [x] **Step 2: handlers::index**
 
 `build_search_document`（字段来自 items + insights + tags + entities）→ `embed` → `write_index_tx { insight_upsert(摘要占位合并), fts_upsert(tokenize_for_fts(...)), vector_upsert(quantize_i8(vec), 512, model_id) }` → `emit item_indexed`。占位摘要规则：阶段一 `summary_source` 现值为 `none` 时写 OCR/原文摘录前 280 字符（图片 `ocr`、文本 `extractive`）；已是 `vlm`/`user` 不覆盖（`summary_user_edited` 恒不覆盖）；**OCR 文本为空/缺失时不写占位**——summary 保持 NULL、source 保持 `none`（空串占位会让「无摘要」与「OCR 摘录为空」不可区分，详见 design §6.1 空文本分支）。
 
-- [ ] **Step 3: handlers::vlm**
+- [x] **Step 3: handlers::vlm**
 
 `VisionProvider.analyze` / `TextProvider.summarize` → `validate`（修复一次在 Provider 内）→ `write_index_tx { insight_upsert 全字段 }` → 自动标签：`tag_add` 内部路径（`origin='auto'`、过滤 `tag_suppressions`、复用同名）→ `bump_revision` → `enqueue(index)` → `UPDATE items SET status='ready'` → `emit item_enriched` + `item_updated`。失败 3 次 → `status='pending'` + `emit item_updated`；`ProviderConfig` → 同上但 `last_error` 标注。
 
-- [ ] **Step 4: handlers::rebuild 与 lifecycle**
+- [x] **Step 4: handlers::rebuild 与 lifecycle**
 
 `start_rebuild(new_model_id)`：`create_vector_table("_v2")` → 入队批量 `rebuild` 任务（每批 100 rowid，priority 2）→ 每批写 v2 → 全部完成后 COUNT 比对 → `vector_switch_active` + `settings` 的 `embedding.model_id/dim` 更新（同一事务）。`run_startup_checks`：Task 2 的计数差异 → 缺 FTS/向量的素材入队 `index`。`retry_pending`：启动时 `status='pending'` 素材重入队 `vlm`（attempts 归零）。
 
-- [ ] **Step 5: MetadataHook 接线**
+- [x] **Step 5: MetadataHook 接线**
 
 `app-core` 构造 `Library` 时注册 hook（`Arc<dyn Fn(item_ids)>`）：`set_note`、`tag_add/detach`（单素材）、`tag_rename/delete`（受影响素材集合）在写事务提交后调用 → hook 里 `bump_revision + enqueue(index)`。**hook 在事务外调用**（避免库层反向依赖 pipeline，也避免长事务）。
 
-- [ ] **Step 6: 测试（全部用假 Provider）**
+- [x] **Step 6: 测试（全部用假 Provider）**
 
 - 两阶段时序：ocr → index → item_indexed → vlm → index → item_enriched；事件顺序断言。
 - 新鲜度：假 Provider 零延迟下，提交到 `item_indexed` 的事务路径完整（真实延迟在验收实测）。

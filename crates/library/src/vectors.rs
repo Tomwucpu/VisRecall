@@ -272,6 +272,48 @@ impl Library {
         Ok(())
     }
 
+    /// **原子**切换活跃向量表 + 嵌入空间（蓝绿重建收口，design §6.4）。
+    ///
+    /// 三次 `settings` 写在同一个事务里：崩溃不会留下「表切了但模型 id 没切」的半状态。
+    pub fn switch_vector_and_embedding_space(
+        &self,
+        table: &str,
+        model_id: &str,
+        dim: u32,
+    ) -> Result<(), AppError> {
+        if !is_valid_vector_table(table) {
+            return Err(AppError::InvalidInput(format!(
+                "invalid vector table: {table}"
+            )));
+        }
+        self.write_index_tx(|tx| {
+            for (key, json) in [
+                (
+                    ACTIVE_TABLE_KEY,
+                    serde_json::to_string(table)
+                        .map_err(|e| AppError::Internal(format!("serialize table: {e}")))?,
+                ),
+                (
+                    MODEL_ID_KEY,
+                    serde_json::to_string(model_id)
+                        .map_err(|e| AppError::Internal(format!("serialize model: {e}")))?,
+                ),
+                (
+                    DIM_KEY,
+                    serde_json::to_string(&dim)
+                        .map_err(|e| AppError::Internal(format!("serialize dim: {e}")))?,
+                ),
+            ] {
+                tx.execute(
+                    "INSERT OR REPLACE INTO settings (key, value_json) VALUES (?1, ?2)",
+                    params![key, json],
+                )
+                .map_err(db_error)?;
+            }
+            Ok(())
+        })
+    }
+
     /// 该 `content_hash` 是否已有可复用的解析结果（insight 复用，P3-R12）。
     ///
     /// 只复用「非 pending」的结果：断网时生成的 OCR 占位摘要不该被当成完整解析。

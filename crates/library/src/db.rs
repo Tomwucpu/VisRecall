@@ -21,10 +21,12 @@ pub const DB_FILE: &str = "visrecall.db";
 const OPEN_PRAGMAS: &str =
     "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;";
 
-/// 本地库句柄：库根目录 + 写连接。
+/// 本地库句柄：库根目录 + 写连接 + 元数据变更钩子。
 pub struct Library {
     root: PathBuf,
     write: Mutex<Connection>,
+    /// 阶段 03：备注/标签变更后由上层（app-core）注册的「重算索引」回调。
+    pub(crate) metadata_hook: Mutex<Option<crate::hooks::MetadataHook>>,
 }
 
 impl Library {
@@ -43,6 +45,7 @@ impl Library {
         let library = Library {
             root,
             write: Mutex::new(conn),
+            metadata_hook: Mutex::new(None),
         };
 
         library.self_check_index();
@@ -207,6 +210,38 @@ impl Library {
             fts: fts as u64,
             vectors,
         })
+    }
+
+    /// 缺失派生数据的素材 `(rowid, item_id)`：没有 FTS 行、或没有活跃向量行。
+    ///
+    /// 启动自检据此入队修复（P3-R12「缺失派生数据自动入队修复」）。
+    pub fn missing_index_rowids(&self, limit: u32) -> Result<Vec<(i64, String)>, AppError> {
+        let table = self.active_vector_table();
+        if !crate::vectors::is_valid_vector_table(&table) {
+            return Err(AppError::InvalidInput(format!(
+                "invalid vector table: {table}"
+            )));
+        }
+        let conn = self.conn()?;
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT i.rowid, i.id FROM items i
+                 LEFT JOIN items_fts f ON f.rowid = i.rowid
+                 LEFT JOIN {table} v ON v.item_rowid = i.rowid
+                 WHERE f.rowid IS NULL OR v.item_rowid IS NULL
+                 ORDER BY i.rowid ASC LIMIT ?1"
+            ))
+            .map_err(db_error)?;
+        let rows = stmt
+            .query_map([i64::from(limit.clamp(1, 1000))], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .map_err(db_error)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(db_error)?);
+        }
+        Ok(out)
     }
 
     /// 启动自检：派生数据行数不一致时 `warn`（不阻塞开库）。
