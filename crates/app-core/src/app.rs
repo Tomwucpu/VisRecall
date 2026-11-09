@@ -19,7 +19,7 @@ use visrecall_domain::storage::{
 use visrecall_domain::tag::ItemTag;
 use visrecall_domain::{now_millis, AppError, ItemKind};
 use visrecall_library::paths::AppPaths;
-use visrecall_library::{AppConfig, Library};
+use visrecall_library::{AppConfig, Library, ModelConfig};
 use visrecall_shell::ball::{
     spawn_ball_thread, BallConfig, BallHandle, BallSettings, BALL_SIZE_OPTIONS,
 };
@@ -100,6 +100,33 @@ pub struct SettingsPatchInput {
     pub hide_in_fullscreen: Option<bool>,
 }
 
+/// 一个 Provider 槽位的输入（`api_key` 只在内存里出现一次，随后写入凭据管理器）。
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct ProviderEntryInput {
+    pub base_url: String,
+    pub model: String,
+    /// `None` = 不改密钥；`Some("")` = 清除该槽位密钥；`Some(key)` = 覆盖写。
+    pub api_key: Option<String>,
+}
+
+impl std::fmt::Debug for ProviderEntryInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderEntryInput")
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            // 密钥绝不出现在日志/错误链里（P3-R11）
+            .field("api_key", &self.api_key.as_ref().map(|_| "***"))
+            .finish()
+    }
+}
+
+/// 模型配置补丁：`None` = 不动该槽位。
+#[derive(Clone, Debug, Default)]
+pub struct ModelConfigPatch {
+    pub primary: Option<ProviderEntryInput>,
+    pub backup: Option<ProviderEntryInput>,
+}
+
 /// Tauri 托管的应用状态。
 pub struct AppCore {
     paths: AppPaths,
@@ -124,6 +151,14 @@ pub struct AppCore {
     ball_enabled: Arc<AtomicBool>,
     /// 长任务闸门（迁移 / 待重启）；捕获循环与 `preflight` 都读它。
     gate: Arc<AtomicU8>,
+    /// 阶段 03：云端模型主备注册表（热更新）。
+    providers: Arc<crate::pipeline_host::ProviderRegistry>,
+    /// 阶段 03：索引管线 worker（`start_pipeline` 之后才有值）。
+    pipeline: Mutex<Option<visrecall_pipeline::PipelineHandle>>,
+    /// 阶段 03：VLM HTTP 与查询嵌入用的 tokio runtime；与 `pipeline` 同生命周期。
+    pipeline_runtime: Mutex<Option<tokio::runtime::Runtime>>,
+    /// 阶段 03：查询嵌入、语义就绪状态与降级标注。
+    search: Arc<crate::search_flow::SearchFlow>,
 }
 
 /// 捕获运行时的线程句柄与通道。
@@ -186,6 +221,33 @@ impl AppCore {
             }
         };
 
+        // 阶段 03 的运行时：VLM 走 HTTP（async），本地推理在 worker 线程同步跑。
+        let pipeline_runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("visrecall-async")
+            .build()
+            .ok();
+        let providers = crate::pipeline_host::ProviderRegistry::from_config(&config.models);
+        let embed: Arc<dyn visrecall_domain::providers::EmbeddingProvider> =
+            match visrecall_ai::models::resolve_model_dir() {
+                Ok(dir) => Arc::new(visrecall_ai::BgeEmbedder::new(dir)),
+                Err(err) => {
+                    tracing::warn!(%err, "model dir unresolved; embedding disabled until models are present");
+                    Arc::new(visrecall_ai::BgeEmbedder::new("models"))
+                }
+            };
+        if pipeline_runtime.is_none() {
+            tracing::error!("failed to build tokio runtime; semantic search stays degraded");
+        }
+        let search = crate::search_flow::SearchFlow::new(
+            Arc::clone(&embed),
+            pipeline_runtime
+                .as_ref()
+                .map(|runtime| runtime.handle().clone()),
+            sink.clone(),
+        );
+
         AppCore {
             paths,
             library,
@@ -197,6 +259,10 @@ impl AppCore {
             ball: Arc::new(Mutex::new(None)),
             ball_enabled: Arc::new(AtomicBool::new(ball_enabled)),
             gate: Arc::new(AtomicU8::new(CaptureGate::Idle.as_u8())),
+            providers,
+            pipeline: Mutex::new(None),
+            pipeline_runtime: Mutex::new(pipeline_runtime),
+            search,
         }
     }
 
@@ -929,6 +995,163 @@ impl AppCore {
     #[doc(hidden)]
     pub fn ball_present_for_test(&self) -> bool {
         self.lock_ball().is_some()
+    }
+
+    // ----- 阶段 03：索引管线、模型配置、语义就绪 -----
+
+    /// 启动索引管线（幂等）：worker + handlers + 元数据钩子 + 启动自检 + 嵌入预热。
+    ///
+    /// 顺序（design §7.5）：`Library::open`（已发生）→ `Pipeline::spawn`（内部先恢复
+    /// `running→queued`）→ 自检修复入队 → 嵌入预热。检索在预热完成前也可用（降级语义）。
+    pub fn start_pipeline(&self) -> Result<(), AppError> {
+        if self.lock_pipeline().is_some() {
+            tracing::debug!("indexing pipeline already running");
+            return Ok(());
+        }
+        let library = match &self.library {
+            Ok(library) => Arc::clone(library),
+            Err(err) => return Err(AppError::Internal(format!("library unavailable: {err}"))),
+        };
+        let runtime = self
+            .lock_pipeline_runtime()
+            .as_ref()
+            .map(|runtime| runtime.handle().clone())
+            .ok_or_else(|| AppError::Internal("async runtime unavailable".to_string()))?;
+
+        let ocr: Arc<dyn visrecall_domain::providers::OcrProvider> =
+            Arc::new(visrecall_ai::OcrChain::bootstrap());
+        let started = crate::pipeline_host::start_pipeline(
+            library,
+            ocr,
+            self.search.provider(),
+            Arc::clone(&self.providers),
+            self.sink.clone(),
+            runtime,
+            visrecall_pipeline::PipelineConfig::default(),
+        )?;
+        tracing::info!(
+            repaired = started.repaired,
+            pending_retried = started.pending_retried,
+            "indexing pipeline started"
+        );
+        *self.lock_pipeline() = Some(started.handle);
+        self.search.warm_up();
+        Ok(())
+    }
+
+    /// 停止索引管线（迁移闸门/退出用）；未启动时是空操作。
+    pub fn stop_pipeline(&self) {
+        if let Some(handle) = self.lock_pipeline().take() {
+            handle.shutdown();
+        }
+    }
+
+    pub fn pipeline_running(&self) -> bool {
+        self.lock_pipeline().is_some()
+    }
+
+    /// 语义通道是否就绪（`AppStatus.semanticReady`）。
+    pub fn semantic_ready(&self) -> bool {
+        self.search.semantic_ready()
+    }
+
+    /// 查询嵌入；未就绪返回 `None`（检索降级为 FTS + 过滤）。
+    pub fn embed_query(&self, text: &str) -> Option<Vec<f32>> {
+        self.search.embed_query(text)
+    }
+
+    /// 当前模型配置（**不含密钥明文**）。
+    pub fn model_config(&self) -> ModelConfig {
+        self.providers.config()
+    }
+
+    /// 保存模型配置：地址/模型名写 `config.json`，密钥写凭据管理器，保存即热生效。
+    ///
+    /// 请求里 `api_key = Some("")` 表示清除该槽位密钥；`None` 表示保持不变。
+    pub fn set_model_config(&self, patch: ModelConfigPatch) -> Result<ModelConfig, AppError> {
+        let mut next = {
+            let guard = self.lock_config();
+            guard.models.clone()
+        };
+
+        if let Some(input) = &patch.primary {
+            crate::pipeline_host::apply_entry(
+                &mut next.primary,
+                input,
+                visrecall_ai::KeySlot::Primary,
+            )?;
+        }
+        if let Some(input) = &patch.backup {
+            crate::pipeline_host::apply_entry(
+                &mut next.backup,
+                input,
+                visrecall_ai::KeySlot::Backup,
+            )?;
+        }
+
+        {
+            let mut guard = self.lock_config();
+            let mut config = guard.clone();
+            config.models = next.clone();
+            config.save_atomic(&self.paths.config_file)?;
+            *guard = config;
+        }
+
+        // 热生效：注册表重建，下一轮任务立刻用新地址（无需重启）
+        self.providers.reload(&next);
+        tracing::info!("model configuration updated");
+        Ok(next)
+    }
+
+    /// 探测指定槽位（连通性 + 视觉能力 + 延迟）。`slot` 接受 `primary`/`backup`。
+    pub fn probe_model(&self, slot: &str) -> Result<visrecall_ai::ProbeOutcome, AppError> {
+        let key_slot = visrecall_ai::KeySlot::parse(slot)
+            .ok_or_else(|| AppError::InvalidInput(format!("unknown slot: {slot}")))?;
+        let config = self.lock_config().models.clone();
+        let entry = match key_slot {
+            visrecall_ai::KeySlot::Primary => config.primary,
+            visrecall_ai::KeySlot::Backup => config.backup,
+        }
+        .ok_or(AppError::ConfigMissing)?;
+        entry.validate()?;
+        let api_key = visrecall_ai::load_key(key_slot).unwrap_or(None);
+        let runtime = self
+            .lock_pipeline_runtime()
+            .as_ref()
+            .map(|runtime| runtime.handle().clone())
+            .ok_or_else(|| AppError::Internal("async runtime unavailable".to_string()))?;
+        Ok(runtime.block_on(visrecall_ai::probe(&entry.base_url, &entry.model, api_key)))
+    }
+
+    /// 触发向量蓝绿重建（管理/评测用，无 UI）。重建期间检索零中断。
+    pub fn rebuild_embeddings(
+        &self,
+        model_id: &str,
+        dim: u32,
+    ) -> Result<visrecall_pipeline::RebuildReport, AppError> {
+        let library = match &self.library {
+            Ok(library) => Arc::clone(library),
+            Err(err) => return Err(AppError::Internal(format!("library unavailable: {err}"))),
+        };
+        let runtime = self
+            .lock_pipeline_runtime()
+            .as_ref()
+            .map(|runtime| runtime.handle().clone())
+            .ok_or_else(|| AppError::Internal("async runtime unavailable".to_string()))?;
+        let embed = self.search.provider();
+        visrecall_pipeline::rebuild_embeddings(&library, embed.as_ref(), &runtime, model_id, dim)
+    }
+
+    fn lock_pipeline(&self) -> MutexGuard<'_, Option<visrecall_pipeline::PipelineHandle>> {
+        self.pipeline
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    fn lock_pipeline_runtime(&self) -> MutexGuard<'_, Option<tokio::runtime::Runtime>> {
+        self.pipeline_runtime
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
     }
 
     fn lock_config(&self) -> MutexGuard<'_, AppConfig> {

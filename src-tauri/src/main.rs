@@ -73,6 +73,12 @@ fn main() {
                 tracing::warn!(error = %err, "capture hotkey unavailable; tray stays resident");
             }
 
+            // 阶段 03：索引管线（worker + 启动自检修复 + pending 重试轮 + 嵌入预热）。
+            // 失败不阻塞驻留：检索仍可用（语义未就绪时降级为 FTS）。
+            if let Err(err) = app.state::<visrecall_app_core::AppCore>().start_pipeline() {
+                tracing::warn!(error = %err, "indexing pipeline unavailable; search degrades to FTS");
+            }
+
             if let Some(start) = PROCESS_START.get() {
                 // 冷启动耗时口径：进程启动 → 托盘创建完成（主窗口仍未创建）。
                 tracing::info!("cold start to tray: {}ms", start.elapsed().as_millis());

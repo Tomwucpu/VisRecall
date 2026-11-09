@@ -418,6 +418,8 @@ impl CaptureCoordinator {
                         self.sink.emit(AppEvent::ItemCreated(ItemEvent {
                             id: item.id.clone(),
                         }));
+                        // 阶段 03：索引不让捕获主链路让路——入队失败只 warn（自检会补）
+                        crate::pipeline_host::enqueue_initial_indexing(&self.library, &item);
                         // 缩略图交给有界 worker（design §10.2）：捕获循环不等 PNG 解码/缩放。
                         self.spawn_thumbnail(&item);
                         Ok(())

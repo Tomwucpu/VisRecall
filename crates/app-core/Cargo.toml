@@ -8,6 +8,11 @@ visrecall-domain = { path = "../domain" }
 visrecall-library = { path = "../library" }
 visrecall-capture = { path = "../capture" }
 visrecall-shell = { path = "../shell" }
+visrecall-ai = { path = "../ai" }
+visrecall-pipeline = { path = "../pipeline" }
+visrecall-search = { path = "../search" }
+async-trait = { workspace = true }
+tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

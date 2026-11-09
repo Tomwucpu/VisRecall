@@ -25,7 +25,9 @@ pub mod vector_index;
 pub mod vectors;
 
 pub use cleanup::StartupCleanup;
-pub use config::{AppConfig, BallConfig, CaptureConfig, HotkeyConfig, PrivacyConfig};
+pub use config::{
+    AppConfig, BallConfig, CaptureConfig, HotkeyConfig, ModelConfig, PrivacyConfig, ProviderEntry,
+};
 pub use db::{IndexCounts, Library};
 pub use fts::{fts_delete_tx, fts_upsert_tx, FtsColumns, FtsHit};
 pub use hooks::MetadataHook;

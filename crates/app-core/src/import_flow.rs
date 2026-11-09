@@ -116,6 +116,8 @@ impl ImportFlow {
             self.sink.emit(AppEvent::ItemCreated(ItemEvent {
                 id: item.id.clone(),
             }));
+            // 阶段 03：图片入队 ocr、文本/链接入队 index（失败只 warn，自检会补）
+            crate::pipeline_host::enqueue_initial_indexing(&self.library, item);
         }
         for item in items.iter().filter(|item| item.kind == ItemKind::Image) {
             if let Err(err) = thumbnail::spawn_thumbnail(

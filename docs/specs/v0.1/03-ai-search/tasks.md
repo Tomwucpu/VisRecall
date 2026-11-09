@@ -504,23 +504,23 @@ cargo clippy -p visrecall-pipeline --all-targets -- -D warnings
   - 事件 `ItemIndexed` / `ItemEnriched` / `PipelineStatus` / `SemanticStatus`（名字 `item_indexed` / `item_enriched` / `pipeline_status` / `semantic_status`）
   - `AppStatus.semantic_ready`
 
-- [ ] **Step 1: Provider 注册表**
+- [x] **Step 1: Provider 注册表**
 
 `pipeline_host::ProviderRegistry`：主备 `OpenAiCompatible` 构造（config.json + keyring 装配）、健康 `AtomicU8`、`active() -> &dyn VisionProvider`（主健康用主，否则备）；`model_config_set` 后重建注册表（热生效）；`model_probe` 走同一构造路径。
 
-- [ ] **Step 2: 启动顺序（design §7.5）**
+- [x] **Step 2: 启动顺序（design §7.5）**
 
 `Library::open`（自检 warn）→ 迁移 → `Pipeline::spawn`（2 worker + handlers + MetadataHook 注册）→ `retry_pending` + `run_startup_checks` 修复入队 → 嵌入预热（后台线程 load，完成发 `semantic_status { ready }`）。
 
-- [ ] **Step 3: 提交路径入队**
+- [x] **Step 3: 提交路径入队**
 
 `capture_flow` / `import_flow` 提交成功后：图片 `enqueue(ocr, 0)`；文本/链接 `enqueue(index, 0)`；全部 `enqueue(vlm, 0)`。**入队失败只 `warn`**（捕获主链路不为索引让路——素材在，可由自检/重启补索引）。
 
-- [ ] **Step 4: embed_query 与降级**
+- [x] **Step 4: embed_query 与降级**
 
 `embed_query`：`ready()` 为假 → 返回 `None` 并确保 `semantic_status { ready: false }` 已发；真 → LRU 查/算。预热线程完成 → `semantic_status { ready: true }`。
 
-- [ ] **Step 5: 测试**
+- [x] **Step 5: 测试**
 
 - 启动顺序断言（事件序列：semantic_status 在 worker spawn 之后）。
 - 入队失败注入（断开 jobs 表写权限模拟）→ 捕获仍成功、`warn` 有记录。

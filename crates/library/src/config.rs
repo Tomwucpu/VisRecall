@@ -24,6 +24,49 @@ pub struct AppConfig {
     pub ball: BallConfig,
     pub capture: CaptureConfig,
     pub privacy: PrivacyConfig,
+    /// 阶段 03：云端模型主备配置（**不含密钥**，密钥只在 Windows 凭据管理器）。
+    pub models: ModelConfig,
+}
+
+/// 云端模型配置（机器级，跟安装走；design D3-07）。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelConfig {
+    pub primary: Option<ProviderEntry>,
+    pub backup: Option<ProviderEntry>,
+}
+
+impl ModelConfig {
+    /// 是否有任何可用槽位（无 Key 时仍会排队等用户配置）。
+    pub fn is_empty(&self) -> bool {
+        self.primary.is_none() && self.backup.is_none()
+    }
+}
+
+/// 单个 Provider 槽位：**只有地址与模型名**，API Key 存凭据管理器。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProviderEntry {
+    /// OpenAI 兼容 base URL（如 `https://api.example.com/v1`）。
+    pub base_url: String,
+    /// 模型名（如 `gpt-4o-mini` / `qwen-vl-max`）。
+    pub model: String,
+}
+
+impl ProviderEntry {
+    /// 最小可用性校验：地址必须以 `http(s)://` 开头且模型名非空。
+    pub fn validate(&self) -> Result<(), AppError> {
+        let url = self.base_url.trim();
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return Err(AppError::InvalidInput(
+                "base URL must start with http:// or https://".to_string(),
+            ));
+        }
+        if self.model.trim().is_empty() {
+            return Err(AppError::InvalidInput("model name is empty".to_string()));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -69,6 +112,7 @@ impl Default for AppConfig {
             ball: BallConfig::default(),
             capture: CaptureConfig::default(),
             privacy: PrivacyConfig::default(),
+            models: ModelConfig::default(),
         }
     }
 }

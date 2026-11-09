@@ -5749,6 +5749,7 @@ dependencies = [
 name = "visrecall-app-core"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "crossbeam-channel",
  "encoding_rs",
  "image",
@@ -5760,10 +5761,14 @@ dependencies = [
  "sha2",
  "tempfile",
  "time",
+ "tokio",
  "tracing",
+ "visrecall-ai",
  "visrecall-capture",
  "visrecall-domain",
  "visrecall-library",
+ "visrecall-pipeline",
+ "visrecall-search",
  "visrecall-shell",
 ]
 

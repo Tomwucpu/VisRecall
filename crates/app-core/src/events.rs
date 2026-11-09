@@ -51,6 +51,21 @@ pub struct ItemsPrunedEvent {
     pub count: u64,
 }
 
+/// `pipeline_status` 载荷：索引队列水位（0/0 时前端隐藏提示）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineStatusEvent {
+    pub queued: u64,
+    pub running: u64,
+}
+
+/// `semantic_status` 载荷：语义检索通道是否可用（false = 降级为 FTS 模式）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticStatusEvent {
+    pub ready: bool,
+}
+
 /// `storage_migration_progress` 载荷；`phase ∈ { prepare, copy, verify, done }`。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -95,6 +110,14 @@ pub enum AppEvent {
     StorageMigrationProgress(MigrationProgressEvent),
     /// 热键改键成功；`src-tauri` 据此把托盘 tooltip 复原。
     HotkeyRestored,
+    /// 阶段一完成：素材已三路可检索（前端失效列表 + 搜索结果）。
+    ItemIndexed(ItemEvent),
+    /// 阶段二完成：摘要/标签/属性已增强（前端还要失效详情）。
+    ItemEnriched(ItemEvent),
+    /// 索引队列水位。
+    PipelineStatus(PipelineStatusEvent),
+    /// 语义检索通道就绪状态。
+    SemanticStatus(SemanticStatusEvent),
 }
 
 impl AppEvent {
@@ -114,6 +137,10 @@ impl AppEvent {
             AppEvent::ItemsPruned(_) => "items_pruned",
             AppEvent::StorageMigrationProgress(_) => "storage_migration_progress",
             AppEvent::HotkeyRestored => "hotkey_restored",
+            AppEvent::ItemIndexed(_) => "item_indexed",
+            AppEvent::ItemEnriched(_) => "item_enriched",
+            AppEvent::PipelineStatus(_) => "pipeline_status",
+            AppEvent::SemanticStatus(_) => "semantic_status",
         }
     }
 
@@ -133,6 +160,10 @@ impl AppEvent {
             AppEvent::ItemsPruned(payload) => json(payload),
             AppEvent::StorageMigrationProgress(payload) => json(payload),
             AppEvent::HotkeyRestored => json(&serde_json::json!({})),
+            AppEvent::ItemIndexed(payload) => json(payload),
+            AppEvent::ItemEnriched(payload) => json(payload),
+            AppEvent::PipelineStatus(payload) => json(payload),
+            AppEvent::SemanticStatus(payload) => json(payload),
         }
     }
 }
