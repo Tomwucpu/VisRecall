@@ -5,15 +5,16 @@ edition.workspace = true
 
 [dependencies]
 visrecall-domain = { path = "../domain" }
+visrecall-library = { path = "../library" }
+chrono = { workspace = true }
+tokio = { workspace = true }
 jieba-rs = { workspace = true }
 rusqlite = { workspace = true }
-chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
-visrecall-library = { path = "../library" }
 tempfile = "3"
 proptest = { workspace = true }

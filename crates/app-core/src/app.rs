@@ -159,6 +159,8 @@ pub struct AppCore {
     pipeline_runtime: Mutex<Option<tokio::runtime::Runtime>>,
     /// 阶段 03：查询嵌入、语义就绪状态与降级标注。
     search: Arc<crate::search_flow::SearchFlow>,
+    /// 阶段 03：暴力 int8 向量索引（检索时读取活跃向量表）。
+    vectors: Option<Arc<visrecall_library::BruteForceInt8>>,
 }
 
 /// 捕获运行时的线程句柄与通道。
@@ -247,6 +249,10 @@ impl AppCore {
                 .map(|runtime| runtime.handle().clone()),
             sink.clone(),
         );
+        let vectors = library
+            .as_ref()
+            .ok()
+            .map(|library| Arc::new(visrecall_library::BruteForceInt8::new(Arc::clone(library))));
 
         AppCore {
             paths,
@@ -263,6 +269,7 @@ impl AppCore {
             pipeline: Mutex::new(None),
             pipeline_runtime: Mutex::new(pipeline_runtime),
             search,
+            vectors,
         }
     }
 
@@ -1058,6 +1065,39 @@ impl AppCore {
     /// 查询嵌入；未就绪返回 `None`（检索降级为 FTS + 过滤）。
     pub fn embed_query(&self, text: &str) -> Option<Vec<f32>> {
         self.search.embed_query(text)
+    }
+
+    /// 检索用的嵌入 Provider（`embedding_rebuild` 需要它的 id 与维度）。
+    pub fn embedding_provider(&self) -> Arc<dyn visrecall_domain::providers::EmbeddingProvider> {
+        self.search.provider()
+    }
+
+    /// 执行一次检索（`search_items` 的后端实现）。
+    ///
+    /// 嵌入在编排内部完成（未就绪自动降级）；`limit` 由 `execute` clamp 到 1..=200。
+    pub fn search(
+        &self,
+        raw: &str,
+        limit: u32,
+    ) -> Result<visrecall_search::SearchOutcome, AppError> {
+        let library = match &self.library {
+            Ok(library) => library.as_ref(),
+            Err(err) => return Err(AppError::Internal(format!("library unavailable: {err}"))),
+        };
+        let vectors = self
+            .vectors
+            .as_ref()
+            .ok_or_else(|| AppError::Internal("vector index unavailable".to_string()))?;
+        self.search.run(library, vectors.as_ref(), raw, limit)
+    }
+
+    /// 「不是这个」反馈：写入 `queries.feedback`。
+    pub fn search_feedback(&self, query_id: &str, signal: &str) -> Result<(), AppError> {
+        let library = match &self.library {
+            Ok(library) => library.as_ref(),
+            Err(err) => return Err(AppError::Internal(format!("library unavailable: {err}"))),
+        };
+        library.query_log_set_feedback(query_id, signal)
     }
 
     /// 当前模型配置（**不含密钥明文**）。

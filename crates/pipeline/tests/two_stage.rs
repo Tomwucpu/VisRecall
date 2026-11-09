@@ -331,10 +331,14 @@ fn ocr_failure_still_indexes_metadata() {
         .unwrap();
 
     let handle = harness.spawn();
-    assert!(wait_until(
-        || harness.library.insight_get(&item).unwrap().is_some(),
-        Duration::from_secs(5)
-    ));
+    // OCR 失败后仍要跑到 index（接力入队），因此等 FTS 行出现而不是只等 insights 行
+    assert!(
+        wait_until(
+            || harness.library.fts_count().unwrap() == 1,
+            Duration::from_secs(5)
+        ),
+        "OCR 失败也必须完成索引"
+    );
     handle.shutdown();
 
     let insight = harness.library.insight_get(&item).unwrap().unwrap();

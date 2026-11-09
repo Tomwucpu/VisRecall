@@ -71,6 +71,8 @@ pub struct ItemDto {
     pub char_count: Option<u32>,
     pub note: String,
     pub thumb_url: Option<String>,
+    /// 主色（`insights.primary_color`；未解析或未给色为 `null`）。P3-R10 的卡片色点用。
+    pub primary_color: Option<String>,
 }
 
 impl From<visrecall_domain::Item> for ItemDto {
@@ -92,6 +94,129 @@ impl From<visrecall_domain::Item> for ItemDto {
             char_count: item.char_count,
             note: item.note,
             thumb_url,
+            primary_color: item.primary_color,
+        }
+    }
+}
+
+// ----- 阶段 03：检索相关 DTO（design §5.2） -----
+
+/// 一个 OCR 包围盒（归一化到 `[0,1]`，前端按百分比定位）。
+#[derive(Debug, Clone, PartialEq, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct OcrBoxDto {
+    pub text: String,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl From<visrecall_domain::OcrBox> for OcrBoxDto {
+    fn from(obox: visrecall_domain::OcrBox) -> Self {
+        Self {
+            text: obox.text,
+            x: obox.x,
+            y: obox.y,
+            w: obox.w,
+            h: obox.h,
+        }
+    }
+}
+
+/// 时间范围（毫秒，左闭右开）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TimeRangeDto {
+    pub from: i64,
+    pub to: i64,
+}
+
+/// 解析后的查询（前端 chips 与降级标注用）。
+#[derive(Debug, Clone, PartialEq, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ParsedQueryDto {
+    pub time: Option<TimeRangeDto>,
+    pub app: Option<String>,
+    pub color: Vec<String>,
+    pub chart: Option<String>,
+    pub content_kind: Option<String>,
+    pub has_formula: Option<bool>,
+    pub tags: Vec<String>,
+    pub semantic_text: String,
+    /// 人类可读的条件标签（后端 `ParsedQuery::chips`）。
+    pub chips: Vec<String>,
+}
+
+impl From<visrecall_domain::search::ParsedQuery> for ParsedQueryDto {
+    fn from(parsed: visrecall_domain::search::ParsedQuery) -> Self {
+        let chips = parsed.chips();
+        Self {
+            time: parsed.time.map(|time| TimeRangeDto {
+                from: time.from,
+                to: time.to,
+            }),
+            app: parsed.app,
+            color: parsed.color.unwrap_or_default(),
+            chart: parsed.chart,
+            content_kind: parsed.content_kind.map(|kind| kind.as_str().to_string()),
+            has_formula: parsed.has_formula,
+            tags: parsed.tags,
+            semantic_text: parsed.semantic_text,
+            chips,
+        }
+    }
+}
+
+/// 命中解释（ExplainBar 用）。
+#[derive(Debug, Clone, PartialEq, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplanationDto {
+    pub filters: Vec<String>,
+    pub terms: Vec<String>,
+    pub semantic: bool,
+    pub highlight_boxes: Vec<OcrBoxDto>,
+}
+
+/// 一条检索结果。
+#[derive(Debug, Clone, PartialEq, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchHitDto {
+    pub item: ItemDto,
+    pub score: f32,
+    pub explanation: ExplanationDto,
+}
+
+/// `search_items` 的响应。
+#[derive(Debug, Clone, PartialEq, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchResponseDto {
+    pub query_id: String,
+    pub parsed: ParsedQueryDto,
+    pub semantic_used: bool,
+    pub took_ms: u64,
+    /// `limit` 截断前的命中数。
+    pub total: usize,
+    pub hits: Vec<SearchHitDto>,
+}
+
+/// 模型探测结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeOutcomeDto {
+    pub ok: bool,
+    pub latency_ms: u32,
+    pub vision: bool,
+    pub message: Option<String>,
+}
+
+impl From<visrecall_ai::ProbeOutcome> for ProbeOutcomeDto {
+    fn from(outcome: visrecall_ai::ProbeOutcome) -> Self {
+        Self {
+            ok: outcome.ok,
+            latency_ms: outcome.latency_ms,
+            vision: outcome.vision,
+            message: outcome.message,
         }
     }
 }
@@ -686,6 +811,109 @@ pub async fn restart_app(app: tauri::AppHandle) -> Result<(), ApiError> {
 }
 
 /// 所有阶段 01 命令的注册点；命令同时带 `#[tauri::command]` 与 `#[specta::specta]`。
+/// 检索（三路召回 + RRF）；解析是纯规则快路径，不阻塞。
+#[tauri::command]
+#[specta::specta]
+pub async fn search_items(
+    app: tauri::AppHandle,
+    raw: String,
+    limit: Option<u32>,
+) -> Result<SearchResponseDto, ApiError> {
+    let limit = limit.unwrap_or(50);
+    run_blocking(app, move |core| {
+        let outcome = core
+            .search(&raw, limit)
+            .map_err(|err| ApiError::from(&err))?;
+        let hits = outcome
+            .hits
+            .into_iter()
+            .map(|hit| SearchHitDto {
+                item: ItemDto::from(hit.item),
+                score: hit.score,
+                explanation: ExplanationDto {
+                    filters: hit.explanation.filters,
+                    terms: hit.explanation.terms,
+                    semantic: hit.explanation.semantic,
+                    highlight_boxes: hit
+                        .explanation
+                        .highlight_boxes
+                        .into_iter()
+                        .map(OcrBoxDto::from)
+                        .collect(),
+                },
+            })
+            .collect();
+        Ok(SearchResponseDto {
+            query_id: outcome.query_id,
+            parsed: ParsedQueryDto::from(outcome.parsed),
+            semantic_used: outcome.semantic_used,
+            took_ms: outcome.took_ms,
+            total: outcome.total,
+            hits,
+        })
+    })
+    .await
+}
+
+/// 「不是这个」反馈；`queryId` 不存在返回 `NOT_FOUND`。
+#[tauri::command]
+#[specta::specta]
+pub async fn search_feedback(
+    app: tauri::AppHandle,
+    query_id: String,
+    item_id: String,
+    signal: String,
+) -> Result<(), ApiError> {
+    run_blocking(app, move |core| {
+        // `item_id` 目前只记日志：V0.1 的反馈粒度是「整个查询」，字段留给 V0.5 的逐条反馈。
+        tracing::info!(%query_id, %item_id, %signal, "search feedback");
+        core.search_feedback(&query_id, &signal)
+            .map_err(|err| ApiError::from(&err))
+    })
+    .await
+}
+
+/// 探测指定槽位（`primary` / `backup`）：连通性 + 视觉能力 + 延迟。
+#[tauri::command]
+#[specta::specta]
+pub async fn model_probe(app: tauri::AppHandle, slot: String) -> Result<ProbeOutcomeDto, ApiError> {
+    run_blocking(app, move |core| {
+        core.probe_model(&slot)
+            .map(ProbeOutcomeDto::from)
+            .map_err(|err| ApiError::from(&err))
+    })
+    .await
+}
+
+/// 触发向量蓝绿重建（当前模型 id/维度；重建期间检索零中断）。
+#[tauri::command]
+#[specta::specta]
+pub async fn embedding_rebuild(app: tauri::AppHandle) -> Result<EmbeddingRebuildDto, ApiError> {
+    run_blocking(app, move |core| {
+        let provider = core.embedding_provider();
+        let report = core
+            .rebuild_embeddings(provider.id(), provider.dim() as u32)
+            .map_err(|err| ApiError::from(&err))?;
+        Ok(EmbeddingRebuildDto {
+            target_table: report.target_table,
+            items: report.items,
+            verified: report.verified,
+            switched: report.switched,
+        })
+    })
+    .await
+}
+
+/// 蓝绿重建结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingRebuildDto {
+    pub target_table: String,
+    pub items: u64,
+    pub verified: bool,
+    pub switched: bool,
+}
+
 pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
     tauri_specta::Builder::<tauri::Wry>::new()
         .commands(tauri_specta::collect_commands![
@@ -715,7 +943,11 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             storage_orphans_cleanup,
             storage_relocate,
             restart_app,
-            pick_directory
+            pick_directory,
+            search_items,
+            search_feedback,
+            model_probe,
+            embedding_rebuild
         ])
         // 前端用 try/catch 处理 `ApiError`，而不是每处解包 `{ status }`。
         .error_handling(tauri_specta::ErrorHandlingMode::Throw)

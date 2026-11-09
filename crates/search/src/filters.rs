@@ -126,6 +126,118 @@ pub fn to_sql(query: &ParsedQuery) -> Result<SqlFilter, AppError> {
     })
 }
 
+/// 内存侧过滤（SQL 候选集之外的安全网 + 解释装配用）。
+///
+/// SQL 已经把过滤下推了，这里再判一次的理由：候选集可能因为 `CANDIDATE_INLINE_LIMIT`
+/// 或调用方传 `None` 而放宽；宁可在装配阶段丢掉不符的命中，也不要给出「解释里写着橙色、
+/// 实际素材是蓝色」的结果。
+pub fn passes(
+    item: &visrecall_domain::Item,
+    insight: Option<&visrecall_domain::Insight>,
+    query: &ParsedQuery,
+) -> bool {
+    if let Some(time) = &query.time {
+        if !time.contains(item.captured_at) {
+            return false;
+        }
+    }
+    if let Some(app) = &query.app {
+        let matches = item
+            .source_app
+            .as_deref()
+            .map(|value| {
+                value
+                    .to_ascii_lowercase()
+                    .contains(&app.to_ascii_lowercase())
+            })
+            .unwrap_or(false);
+        if !matches {
+            return false;
+        }
+    }
+    if let Some(kind) = query.content_kind {
+        if item.kind != kind {
+            return false;
+        }
+    }
+    if let Some(colors) = query.color.as_ref().filter(|c| !c.is_empty()) {
+        let actual = insight.and_then(|value| value.primary_color.as_deref());
+        match actual {
+            Some(actual) if colors.iter().any(|color| color == actual) => {}
+            _ => return false,
+        }
+    }
+    if let Some(chart) = &query.chart {
+        let actual = insight.and_then(|value| value.chart_type.as_deref());
+        if actual.is_none_or(|value| value != chart) {
+            return false;
+        }
+    }
+    if let Some(has_formula) = query.has_formula {
+        let actual = insight.is_some_and(|value| value.has_formula);
+        if actual != has_formula {
+            return false;
+        }
+    }
+    // 标签在 SQL 里已用 EXISTS 过滤；内存侧不再查库（避免 N+1），交给调用方保证。
+    true
+}
+
+/// 该素材真正命中的过滤条件（中文展示，design §6.3 的 Explanation.filters）。
+pub fn matched_labels(
+    item: &visrecall_domain::Item,
+    insight: Option<&visrecall_domain::Insight>,
+    query: &ParsedQuery,
+) -> Vec<String> {
+    let mut labels = Vec::new();
+    if query.time.is_some() && query.time.is_some_and(|t| t.contains(item.captured_at)) {
+        labels.push("时间".to_string());
+    }
+    if let Some(app) = &query.app {
+        let hit = item.source_app.as_deref().is_some_and(|value| {
+            value
+                .to_ascii_lowercase()
+                .contains(&app.to_ascii_lowercase())
+        });
+        if hit {
+            labels.push(format!("来自 {app}"));
+        }
+    }
+    if let Some(kind) = query.content_kind {
+        if item.kind == kind {
+            labels.push(kind.label_zh().to_string());
+        }
+    }
+    if let Some(colors) = query.color.as_ref().filter(|c| !c.is_empty()) {
+        if let Some(actual) = insight.and_then(|value| value.primary_color.as_deref()) {
+            if colors.iter().any(|color| color == actual) {
+                let label = visrecall_domain::insight::PrimaryColor::parse(actual)
+                    .map(|color| color.label_zh().to_string())
+                    .unwrap_or_else(|| actual.to_string());
+                labels.push(label);
+            }
+        }
+    }
+    if let Some(chart) = &query.chart {
+        if insight
+            .and_then(|value| value.chart_type.as_deref())
+            .is_some_and(|value| value == chart)
+        {
+            let label = visrecall_domain::insight::ChartType::parse(chart)
+                .map(|value| value.label_zh().to_string())
+                .unwrap_or_else(|| chart.clone());
+            labels.push(label);
+        }
+    }
+    if query.has_formula == Some(true) && insight.is_some_and(|value| value.has_formula) {
+        labels.push("公式".to_string());
+    }
+    for tag in &query.tags {
+        labels.push(format!("#{tag}"));
+    }
+    labels
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -594,19 +594,19 @@ cargo clippy -p visrecall-search --all-targets -- -D warnings
   - `execute::search(library, vector_index, embedder, raw, limit) -> Result<SearchOutcome, AppError>`（`SearchOutcome { took_ms, parsed, semantic_used, hits: Vec<ScoredItem>, query_id }`）
   - IPC：`search_items(raw, limit) -> SearchResponseDto`；`search_feedback(query_id, item_id, signal)`；`embedding_rebuild()`
 
-- [ ] **Step 1: rank.rs**
+- [x] **Step 1: rank.rs**
 
 `score = Σ w_ch/(k + rank_ch)`（rank 从 1 起）；稳定排序：score DESC → captured_at DESC → rowid DESC。纯函数单测：两通道交集加权、单通道、权重 0（关通道）、k 边界。
 
-- [ ] **Step 2: execute.rs 编排**
+- [x] **Step 2: execute.rs 编排**
 
 design §6.3 流程：parse → embed（`Option`）→ `filters::to_sql` 候选 → `fts_search`（无词则跳）→ `vector_index.search`（无向量则跳）→ RRF → filters-only 尾部（score 0，排序 captured_at DESC）→ 装配 `Explanation`（filters 按素材实际属性命中过滤；terms = 查询词 ∩ FTS 命中词；`semantic` 仅无字面/过滤命中；`highlight_boxes` = terms 与 `ocr_boxes` 文本包含匹配）→ `query_log_insert` → `took_ms`。`failed` 素材不过滤。limit clamp 1..=200。
 
-- [ ] **Step 3: IPC 与 DTO**
+- [x] **Step 3: IPC 与 DTO**
 
 `search_items`：解析快路径（不阻塞）→ `embed_query` → `run_blocking(execute)`。DTO 见 design §5.2；`ItemDto` 增加 `primaryColor`（Task 2 的 JOIN 落到 DTO）。`search_feedback` 对不存在 queryId → `NOT_FOUND`。`embedding_rebuild` 调 Task 10 的 `rebuild_embeddings`。
 
-- [ ] **Step 4: 测试**
+- [x] **Step 4: 测试**
 
 - 假嵌入（hash→向量）下：纯字面、纯语义、混合、filters-only 四类查询各断言排序与解释。
 - 降级：embedder 未就绪 → `semantic_used=false`，FTS 结果照常。

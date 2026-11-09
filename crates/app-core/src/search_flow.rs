@@ -80,6 +80,26 @@ impl SearchFlow {
         }
     }
 
+    /// 执行一次检索（三路召回 + RRF + 解释；`limit` 已由调用方 clamp）。
+    pub fn run(
+        &self,
+        library: &visrecall_library::Library,
+        vectors: &dyn visrecall_domain::providers::VectorIndex,
+        raw: &str,
+        limit: u32,
+    ) -> Result<visrecall_search::SearchOutcome, visrecall_domain::AppError> {
+        visrecall_search::execute::search(
+            visrecall_search::SearchDeps {
+                library,
+                vectors,
+                embed: Some(self.embed.as_ref()),
+                runtime: self.runtime.as_ref(),
+                rrf: visrecall_search::RrfConfig::from_settings(library),
+            },
+            visrecall_search::SearchRequest::new(raw, limit),
+        )
+    }
+
     /// 查询向量：未就绪返回 `None`（并确保降级事件已发过一次）。
     pub fn embed_query(&self, text: &str) -> Option<Vec<f32>> {
         let trimmed = text.trim();

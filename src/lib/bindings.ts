@@ -56,6 +56,17 @@ export const commands = {
 	 *  的「路径只在 Rust 侧流转」约定一致。用户取消返回 `None`。
 	 */
 	pickDirectory: () => __TAURI_INVOKE<string | null>("pick_directory"),
+	/**
+	 *  所有阶段 01 命令的注册点；命令同时带 `#[tauri::command]` 与 `#[specta::specta]`。
+	 *  检索（三路召回 + RRF）；解析是纯规则快路径，不阻塞。
+	 */
+	searchItems: (raw: string, limit: number | null) => __TAURI_INVOKE<SearchResponseDto_Serialize>("search_items", { raw, limit }),
+	/**  「不是这个」反馈；`queryId` 不存在返回 `NOT_FOUND`。 */
+	searchFeedback: (queryId: string, itemId: string, signal: string) => __TAURI_INVOKE<null>("search_feedback", { queryId, itemId, signal }),
+	/**  探测指定槽位（`primary` / `backup`）：连通性 + 视觉能力 + 延迟。 */
+	modelProbe: (slot: string) => __TAURI_INVOKE<ProbeOutcomeDto_Serialize>("model_probe", { slot }),
+	/**  触发向量蓝绿重建（当前模型 id/维度；重建期间检索零中断）。 */
+	embeddingRebuild: () => __TAURI_INVOKE<EmbeddingRebuildDto>("embedding_rebuild"),
 };
 
 /* Types */
@@ -99,6 +110,22 @@ export type DetailExtrasDto_Serialize = {
 	tags: TagChipDto_Serialize[],
 };
 
+/**  蓝绿重建结果。 */
+export type EmbeddingRebuildDto = {
+	targetTable: string,
+	items: number,
+	verified: boolean,
+	switched: boolean,
+};
+
+/**  命中解释（ExplainBar 用）。 */
+export type ExplanationDto = {
+	filters: string[],
+	terms: string[],
+	semantic: boolean,
+	highlightBoxes: OcrBoxDto[],
+};
+
 /**  详情聚合结果。 */
 export type ItemDetailDto = ItemDetailDto_Serialize | ItemDetailDto_Deserialize;
 
@@ -131,6 +158,8 @@ export type ItemDto_Deserialize = {
 	charCount?: number | null,
 	note: string,
 	thumbUrl?: string | null,
+	/**  主色（`insights.primary_color`；未解析或未给色为 `null`）。P3-R10 的卡片色点用。 */
+	primaryColor?: string | null,
 };
 
 /**  列表/详情共用的素材 DTO；`thumb_url` 只在存在缩略图时由后端拼接。 */
@@ -147,6 +176,17 @@ export type ItemDto_Serialize = {
 	charCount: number | null,
 	note: string,
 	thumbUrl: string | null,
+	/**  主色（`insights.primary_color`；未解析或未给色为 `null`）。P3-R10 的卡片色点用。 */
+	primaryColor: string | null,
+};
+
+/**  一个 OCR 包围盒（归一化到 `[0,1]`，前端按百分比定位）。 */
+export type OcrBoxDto = {
+	text: string,
+	x: number | null,
+	y: number | null,
+	w: number | null,
+	h: number | null,
 };
 
 /**  孤儿文件与缺失缩略图统计。 */
@@ -154,6 +194,56 @@ export type OrphanStatsDto = {
 	files: number,
 	bytes: number,
 	missingThumbs: number,
+};
+
+/**  解析后的查询（前端 chips 与降级标注用）。 */
+export type ParsedQueryDto = ParsedQueryDto_Serialize | ParsedQueryDto_Deserialize;
+
+/**  解析后的查询（前端 chips 与降级标注用）。 */
+export type ParsedQueryDto_Deserialize = {
+	time?: TimeRangeDto | null,
+	app?: string | null,
+	color: string[],
+	chart?: string | null,
+	contentKind?: string | null,
+	hasFormula?: boolean | null,
+	tags: string[],
+	semanticText: string,
+	/**  人类可读的条件标签（后端 `ParsedQuery::chips`）。 */
+	chips: string[],
+};
+
+/**  解析后的查询（前端 chips 与降级标注用）。 */
+export type ParsedQueryDto_Serialize = {
+	time: TimeRangeDto | null,
+	app: string | null,
+	color: string[],
+	chart: string | null,
+	contentKind: string | null,
+	hasFormula: boolean | null,
+	tags: string[],
+	semanticText: string,
+	/**  人类可读的条件标签（后端 `ParsedQuery::chips`）。 */
+	chips: string[],
+};
+
+/**  模型探测结果。 */
+export type ProbeOutcomeDto = ProbeOutcomeDto_Serialize | ProbeOutcomeDto_Deserialize;
+
+/**  模型探测结果。 */
+export type ProbeOutcomeDto_Deserialize = {
+	ok: boolean,
+	latencyMs: number,
+	vision: boolean,
+	message?: string | null,
+};
+
+/**  模型探测结果。 */
+export type ProbeOutcomeDto_Serialize = {
+	ok: boolean,
+	latencyMs: number,
+	vision: boolean,
+	message: string | null,
 };
 
 /**  清理结果：成功 N / 失败 M。 */
@@ -178,6 +268,48 @@ export type RelocateResultDto = {
 export type RetentionPreviewDto = {
 	itemCount: number,
 	bytes: number,
+};
+
+/**  一条检索结果。 */
+export type SearchHitDto = SearchHitDto_Serialize | SearchHitDto_Deserialize;
+
+/**  一条检索结果。 */
+export type SearchHitDto_Deserialize = {
+	item: ItemDto_Deserialize,
+	score: number | null,
+	explanation: ExplanationDto,
+};
+
+/**  一条检索结果。 */
+export type SearchHitDto_Serialize = {
+	item: ItemDto_Serialize,
+	score: number | null,
+	explanation: ExplanationDto,
+};
+
+/**  `search_items` 的响应。 */
+export type SearchResponseDto = SearchResponseDto_Serialize | SearchResponseDto_Deserialize;
+
+/**  `search_items` 的响应。 */
+export type SearchResponseDto_Deserialize = {
+	queryId: string,
+	parsed: ParsedQueryDto_Deserialize,
+	semanticUsed: boolean,
+	tookMs: number,
+	/**  `limit` 截断前的命中数。 */
+	total: number,
+	hits: SearchHitDto_Deserialize[],
+};
+
+/**  `search_items` 的响应。 */
+export type SearchResponseDto_Serialize = {
+	queryId: string,
+	parsed: ParsedQueryDto_Serialize,
+	semanticUsed: boolean,
+	tookMs: number,
+	/**  `limit` 截断前的命中数。 */
+	total: number,
+	hits: SearchHitDto_Serialize[],
 };
 
 export type SettingsDto = SettingsDto_Serialize | SettingsDto_Deserialize;
@@ -266,5 +398,11 @@ export type TagChipDto_Serialize = {
 	hue: string | null,
 	/**  标签云的素材数量；按素材查询时为 0。 */
 	itemCount: number,
+};
+
+/**  时间范围（毫秒，左闭右开）。 */
+export type TimeRangeDto = {
+	from: number,
+	to: number,
 };
 

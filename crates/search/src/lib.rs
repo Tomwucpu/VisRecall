@@ -7,13 +7,17 @@
 //! 保证写入侧与查询侧词形一致。
 
 pub mod document;
+pub mod execute;
 pub mod filters;
 pub mod fts_query;
 pub mod parser;
+pub mod rank;
 pub mod tokenizer;
 
 pub use document::{build_search_document, DocumentFields, DOC_CHAR_BUDGET};
+pub use execute::{search, SearchDeps, SearchOutcome, SearchRequest, CHANNEL_LIMIT, MAX_LIMIT};
 pub use filters::{to_sql, SqlFilter};
 pub use fts_query::{build_match_expr, escape_phrase};
 pub use parser::{parse_query, parse_query_at};
+pub use rank::{rrf, RrfConfig, DEFAULT_RRF_K, DEFAULT_WEIGHTS};
 pub use tokenizer::{terms_for_query, tokenize_for_fts, words, TOKENIZER_VERSION};

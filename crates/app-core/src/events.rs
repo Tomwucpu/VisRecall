@@ -269,6 +269,31 @@ mod tests {
     }
 
     #[test]
+    fn phase_three_event_names_and_payloads_are_stable() {
+        let id_event = ItemEvent { id: "abc".into() };
+
+        let event = AppEvent::ItemIndexed(id_event.clone());
+        assert_eq!(event.name(), "item_indexed");
+        assert_eq!(event.payload()["id"], "abc");
+
+        let event = AppEvent::ItemEnriched(id_event);
+        assert_eq!(event.name(), "item_enriched");
+        assert_eq!(event.payload()["id"], "abc");
+
+        let event = AppEvent::PipelineStatus(PipelineStatusEvent {
+            queued: 3,
+            running: 1,
+        });
+        assert_eq!(event.name(), "pipeline_status");
+        assert_eq!(event.payload()["queued"], 3);
+        assert_eq!(event.payload()["running"], 1);
+
+        let event = AppEvent::SemanticStatus(SemanticStatusEvent { ready: false });
+        assert_eq!(event.name(), "semantic_status");
+        assert_eq!(event.payload()["ready"], false);
+    }
+
+    #[test]
     fn recording_sink_keeps_events() {
         let sink = RecordingSink::default();
         sink.emit(AppEvent::AppRecovered(AppRecoveredEvent { count: 1 }));

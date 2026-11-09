@@ -194,6 +194,31 @@ impl Library {
         Ok(items)
     }
 
+    /// 按 rowid 批量取素材（检索命中水合用）：返回 `(rowid, Item)`。
+    pub fn items_by_rowids(&self, rowids: &[i64]) -> Result<Vec<(i64, Item)>, AppError> {
+        if rowids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn()?;
+        let placeholders = vec!["?"; rowids.len()].join(", ");
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT i.rowid, {COLUMNS} FROM {FROM}
+                 WHERE i.rowid IN ({placeholders})"
+            ))
+            .map_err(db_error)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(rowids.iter().copied()), |row| {
+                Ok((row.get::<_, i64>(0)?, row_to_item_offset(row, 1)?))
+            })
+            .map_err(db_error)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(db_error)?);
+        }
+        Ok(out)
+    }
+
     /// 素材总数。
     pub fn count_items(&self) -> Result<u64, AppError> {
         let conn = self.conn()?;
@@ -331,23 +356,29 @@ impl Library {
 }
 
 fn row_to_item(row: &Row<'_>) -> rusqlite::Result<Item> {
+    row_to_item_offset(row, 0)
+}
+
+/// 按列偏移读 `Item`（前置列另有他用，例如 `SELECT rowid, …`）。
+fn row_to_item_offset(row: &Row<'_>, offset: usize) -> rusqlite::Result<Item> {
+    let at = |n: usize| n + offset;
     Ok(Item {
-        id: row.get(0)?,
-        kind: parse_kind(row.get::<_, String>(1)?, 1)?,
-        status: parse_status(row.get::<_, String>(2)?, 2)?,
-        captured_at: row.get(3)?,
-        source_app: row.get(4)?,
-        source_title: row.get(5)?,
-        source_url: row.get(6)?,
-        width: row.get::<_, Option<i64>>(7)?.map(|value| value as u32),
-        height: row.get::<_, Option<i64>>(8)?.map(|value| value as u32),
-        char_count: row.get::<_, Option<i64>>(9)?.map(|value| value as u32),
-        original_path: row.get(10)?,
-        thumb_path: row.get(11)?,
-        note: row.get(12)?,
-        content_hash: row.get(13)?,
-        revision: row.get(14)?,
-        primary_color: row.get(15)?,
+        id: row.get(at(0))?,
+        kind: parse_kind(row.get::<_, String>(at(1))?, at(1))?,
+        status: parse_status(row.get::<_, String>(at(2))?, at(2))?,
+        captured_at: row.get(at(3))?,
+        source_app: row.get(at(4))?,
+        source_title: row.get(at(5))?,
+        source_url: row.get(at(6))?,
+        width: row.get::<_, Option<i64>>(at(7))?.map(|value| value as u32),
+        height: row.get::<_, Option<i64>>(at(8))?.map(|value| value as u32),
+        char_count: row.get::<_, Option<i64>>(at(9))?.map(|value| value as u32),
+        original_path: row.get(at(10))?,
+        thumb_path: row.get(at(11))?,
+        note: row.get(at(12))?,
+        content_hash: row.get(at(13))?,
+        revision: row.get(at(14))?,
+        primary_color: row.get(at(15))?,
     })
 }
 

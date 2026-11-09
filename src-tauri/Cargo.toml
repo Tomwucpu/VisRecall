@@ -11,6 +11,7 @@ tauri = { version = "2", features = ["tray-icon", "specta"] }
 visrecall-app-core = { path = "../crates/app-core" }
 visrecall-capture = { path = "../crates/capture" }
 visrecall-domain = { path = "../crates/domain" }
+visrecall-ai = { path = "../crates/ai" }
 serde.workspace = true
 specta-typescript = "=0.0.13"
 tauri-plugin-single-instance = "2"

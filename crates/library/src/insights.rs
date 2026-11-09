@@ -99,6 +99,32 @@ impl Library {
         .map_err(db_error)
     }
 
+    /// 批量读取解析结果（检索装配用）：`item_id → Insight`。
+    pub fn insights_for(
+        &self,
+        item_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, Insight>, AppError> {
+        let mut out = std::collections::HashMap::new();
+        if item_ids.is_empty() {
+            return Ok(out);
+        }
+        let conn = self.conn()?;
+        let placeholders = vec!["?"; item_ids.len()].join(", ");
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {COLUMNS} FROM insights WHERE item_id IN ({placeholders})"
+            ))
+            .map_err(db_error)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(item_ids.iter()), row_to_insight)
+            .map_err(db_error)?;
+        for row in rows {
+            let insight = row.map_err(db_error)?;
+            out.insert(insight.item_id.clone(), insight);
+        }
+        Ok(out)
+    }
+
     /// 缺失 `insights` 行的素材 id（启动自检/修复用）。
     pub fn items_missing_insight(&self, limit: u32) -> Result<Vec<String>, AppError> {
         let conn = self.conn()?;
