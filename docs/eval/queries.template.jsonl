@@ -1,0 +1,24 @@
+# VisRecall 检索评测集模板（JSONL；`#` 开头的行是注释，加载器会跳过）
+#
+# 用法：
+#   cargo run -p visrecall-eval -- --db <评测库根目录> --queries <本文件> --report <输出.md>
+#
+# 「相关」的判定口径（人工标注时逐条自问）：
+#   这条素材能否**回答**该查询的意图？
+#   - 是：加入 relevant（id 用 `list_items` / 素材详情里的 item.id）；
+#   - 只是「字面沾边」但答非所问：**不算**相关；
+#   - 「预期无结果」的查询：relevant 写空数组 `[]`，用于检验不误召回。
+#
+# 分桶（bucket）：
+#   screenshot —— 描述画面/界面本身（「深色的设置页截图」「带图表的周报截图」）；
+#   scene      —— 回忆场景/用途（「上周和客户对需求时的白板」「报销要用的那张发票」）；
+#   literal    —— 精确字面（「00329181」「502」「Error」这类号码/报错码）。
+# 阶段 03 的验收口径：50 条真实中文查询，每个桶 ≥15 条（可交叉）。
+#
+# 一条记录一行，字段：
+#   {"query": "查询原文", "relevant": ["item-id-1", "item-id-2"], "bucket": "screenshot"}
+#
+# 下面是**格式示例**（不是真实标注，跑之前替换成你自己的评测集）：
+{"query": "上个月的橙色漏斗图", "relevant": [], "bucket": "screenshot"}
+{"query": "报错弹窗 501", "relevant": [], "bucket": "literal"}
+{"query": "和客户对需求时的白板照片", "relevant": [], "bucket": "scene"}

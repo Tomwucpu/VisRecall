@@ -8,6 +8,7 @@ members = [
   "crates/app-core",
   "crates/ai",
   "crates/search",
+  "crates/eval",
   "crates/pipeline",
   "src-tauri",
 ]

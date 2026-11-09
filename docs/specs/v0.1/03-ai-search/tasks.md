@@ -733,7 +733,7 @@ pnpm test -- src/features/shell src/features/settings && pnpm typecheck && pnpm 
 
 50 条真实中文查询（分桶：截图类 ≥15 / 场景类 ≥15 / 字面类 ≥15，可交叉），对 20 条验收库人工标注相关素材 id。JSONL：`{ "query": "...", "relevant": ["id"...], "bucket": "screenshot|scene|literal" }`。模板与标注口径（「相关」的定义：能回答该查询意图的素材）写入 `docs/eval/queries.template.jsonl` 头部注释。
 
-- [ ] **Step 2: 指标实现**
+- [x] **Step 2: 指标实现**
 
 Top-3 命中率（Top-3 含 ≥1 相关）；Recall@10（每查询相关素材被召回比例的均值）；mAP（AP 按相关位次）；P95 `took_ms`；通道分布（explanation 聚合：FTS 命中 / 语义参与 / 仅过滤）；分桶上述全部。输出 Markdown 报告（含环境、库条数、模型 id、RRF 权重快照）。
 
@@ -741,7 +741,7 @@ Top-3 命中率（Top-3 含 ≥1 相关）；Recall@10（每查询相关素材�
 
 首跑记录基线 → 若 Top-3 <80%：按回退顺序调（jieba 词典 → RRF 权重 → 记录是否需要 base-zh 升级评审），每轮变更出对比报告（报告内含 diff 摘要）。**门禁结论写入 `verification.md` §2 P3-R14 行**。
 
-- [ ] **Step 4: 冒烟**
+- [x] **Step 4: 冒烟**
 
 对空库跑（0 命中不崩溃）；对 3 条素材的小库跑通全流程。
 

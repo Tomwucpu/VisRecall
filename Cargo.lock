@@ -5795,6 +5795,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "visrecall-eval"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "visrecall-ai",
+ "visrecall-domain",
+ "visrecall-library",
+ "visrecall-search",
+]
+
+[[package]]
 name = "visrecall-library"
 version = "0.1.0"
 dependencies = [
