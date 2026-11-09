@@ -13,9 +13,13 @@ import {
   commands,
   type ApiError,
   type AppStatus,
+  type EmbeddingRebuildDto,
   type ItemDetailDto,
   type ItemDto,
+  type ModelConfigDto,
+  type ModelConfigPatchDto,
   type OrphanStatsDto,
+  type ProbeOutcomeDto,
   type PruneReportDto,
   type PurgePreview,
   type RelocateResultDto,
@@ -25,17 +29,23 @@ import {
   type StorageUsageDto,
   type TagChipDto,
 } from "./bindings";
+import type { SearchResponse } from "./searchTypes";
 
 export type {
   ApiError,
   AppStatus,
+  EmbeddingRebuildDto,
   ItemDetailDto,
   ItemDto,
+  ModelConfigDto,
+  ModelConfigPatchDto,
   OrphanStatsDto,
+  ProbeOutcomeDto,
   PruneReportDto,
   PurgePreview,
   RelocateResultDto,
   RetentionPreviewDto,
+  SearchResponse,
   SettingsDto,
   SettingsPatch,
   StorageUsageDto,
@@ -156,6 +166,28 @@ export const api = {
   /** 迁移库位置；成功后必须重启才生效。 */
   relocateStorage: (path: string): Promise<RelocateResultDto> =>
     commands.storageRelocate(path),
+
+  /** 检索：解析 → 三路召回 → RRF。`limit` 由后端 clamp 到 1..=200。 */
+  search: (raw: string, limit: number = 50): Promise<SearchResponse> =>
+    commands.searchItems(raw, limit),
+
+  /** 「不是这个」反馈：写入 `queries.feedback`（V0.1 无历史 UI）。 */
+  searchFeedback: (queryId: string, itemId: string, signal: string): Promise<null> =>
+    commands.searchFeedback(queryId, itemId, signal),
+
+  /** 模型探测：连通性 + 视觉能力 + 延迟。`slot` 取 `primary` / `backup`。 */
+  probeModel: (slot: "primary" | "backup"): Promise<ProbeOutcomeDto> =>
+    commands.modelProbe(slot),
+
+  /** 读取模型配置（只回「是否已设置密钥」，永不回传明文）。 */
+  getModelConfig: (): Promise<ModelConfigDto> => commands.getModelConfig(),
+
+  /** 保存模型配置：密钥写凭据管理器，保存即热生效。 */
+  setModelConfig: (patch: ModelConfigPatchDto): Promise<ModelConfigDto> =>
+    commands.setModelConfig(patch),
+
+  /** 触发向量蓝绿重建（重建期间检索不中断）。 */
+  rebuildEmbeddings: (): Promise<EmbeddingRebuildDto> => commands.embeddingRebuild(),
 
   /** 订阅迁移进度；返回退订函数。 */
   subscribeMigration(onProgress: (progress: MigrationProgress) => void): () => void {

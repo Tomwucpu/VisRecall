@@ -1,6 +1,7 @@
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { commands, type ItemDto } from "../../lib/bindings";
 import { toThumbSrc } from "../../lib/format";
+import { hueForColor } from "../../lib/hue";
 import { queryKeys } from "../../lib/queryClient";
 import type { ItemCardData } from "./ItemCard";
 
@@ -17,6 +18,8 @@ export function toItemCardData(dto: ItemDto): ItemCardData {
     sourceApp: dto.sourceApp ?? null,
     sourceTitle: dto.sourceTitle ?? null,
     thumbUrl: toThumbSrc(dto.thumbUrl ?? null),
+    // 阶段 03：主色 → 主题色令牌（未解析为 null，落到中性灰）
+    hue: hueForColor(dto.primaryColor ?? null),
   };
 }
 

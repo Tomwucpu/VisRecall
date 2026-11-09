@@ -18,6 +18,12 @@ import { useItems } from "../features/library/useItems";
 import { Sidebar } from "../features/shell/Sidebar";
 import { StatusBar } from "../features/shell/StatusBar";
 import { TitleBar } from "../features/shell/TitleBar";
+import { usePipelineState } from "../features/shell/usePipelineState";
+import { SearchBar } from "../features/search/SearchBar";
+import { QueryChips } from "../features/search/QueryChips";
+import { stripChip } from "../lib/searchTypes";
+import { ResultGrid } from "../features/search/ResultGrid";
+import { useSearch } from "../features/search/useSearch";
 
 type LoadState =
   | { status: "loading" }
@@ -51,7 +57,12 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [migration, setMigration] = useState<MigrationProgress | null>(null);
+  // 阶段 03：搜索模式。空查询 = 普通列表，非空 = 检索结果（两套数据源不混用）。
+  const [query, setQuery] = useState("");
   const items = useItems();
+  const search = useSearch(query);
+  const pipeline = usePipelineState();
+  const searching = query.trim().length > 0;
 
   // 库总量只在用量查询里（`itemCount` 来自 count_items），列表只统计已加载页。
   const usageQuery = useQuery({
@@ -238,14 +249,32 @@ export default function App() {
             <div className="crumbs">
               <span>素材库</span>
               <span className="sep">/</span>
-              <span className="here">全部素材</span>
+              <span className="here">{searching ? "检索" : "全部素材"}</span>
             </div>
+            <SearchBar
+              value={query}
+              onChange={setQuery}
+              busy={search.busy}
+              semanticReady={pipeline.semanticReady}
+            />
             <div className="result-bar">
               <div className="result-title">
-                <h1>全部素材</h1>
-                <span className="n">{countText}</span>
+                <h1>{searching ? "检索结果" : "全部素材"}</h1>
+                <span className="n">
+                  {searching
+                    ? search.status === "ready"
+                      ? `命中 ${search.response?.total ?? 0} 项`
+                      : "检索中…"
+                    : countText}
+                </span>
               </div>
             </div>
+            {searching && search.response !== null && (
+              <QueryChips
+                parsed={search.response.parsed}
+                onRemove={(chip) => setQuery(stripChip(query, chip))}
+              />
+            )}
           </div>
 
           <div className="grid-scroll">
@@ -258,7 +287,18 @@ export default function App() {
               </div>
             )}
 
-            {!items.isPending && !items.isError && list.length === 0 ? (
+            {searching ? (
+              <ResultGrid
+                hits={search.hits}
+                status={search.status}
+                errorMessage={search.error}
+                semanticReady={pipeline.semanticReady}
+                total={search.response?.total ?? 0}
+                onOpen={openDetail}
+                onNotThis={(hit) => void search.feedback(hit)}
+                selectedId={selectedId}
+              />
+            ) : !items.isPending && !items.isError && list.length === 0 ? (
               <EmptyState />
             ) : (
               <ItemGrid
@@ -290,7 +330,11 @@ export default function App() {
         </aside>
       </div>
 
-      <StatusBar status={status} version={state.status === "ready" ? state.app.version : null} />
+      <StatusBar
+        status={status}
+        version={state.status === "ready" ? state.app.version : null}
+        pipeline={pipeline}
+      />
       {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} />}
       <ToastViewport />
     </div>

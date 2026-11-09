@@ -18,9 +18,13 @@ export type ItemCardData = {
   thumbUrl: string | null;
   /**
    * hue-dot 的取色令牌（如 `var(--hue-ochre)`）。
-   * 阶段 03 由视觉属性提供；当前一律缺省，落到 `--hue-ash` 中性灰。
+   * 阶段 03 由 `item.primaryColor` 经 `hueForColor` 映射；缺省落到 `--hue-ash` 中性灰。
    */
   hue?: string | null;
+  /** 检索命中来源的中文标签（`字面命中`/`语义命中`/`条件命中`）；非搜索态为空。 */
+  hit?: string | null;
+  /** 命中词或摘要首行（搜索态显示，列表态为空）。 */
+  summary?: string | null;
 };
 
 type Props = {
@@ -97,7 +101,17 @@ export function ItemCard({ item, onOpen, selected = false }: Props) {
       </div>
 
       <div className="card-body">
+        {item.hit !== undefined && item.hit !== null && (
+          <span className={`card-hit hit-${item.hit}`} data-hit={item.hit}>
+            {item.hit}
+          </span>
+        )}
         <h3 className="card-title">{title}</h3>
+        {item.summary !== undefined && item.summary !== null && item.summary.length > 0 && (
+          <p className="card-summary" title={item.summary}>
+            {item.summary}
+          </p>
+        )}
         <div className="card-meta">
           <i className="hue-dot" style={hueStyle} />
           <span className="card-kind">{kind}</span>

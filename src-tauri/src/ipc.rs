@@ -873,6 +873,90 @@ pub async fn search_feedback(
     .await
 }
 
+/// 一个 Provider 槽位的读取视图：**永远不含密钥**，只告诉界面「是否已设置」。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderEntryDto {
+    pub base_url: String,
+    pub model: String,
+    pub has_api_key: bool,
+}
+
+/// 模型配置读取视图。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelConfigDto {
+    pub primary: Option<ProviderEntryDto>,
+    pub backup: Option<ProviderEntryDto>,
+}
+
+/// 槽位输入：`api_key` 缺省 = 不改；空串 = 清除；非空 = 覆盖写入凭据管理器。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderEntryInputDto {
+    pub base_url: String,
+    pub model: String,
+    pub api_key: Option<String>,
+}
+
+/// 模型配置补丁：`null` = 不动该槽位。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelConfigPatchDto {
+    pub primary: Option<ProviderEntryInputDto>,
+    pub backup: Option<ProviderEntryInputDto>,
+}
+
+fn model_config_dto(
+    config: &visrecall_app_core::ModelConfig,
+) -> ModelConfigDto {
+    let view = |entry: &Option<visrecall_app_core::ProviderEntry>, slot| {
+        entry.as_ref().map(|entry| ProviderEntryDto {
+            base_url: entry.base_url.clone(),
+            model: entry.model.clone(),
+            // 只看「有没有」，绝不回传内容
+            has_api_key: visrecall_ai::load_key(slot).ok().flatten().is_some(),
+        })
+    };
+    ModelConfigDto {
+        primary: view(&config.primary, visrecall_ai::KeySlot::Primary),
+        backup: view(&config.backup, visrecall_ai::KeySlot::Backup),
+    }
+}
+
+/// 读取模型配置（地址/模型名 + 是否已设置密钥）。
+#[tauri::command]
+#[specta::specta]
+pub async fn get_model_config(app: tauri::AppHandle) -> Result<ModelConfigDto, ApiError> {
+    run_blocking(app, move |core| Ok(model_config_dto(&core.model_config()))).await
+}
+
+/// 保存模型配置：地址/模型名写 `config.json`，密钥写凭据管理器，保存即热生效。
+#[tauri::command]
+#[specta::specta]
+pub async fn set_model_config(
+    app: tauri::AppHandle,
+    patch: ModelConfigPatchDto,
+) -> Result<ModelConfigDto, ApiError> {
+    run_blocking(app, move |core| {
+        let patch = visrecall_app_core::ModelConfigPatch {
+            primary: patch.primary.map(|entry| visrecall_app_core::ProviderEntryInput {
+                base_url: entry.base_url,
+                model: entry.model,
+                api_key: entry.api_key,
+            }),
+            backup: patch.backup.map(|entry| visrecall_app_core::ProviderEntryInput {
+                base_url: entry.base_url,
+                model: entry.model,
+                api_key: entry.api_key,
+            }),
+        };
+        let saved = core.set_model_config(patch).map_err(|err| ApiError::from(&err))?;
+        Ok(model_config_dto(&saved))
+    })
+    .await
+}
+
 /// 探测指定槽位（`primary` / `backup`）：连通性 + 视觉能力 + 延迟。
 #[tauri::command]
 #[specta::specta]
@@ -947,6 +1031,8 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             search_items,
             search_feedback,
             model_probe,
+            get_model_config,
+            set_model_config,
             embedding_rebuild
         ])
         // 前端用 try/catch 处理 `ApiError`，而不是每处解包 `{ status }`。
