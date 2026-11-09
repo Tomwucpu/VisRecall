@@ -331,8 +331,13 @@
 }
 
 .preview-thumb {
+  position: relative;
   width: 100%;
   aspect-ratio: 16 / 10;
+  display: grid;
+  place-items: center;
+  /* 内层 <img> 用 cqw/cqh 按预览框等比缩放；同时给 .thumb-fallback 提供定位上下文。 */
+  container-type: size;
   background: var(--surface);
   border: 1px solid var(--line-2);
   border-radius: 10px;
@@ -341,10 +346,15 @@
   box-shadow: var(--shadow-lg);
 }
 
-.preview-thumb > img {
+/* 大图覆盖层把 <img> 包在 .preview-stage 里（OCR 高亮层与图片同框），选择器必须
+   跟着嵌套结构走：否则原图按固有尺寸渲染，被 overflow:hidden 裁成左上角一块。
+   .preview-stage 会收缩到缩放后的图片尺寸，高亮框因此仍与图片对齐。 */
+.preview-stage img {
   display: block;
-  width: 100%;
-  height: 100%;
+  max-width: 100cqw;
+  max-height: 100cqh;
+  width: auto;
+  height: auto;
   object-fit: contain;
   background: var(--bg);
 }

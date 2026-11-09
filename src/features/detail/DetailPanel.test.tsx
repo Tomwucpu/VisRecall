@@ -134,6 +134,12 @@ test("opens the in-app overlay from the thumbnail and closes on Escape", async (
 
   const overlay = screen.getByRole("dialog", { name: "查看原图" });
   expect(overlay).toHaveTextContent("原图");
+  // 覆盖层必须真的加载原图，而不是加载失败后回退成缩略图。
+  expect(within(overlay).getByRole("img")).toHaveAttribute(
+    "src",
+    "http://visrecall.localhost/original/abc123",
+  );
+  expect(overlay).not.toHaveTextContent("原图文件缺失");
 
   fireEvent.keyDown(overlay, { key: "Escape" });
   await waitFor(() => {

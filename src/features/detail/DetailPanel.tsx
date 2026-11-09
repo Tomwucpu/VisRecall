@@ -2,7 +2,13 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties } from "re
 import { useQuery } from "@tanstack/react-query";
 import { api, SUMMARY_PLACEHOLDER, type TagChip } from "../../lib/api";
 import { errorCode, errorMessage } from "../../lib/errors";
-import { formatAbsoluteTime, formatRelativeTime, kindLabel, statusLabel } from "../../lib/format";
+import {
+  formatAbsoluteTime,
+  formatRelativeTime,
+  kindLabel,
+  statusLabel,
+  toOriginalSrc,
+} from "../../lib/format";
 import { queryKeys } from "../../lib/queryClient";
 import { pushToast } from "../../lib/toast";
 import { ConfirmDialog } from "../common/ConfirmDialog";
@@ -17,6 +23,9 @@ const NOTE_LIMIT = 10_000;
 const NOTE_DEBOUNCE_MS = 300;
 
 type SaveState = "idle" | "saving" | "saved" | "error";
+
+/** `null` 关闭；`plain` 只看原图；`boxes` 额外叠加 OCR 文字高亮。 */
+type OverlayMode = "plain" | "boxes" | null;
 
 /** 摘要来源 → 徽标文案（与后端 `summary_source` 的取值一一对应）。 */
 const SUMMARY_SOURCE_LABEL: Record<string, string> = {
@@ -48,7 +57,7 @@ export function DetailPanel({ item, onClose }: Props) {
   const [note, setNote] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [tagDraft, setTagDraft] = useState<string | null>(null);
-  const [overlayOpen, setOverlayOpen] = useState(false);
+  const [overlayMode, setOverlayMode] = useState<OverlayMode>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -60,7 +69,7 @@ export function DetailPanel({ item, onClose }: Props) {
     setNote(null);
     setSaveState("idle");
     setTagDraft(null);
-    setOverlayOpen(false);
+    setOverlayMode(null);
     setConfirmOpen(false);
     pending.current = null;
     savedText.current = "";
@@ -234,7 +243,9 @@ export function DetailPanel({ item, onClose }: Props) {
     }))
     .filter((box) => box.w > 0 && box.h > 0);
   const bodyText = extras?.bodyText ?? null;
-  const originalUrl = extras?.originalUrl ?? null;
+  // `get_item_ext` 返回的是逻辑协议 URL，必须转成 WebView 能加载的地址，
+  // 否则覆盖层加载失败后会静默回退到 480px 缩略图（看起来「不是原图」）。
+  const originalUrl = toOriginalSrc(extras?.originalUrl ?? null);
   const full = detail.data?.item;
   const title = item.sourceTitle ?? "未命名来源";
   const kind = kindLabel(item.kind);
@@ -277,7 +288,7 @@ export function DetailPanel({ item, onClose }: Props) {
             <button
               type="button"
               className="d-thumb"
-              onClick={() => setOverlayOpen(true)}
+              onClick={() => setOverlayMode("plain")}
               aria-label="查看原图"
               title="查看原图"
             >
@@ -327,7 +338,7 @@ export function DetailPanel({ item, onClose }: Props) {
               <button
                 type="button"
                 className="mini-btn d-highlight-btn"
-                onClick={() => setOverlayOpen(true)}
+                onClick={() => setOverlayMode("boxes")}
                 title="在原图上标出识别到的文字"
               >
                 在图中查看 {ocrBoxes.length} 处文字
@@ -482,14 +493,15 @@ export function DetailPanel({ item, onClose }: Props) {
         </div>
       </div>
 
-      {overlayOpen && (
+      {overlayMode !== null && (
         <ImageOverlay
           originalUrl={originalUrl}
           thumbUrl={item.thumbUrl}
           title={title}
           kind={item.kind}
-          boxes={ocrBoxes}
-          onClose={() => setOverlayOpen(false)}
+          // 只有「在图中查看 N 处文字」这个入口才叠加 OCR 高亮框。
+          boxes={overlayMode === "boxes" ? ocrBoxes : []}
+          onClose={() => setOverlayMode(null)}
         />
       )}
 

@@ -1,12 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { toThumbSrc } from "../../lib/format";
+import { toOriginalSrc, toThumbSrc } from "../../lib/format";
 import { ItemCard, type ItemCardData } from "./ItemCard";
 import { toItemCardData } from "./useItems";
-
-// jsdom 里没有 Tauri 运行时：`convertFileSrc` 返回与应用内一致的协议地址。
-vi.mock("@tauri-apps/api/core", () => ({
-  convertFileSrc: () => "http://visrecall.localhost/thumb",
-}));
 
 const base: ItemCardData = {
   id: "1",
@@ -63,6 +58,18 @@ test("maps dto thumb url to a custom-protocol address", () => {
   expect(toThumbSrc("visrecall://thumb/abc")).toBe("http://visrecall.localhost/thumb/abc");
   expect(toThumbSrc(null)).toBeNull();
   expect(toThumbSrc("http://example.test/a.png")).toBe("http://example.test/a.png");
+});
+
+test("maps the original protocol url to a loadable address", () => {
+  expect(toOriginalSrc("visrecall://original/abc123")).toBe(
+    "http://visrecall.localhost/original/abc123",
+  );
+  expect(toOriginalSrc(null)).toBeNull();
+  expect(toOriginalSrc("https://example.test/a.png")).toBe("https://example.test/a.png");
+  // 已经转换过的地址不能被二次转换（详情页与卡片共用同一条数据）。
+  expect(toOriginalSrc("http://visrecall.localhost/original/abc123")).toBe(
+    "http://visrecall.localhost/original/abc123",
+  );
 });
 
 test("falls back to placeholder when the thumbnail fails to load, and retries on src change", () => {

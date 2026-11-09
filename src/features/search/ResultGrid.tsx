@@ -2,6 +2,7 @@ import { ItemCard, type ItemCardData } from "../library/ItemCard";
 import type { SearchHit } from "../../lib/searchTypes";
 import { hitSource, hitSourceLabel } from "../../lib/searchTypes";
 import { ExplainBar } from "./ExplainBar";
+import { toThumbSrc } from "../../lib/format";
 import { hueForColor } from "../../lib/hue";
 
 type Props = {
@@ -27,7 +28,8 @@ function toCardData(hit: SearchHit): ItemCardData & { hit: string; summary: stri
     // DTO 的可选字段在这里统一成 `null`，避免卡片里出现 `undefined` 分支
     sourceApp: item.sourceApp ?? null,
     sourceTitle: item.sourceTitle ?? null,
-    thumbUrl: item.thumbUrl ?? null,
+    // 检索命中的 item 是原始 ItemDto：和 useItems 一样必须转成可加载的协议地址。
+    thumbUrl: toThumbSrc(item.thumbUrl ?? null),
     hue: hueForColor(item.primaryColor),
     hit: hitSourceLabel(hitSource(hit.explanation)),
     // 摘要首行：解释里没有摘要字段，详情面板才展示完整摘要；

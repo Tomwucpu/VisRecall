@@ -1,23 +1,38 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 
-const THUMB_PREFIX = "visrecall://thumb/";
+/** 自定义协议名，与 `src-tauri/src/protocol.rs` 的 `SCHEME` 一致。 */
+const ASSET_SCHEME = "visrecall";
+type AssetKind = "thumb" | "original";
 
 /**
- * `ItemDto.thumbUrl`（`visrecall://thumb/<id>`）→ 自定义协议的可加载地址。
+ * `visrecall://<kind>/<id>` → 自定义协议的可加载地址（Windows 上是
+ * `http://visrecall.localhost/<kind>/<id>`）。
  *
  * `convertFileSrc` 会把整段路径当成文件路径做 `encodeURIComponent`，冒号/斜杠会被
  * 编码成 `%3A`/`%2F`，协议处理器就只看到一段路径了。所以这里只交给它固定的
- * `thumb` 段，再由自己拼 `/<id>`。非 `visrecall://` 的值原样返回。
+ * 资源类别段，再由自己拼 `/<id>`。非本协议的 URL（含已转换过的地址）原样返回，
+ * 因此转换是幂等的。
  */
-export function toThumbSrc(url: string | null): string | null {
+function toAssetSrc(url: string | null, kind: AssetKind): string | null {
   if (!url) {
     return null;
   }
-  if (!url.startsWith(THUMB_PREFIX)) {
+  const prefix = `${ASSET_SCHEME}://${kind}/`;
+  if (!url.startsWith(prefix)) {
     return url;
   }
-  const id = url.slice(THUMB_PREFIX.length);
-  return `${convertFileSrc("thumb", "visrecall")}/${encodeURIComponent(id)}`;
+  const id = url.slice(prefix.length);
+  return `${convertFileSrc(kind, ASSET_SCHEME)}/${encodeURIComponent(id)}`;
+}
+
+/** `ItemDto.thumbUrl`（`visrecall://thumb/<id>`）→ WebView 可加载的缩略图地址。 */
+export function toThumbSrc(url: string | null): string | null {
+  return toAssetSrc(url, "thumb");
+}
+
+/** `DetailExtrasDto.originalUrl`（`visrecall://original/<id>`）→ WebView 可加载的原图地址。 */
+export function toOriginalSrc(url: string | null): string | null {
+  return toAssetSrc(url, "original");
 }
 
 const KNOWN_STATUSES = ["parsing", "ready", "pending", "failed"] as const;

@@ -122,6 +122,30 @@ test("result grid renders hits, badge, explanation and the not-this action", () 
   expect(notThis).toHaveLength(1);
 });
 
+test("result grid gives the card a loadable thumbnail url", () => {
+  const candidate = hit();
+  candidate.item.thumbUrl = "visrecall://thumb/1";
+
+  render(
+    <ResultGrid
+      hits={[candidate]}
+      status="ready"
+      errorMessage={null}
+      semanticReady
+      total={1}
+      onOpen={() => {}}
+      onNotThis={() => {}}
+      selectedId={null}
+    />,
+  );
+
+  // 后端给的是逻辑协议地址，WebView 只能加载 `http://visrecall.localhost/...`。
+  expect(screen.getByRole("img", { name: "图片素材缩略图" })).toHaveAttribute(
+    "src",
+    "http://visrecall.localhost/thumb/1",
+  );
+});
+
 test("result grid explains empty and degraded states", () => {
   const { rerender } = render(
     <ResultGrid

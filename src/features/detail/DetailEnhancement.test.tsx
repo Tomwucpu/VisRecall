@@ -73,6 +73,17 @@ test("opens the overlay with OCR highlight boxes", async () => {
   expect(overlay.querySelectorAll(".ocr-box")).toHaveLength(2);
 });
 
+test("opening the original from the thumbnail does not highlight OCR text", async () => {
+  renderPanel(<DetailPanel item={item} onClose={() => {}} />);
+  // 等详情（含两个 OCR 框）到位，再走「查看原图」入口。
+  await screen.findByText(/在图中查看 2 处文字/);
+
+  fireEvent.click(screen.getByLabelText("查看原图"));
+
+  const overlay = await screen.findByRole("dialog", { name: "查看原图" });
+  expect(overlay.querySelectorAll(".ocr-box")).toHaveLength(0);
+});
+
 test("no boxes means no highlight action and no overlay boxes", async () => {
   const original = commands.getItemExt.getMockImplementation();
   commands.getItemExt.mockImplementationOnce(async (id: string) => {
