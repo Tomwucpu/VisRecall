@@ -1082,11 +1082,7 @@ impl AppCore {
             runtime,
             visrecall_pipeline::PipelineConfig::default(),
         )?;
-        tracing::info!(
-            repaired = started.repaired,
-            pending_retried = started.pending_retried,
-            "indexing pipeline started"
-        );
+        tracing::info!(repaired = started.repaired, "indexing pipeline started");
         *self.lock_pipeline() = Some(started.handle);
         self.search.warm_up();
         Ok(())

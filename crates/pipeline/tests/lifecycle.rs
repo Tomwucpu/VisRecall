@@ -7,7 +7,7 @@ use visrecall_domain::providers::VectorIndex;
 use visrecall_domain::{ItemKind, ItemStatus, NewItem};
 use visrecall_library::{BruteForceInt8, JobState, Library, DEFAULT_VECTOR_TABLE};
 use visrecall_pipeline::lifecycle::{
-    next_rebuild_table, rebuild_embeddings, rebuild_fts_row, retry_pending, run_startup_checks,
+    next_rebuild_table, rebuild_embeddings, rebuild_fts_row, run_startup_checks,
 };
 use visrecall_pipeline::testing::{FakeEmbed, FakeOcr, FakeText, FakeVision};
 use visrecall_pipeline::{
@@ -228,7 +228,7 @@ fn rebuild_keeps_old_table_when_row_count_mismatches() {
 }
 
 #[test]
-fn startup_checks_enqueue_repair_and_pending_retry() {
+fn startup_checks_repair_index_rows_without_retrying_pending_items() {
     let harness = Harness::new();
     let broken = harness.insert_image("h-broken", "缺索引");
     let pending = harness.insert_image("h-pending", "待重试");
@@ -239,7 +239,6 @@ fn startup_checks_enqueue_repair_and_pending_retry() {
 
     let report = run_startup_checks(&harness.library).unwrap();
     assert_eq!(report.repaired, 2, "两条素材都缺派生数据");
-    assert_eq!(report.pending_retried, 1, "pending 素材要重跑一轮 vlm");
     assert!(!report.counts.is_consistent());
 
     let index_jobs = harness
@@ -248,20 +247,15 @@ fn startup_checks_enqueue_repair_and_pending_retry() {
         .unwrap();
     assert_eq!(index_jobs.len(), 1);
     assert_eq!(index_jobs[0].state, JobState::Queued);
-    let vlm_jobs = harness.library.jobs_for_stage(&pending, STAGE_VLM).unwrap();
-    assert_eq!(vlm_jobs.len(), 1);
-    assert_eq!(vlm_jobs[0].state, JobState::Queued);
-}
-
-#[test]
-fn retry_pending_ignores_ready_items() {
-    let harness = Harness::new();
-    let ready = harness.insert_image("h-ready", "已就绪");
-    harness
-        .library
-        .update_status(&ready, ItemStatus::Ready, None)
-        .unwrap();
-    assert_eq!(retry_pending(&harness.library).unwrap(), 0);
+    // 只补派生索引：启动不再把 pending 素材重新入队 vlm。
+    assert!(
+        harness
+            .library
+            .jobs_for_stage(&pending, STAGE_VLM)
+            .unwrap()
+            .is_empty(),
+        "pending 素材不应在启动时自动重试"
+    );
 }
 
 #[test]

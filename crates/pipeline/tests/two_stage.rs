@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use visrecall_domain::insight::SummarySource;
 use visrecall_domain::{AppError, ItemKind, ItemStatus, NewItem};
 use visrecall_library::{FtsColumns, Job, JobState, Library};
-use visrecall_pipeline::lifecycle::{retry_pending, run_startup_checks};
+use visrecall_pipeline::lifecycle::run_startup_checks;
 use visrecall_pipeline::testing::{FakeEmbed, FakeFail, FakeOcr, FakeText, FakeVision};
 use visrecall_pipeline::{
     with_builtin_handlers, Pipeline, PipelineConfig, PipelineDeps, PipelineEvents, PipelineHandle,
@@ -594,30 +594,6 @@ fn startup_checks_repair_missing_fts_rows() {
     handle.shutdown();
     assert!(fts_hits(&harness, "原文").contains(&rowid));
     assert_eq!(harness.library.index_counts().unwrap().fts, 1);
-}
-
-#[test]
-fn retry_pending_enqueues_vlm_again() {
-    let harness = Harness::new(FakeOcr::with_text("x"), FakeVision::typical("摘要", &[]));
-    let item = harness.insert_image("hash-pending", "待重试");
-    harness
-        .library
-        .update_status(&item, ItemStatus::Pending, None)
-        .unwrap();
-    harness
-        .library
-        .enqueue_stage(&item, STAGE_VLM, PRIORITY_NEW)
-        .unwrap();
-    // 先把已有任务置为失败终态，才能观察「重试轮重置」
-    {
-        let job = harness.library.jobs_for_stage(&item, STAGE_VLM).unwrap()[0].clone();
-        harness.library.finish_job_failed(&job.id, "boom").unwrap();
-    }
-
-    assert_eq!(retry_pending(&harness.library).unwrap(), 1);
-    let job = &harness.library.jobs_for_stage(&item, STAGE_VLM).unwrap()[0];
-    assert_eq!(job.state, JobState::Queued);
-    assert_eq!(job.attempts, 0);
 }
 
 #[test]

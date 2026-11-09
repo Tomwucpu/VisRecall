@@ -11,12 +11,12 @@ pub mod worker;
 
 pub use handlers::{IndexHandler, OcrHandler, RebuildHandler, VlmHandler};
 pub use lifecycle::{
-    next_rebuild_table, rebuild_embeddings, rebuild_fts_row, retry_pending, run_startup_checks,
-    RebuildReport, StartupReport,
+    next_rebuild_table, rebuild_embeddings, rebuild_fts_row, run_startup_checks, RebuildReport,
+    StartupReport,
 };
 pub use worker::{
     enqueue, JobCtx, JobHandler, NoopEvents, Pipeline, PipelineConfig, PipelineDeps,
-    PipelineEvents, PipelineHandle, PRIORITY_NEW, PRIORITY_REBUILD, PRIORITY_RETRY,
+    PipelineEvents, PipelineHandle, PRIORITY_NEW, PRIORITY_REBUILD,
 };
 
 /// 阶段一前半：图片 OCR。

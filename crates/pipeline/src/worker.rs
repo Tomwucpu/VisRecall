@@ -18,8 +18,6 @@ use visrecall_library::{Job, Library};
 
 /// 新捕获链路（`ocr`/`index`/`vlm`）。
 pub const PRIORITY_NEW: i64 = 0;
-/// 重试（`pending` 素材的补跑）。
-pub const PRIORITY_RETRY: i64 = 1;
 /// 全量重建/修复。
 pub const PRIORITY_REBUILD: i64 = 2;
 

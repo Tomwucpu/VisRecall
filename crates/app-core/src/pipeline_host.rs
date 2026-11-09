@@ -286,7 +286,6 @@ fn error_code_and_message(error: &AppError) -> (&'static str, String) {
 pub struct StartedPipeline {
     pub handle: PipelineHandle,
     pub repaired: usize,
-    pub pending_retried: usize,
 }
 
 /// 构造完整的 [`PipelineDeps`] 并启动 worker。
@@ -335,6 +334,5 @@ pub fn start_pipeline(
     Ok(StartedPipeline {
         handle,
         repaired: report.repaired,
-        pending_retried: report.pending_retried,
     })
 }

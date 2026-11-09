@@ -106,7 +106,7 @@ crates/pipeline/（新增 crate：visrecall-pipeline）
     index.rs            # 阶段一后半+重建：search doc → 嵌入 → 同事务写三处
     vlm.rs              # 阶段二：VLM/Text → 摘要/标签/属性 → re-index
     rebuild.rs          # 蓝绿重建 / 启动修复
-  src/lifecycle.rs      # revision、content_hash 复用、pending 重试轮、自检
+  src/lifecycle.rs      # revision、content_hash 复用、自检、蓝绿重建
   tests/                # 假 Provider 全链路集成测试
 
 crates/search/（新增 crate：visrecall-search）
@@ -136,7 +136,7 @@ crates/library/
 crates/app-core/src/
   pipeline_host.rs      # 新增：worker 生命周期、Provider 注册表（主备/健康）、预热
   search_flow.rs        # 新增：查询嵌入（缓存）→ search::execute 编排
-  app.rs                # 修改：启动接线（自检修复、预热、pending 重试）、模型配置
+  app.rs                # 修改：启动接线（自检修复、预热）、模型配置
   events.rs             # 修改：4 个新事件
   capture_flow.rs / import_flow.rs      # 修改：提交后入队
 
@@ -501,7 +501,7 @@ search_items(raw)
      → 旧表保留（回滚=把指针改回）；检索全程读指针，零中断
    ```
 4. **启动自检**（`db.rs` 开库后）：`COUNT(items)` vs `COUNT(items_fts)` vs `COUNT(活跃向量表)`；不一致记 `warn` 并对缺失行入队 `index`（revision 用当前值）；`fts.tokenizer_version` 不一致只 `warn`（§1.2）。
-5. **pending 重试轮**：启动时 `status='pending'` 的素材重新入队一轮 `vlm`（attempts 从 0 起）；运行期不做自动轮询（恢复靠用户动作触发的新任务与应用重启，登记 V0.1 边界）。
+5. **解析失败不自动重试**（2026-11-09 变更）：启动时**不再**把 `status='pending'` 的素材重新入队 `vlm`；运行期也不做自动轮询。恢复解析只能由用户在详情面板点「重新解析」（`item_reparse`）触发。
 
 ### 6.5 Provider 实现（`crates/ai`）
 
@@ -536,7 +536,7 @@ search_items(raw)
 2. **模型所有权**：`Arc<dyn EmbeddingProvider>` 内部 `Mutex` 只护「加载状态与 LRU」；ort Session 本身 Send+Sync，推理不持锁（并发 embed 串行化在 session 层由 ort 内部处理；2 worker 规模无争用）。
 3. **单一健康真相**：Provider 主备健康状态存 `AtomicU8`（healthy/degraded/config-error），`model_config_set` 与探测/失败路径只改这一处；`search_flow` 与 `vlm` handler 都读它，不各自缓存。
 4. **事件不持锁**（沿用）：`pipeline_status` 有 100ms 合并窗口，且在锁外发送。
-5. **启动顺序**：`Library::open`（自检）→ 迁移 → `pipeline_host` 启 worker（先恢复 running→queued）→ 嵌入预热 → pending 重试轮入队。检索在预热完成前可用（降级语义）。
+5. **启动顺序**：`Library::open`（自检）→ 迁移 → `pipeline_host` 启 worker（先恢复 running→queued）→ 启动自检修复 → 嵌入预热。检索在预热完成前可用（降级语义）。
 6. **顺序不变量**：`bump_revision` 与 `enqueue` 必须同事务（先 bump 后入队，或同事务内完成），否则旧任务可能带着新 revision 逃逸。
 
 ## 8. 失败与降级矩阵
@@ -564,7 +564,7 @@ search_items(raw)
 | 纯函数单测 | 解析规则表、RRF、int8 量化/余弦、search document 拼接与截断、MATCH 转义、颜色同义词、OCR 摘录截断、VLM JSON 校验 | `#[test]` + proptest |
 | library 集成 | 0003 迁移幂等、同事务三写回滚、FTS 写/删/搜、向量蓝绿指针切换、revision bump、自检计数、删除级联（含 FTS） | `tempfile` + 真实 SQLite |
 | search 集成 | 三路召回端到端（注入假嵌入：同文本同向量、异文本异向量）、Explanation 装配、filters-only 尾部、RRF 排序稳定性 | tempdir + 假 `EmbeddingProvider` |
-| pipeline 集成 | 两阶段时序、退避与 attempts、stale-revision 取消、content_hash 复用、suppressions 不回贴、崩溃恢复（杀线程模拟）、pending 重试轮 | 假 Provider（记录调用次数与结果注入） |
+| pipeline 集成 | 两阶段时序、退避与 attempts、stale-revision 取消、content_hash 复用、suppressions 不回贴、崩溃恢复（杀线程模拟）、启动自检只修派生索引 | 假 Provider（记录调用次数与结果注入） |
 | ai 单测/集成 | 嵌入确定性 + 语义 sanity + 缓存；OCR 用仓库内置 3–5 张 fixture 图断言关键文本出现；VLM 层用本地 mock HTTP（`wiremock` dev-dep）验证 schema/修复/主备/401 | `#[test]` / `#[ignore]` 标注需模型文件的用例（CI 无模型时跳过，本地必跑） |
 | 前端组件 | SearchBar 防抖与过期丢弃、chips 删除重算、命中徽标、ExplainBar、摘要来源徽标、标签筛选、模型 pane（探测 mock） | Vitest + Testing Library |
 | 手工验收 | OCR 真实准确率（20 张）、内存/延迟采样、凭据管理器、断网矩阵、GUI 目视 | `verification.md` |

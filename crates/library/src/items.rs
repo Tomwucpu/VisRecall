@@ -170,7 +170,7 @@ impl Library {
         self.set_item_note(id, text)
     }
 
-    /// 按状态取素材（启动的 pending 重试轮用），按 `captured_at ASC, rowid ASC`。
+    /// 按状态取素材，按 `captured_at ASC, rowid ASC`（结果稳定，便于分批处理）。
     pub fn items_with_status(&self, status: ItemStatus, limit: u32) -> Result<Vec<Item>, AppError> {
         let conn = self.conn()?;
         let mut stmt = conn

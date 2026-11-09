@@ -437,7 +437,7 @@ cargo clippy -p visrecall-pipeline --all-targets -- -D warnings
 
 **Interfaces:**
 - Consumes: Task 3 `document.rs`/`tokenizer.rs`、Task 5/6/7 Provider、Task 8 worker、Task 2 `write_index_tx`
-- Produces: `handlers::ocr/index/vlm/rebuild`（注册进 `Pipeline::spawn`）；`lifecycle::{run_startup_checks, retry_pending, start_rebuild}`；`Library` 的 `set_note`/`tag_add`/`tag_detach`/`tag_rename` 完成后通过注入的 `MetadataHook` 触发 `bump_revision + enqueue(index)`
+- Produces: `handlers::ocr/index/vlm/rebuild`（注册进 `Pipeline::spawn`）；`lifecycle::{run_startup_checks, start_rebuild}`；`Library` 的 `set_note`/`tag_add`/`tag_detach`/`tag_rename` 完成后通过注入的 `MetadataHook` 触发 `bump_revision + enqueue(index)`
 
 - [x] **Step 1: handlers::ocr**
 
@@ -453,7 +453,7 @@ cargo clippy -p visrecall-pipeline --all-targets -- -D warnings
 
 - [x] **Step 4: handlers::rebuild 与 lifecycle**
 
-`start_rebuild(new_model_id)`：`create_vector_table("_v2")` → 入队批量 `rebuild` 任务（每批 100 rowid，priority 2）→ 每批写 v2 → 全部完成后 COUNT 比对 → `vector_switch_active` + `settings` 的 `embedding.model_id/dim` 更新（同一事务）。`run_startup_checks`：Task 2 的计数差异 → 缺 FTS/向量的素材入队 `index`。`retry_pending`：启动时 `status='pending'` 素材重入队 `vlm`（attempts 归零）。
+`start_rebuild(new_model_id)`：`create_vector_table("_v2")` → 入队批量 `rebuild` 任务（每批 100 rowid，priority 2）→ 每批写 v2 → 全部完成后 COUNT 比对 → `vector_switch_active` + `settings` 的 `embedding.model_id/dim` 更新（同一事务）。`run_startup_checks`：Task 2 的计数差异 → 缺 FTS/向量的素材入队 `index`。**不做**启动时的 `pending` 重试轮（2026-11-09 变更，见 `design.md` §6.4）。
 
 - [x] **Step 5: MetadataHook 接线**
 
@@ -510,7 +510,7 @@ cargo clippy -p visrecall-pipeline --all-targets -- -D warnings
 
 - [x] **Step 2: 启动顺序（design §7.5）**
 
-`Library::open`（自检 warn）→ 迁移 → `Pipeline::spawn`（2 worker + handlers + MetadataHook 注册）→ `retry_pending` + `run_startup_checks` 修复入队 → 嵌入预热（后台线程 load，完成发 `semantic_status { ready }`）。
+`Library::open`（自检 warn）→ 迁移 → `Pipeline::spawn`（2 worker + handlers + MetadataHook 注册）→ `run_startup_checks` 修复入队 → 嵌入预热（后台线程 load，完成发 `semantic_status { ready }`）。
 
 - [x] **Step 3: 提交路径入队**
 

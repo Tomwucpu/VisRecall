@@ -162,7 +162,7 @@ unclip 用面积/周长外扩、无 cls 方向分类、长边 >4096 降采样。
 | P3-R02 | 嵌入确定性 / 语义 sanity / LRU 命中 | **通过** | `embed_real.rs`：`same_text_gives_identical_vector`（max diff 0）、`related_texts_are_closer_than_unrelated`（10/10）、`query_cache_short_circuits_recomputation`（1.0ms→0.001ms） |
 | P3-R02 | 模型加载耗时与内存增量 ≤60MB | **通过** | §1.2：加载 145ms、增量 +56.4MB（余量 3.6MB） |
 | P3-R03 | VLM 全字段落库；畸形 JSON 修复一次；401 终止重试 | **通过（wiremock）** | `vlm_wiremock.rs`：`valid_json_maps_all_fields`、`malformed_json_triggers_exactly_one_repair`（`expect(1)` 断言只重试一次）、`unauthorized_is_a_config_error_and_is_not_retried`（`expect(1)`）；**真实端点待你用自己的 Key 跑一次** |
-| P3-R03 | 断网：OCR 摘录占位 + pending；恢复后增强替换 | **通过（假 Provider）** | `two_stage.rs::vlm_retryable_failure_marks_pending_after_three_attempts`（3 次后 pending、摘要仍是 OCR 摘录、仍可检索）、`retry_pending_enqueues_vlm_again` |
+| P3-R03 | 断网：OCR 摘录占位 + pending；手动重新解析后增强替换 | **通过（假 Provider）**；启动不自动重试（2026-11-09 变更） | `two_stage.rs::vlm_retryable_failure_marks_pending_after_three_attempts`（3 次后 pending、摘要仍是 OCR 摘录、仍可检索）、`lifecycle.rs::startup_checks_repair_index_rows_without_retrying_pending_items`、`DetailPanel.test.tsx::reparse_triggers_the_command_and_reports_it_with_a_toast` |
 | P3-R03 | 自动标签删除后不回贴（suppressions） | **通过** | `two_stage.rs::suppressed_auto_tag_is_not_reattached` |
 | P3-R04 | 提交→可检索 ≤3s（P95，≥10 次采样） | **待人工**：需要 GUI 连续拖入 ≥10 次计时（后端链路本身是毫秒级：`item_indexed` 在 OCR+index 完成后立即发出） | 事件链路证据：`two_stage.rs::ocr_then_index_then_vlm_emits_in_order_and_makes_item_searchable` |
 | P3-R04 | 同事务回滚（无半更新）；阶段二中断恢复 | **通过** | `items.rs::bump_revision_works_inside_write_index_tx`（闭包 Err → revision 不增）、`worker_framework.rs` 的崩溃恢复用例、`two_stage.rs::crash_during_vlm_recovers_and_reruns_without_duplicates` |
@@ -235,7 +235,7 @@ cargo run -p visrecall-eval -- --db <验收库根目录> --queries my-queries.js
 | 5 | 删除某个 chip | 结果重算，剩余 chip 保持 |
 | 6 | 点标签 chip 筛选，再点一次取消 | 只在标签筛选态生效，不污染普通搜索 |
 | 7 | 断开网络后拖入新图 | 素材先可搜（OCR 摘录），详情显示「待重试」 |
-| 8 | 恢复网络后重启应用 | `pending` 素材自动重跑一轮并变为完整摘要 |
+| 8 | 恢复网络后重启应用 | 不自动重试：素材仍显示「待重试」；在详情点「重新解析」后才变为完整摘要 |
 | 9 | 设置里去掉 `models/` 目录后重启 | 状态栏显示「语义检索未就绪」，搜索仍可用（FTS 模式） |
 | 10 | 设置「模型」pane 填错 Key 后探测 | 行内报「配置错误」，不重试、不刷日志 |
 | 11 | 保存正确 Key 后探测 | 显示延迟与「视觉可用」 |
@@ -256,7 +256,7 @@ cargo run -p visrecall-eval -- --db <验收库根目录> --queries my-queries.js
 | 嵌入空闲卸载 | 懒加载 + 预热，不按空闲卸载 | 阶段 04 内存优化 |
 | PP-OCR cls | 无方向分类（截图水平假设） | 长尾复评 |
 | `fts.tokenizer_version` 变更自动重建 | 记录 + warn | 真需要时复用 rebuild |
-| pending 素材自动轮询 | 仅启动重试一轮 | V0.1 边界 |
+| pending 素材自动重试 | 不做（启动与运行期都不重试） | 用户主动点「重新解析」 |
 | VLM 用户编辑保护 | 字段预留，逻辑不做 | V0.5 |
 | ARM64 | 仅 `cargo check` | 阶段 04 |
 | entities 详情展示 | 参与索引与解释，不展示 | P1 |

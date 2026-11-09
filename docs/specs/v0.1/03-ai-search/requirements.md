@@ -59,7 +59,7 @@
 - 图片素材：摘要、标签（≤8 个，去停用词）、`content_type`/`primary_color`/`chart_type`/`ui_type` 结构化属性、实体列表、公式（`latex` + `has_formula`）、置信度。
 - 文本素材：摘要 + 标签。
 - 返回 JSON 严格 schema 校验：解析失败时把错误信息回传模型**修复一次**，仍失败按本次调用失败处理（走重试/主备），不落脏数据。
-- VLM 失败/离线：OCR 摘录占位（`summary_source='ocr'`，取 `ocr_text` 前 280 字符），素材 `status='pending'` 可重试；网络/服务恢复或应用重启时重试一轮。
+- VLM 失败/离线：OCR 摘录占位（`summary_source='ocr'`，取 `ocr_text` 前 280 字符），素材 `status='pending'` 可重试；**不在启动或恢复时自动重试**，由用户在详情面板点「重新解析」手动触发（2026-11-09 变更）。
 - VLM 成功：`summary_source='vlm'`，`status='ready'`；自动标签以 `origin='auto'` 关联，写入前过滤 `tag_suppressions`（用户删过的自动标签不回贴），同名标签复用既有行。
 - 401/403 判定为配置错误：任务终止重试、UI 明示「密钥或地址配置错误」，其他 5xx/超时走指数退避。
 - 阶段一（OCR/临时嵌入）不受 VLM 任何状态影响：无 Key 时新捕获依旧 ≤3s 可检索。

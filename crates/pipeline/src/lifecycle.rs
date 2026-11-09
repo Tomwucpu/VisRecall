@@ -1,18 +1,18 @@
-//! 索引生命周期（design §6.4）：启动自检修复、`pending` 重试轮、向量蓝绿重建。
+//! 索引生命周期（design §6.4）：启动自检修复、向量蓝绿重建。
 
 use std::sync::Arc;
 
 use visrecall_domain::insight::{Insight, SummarySource};
 use visrecall_domain::providers::EmbeddingProvider;
 use visrecall_domain::vector_math::quantize_i8;
-use visrecall_domain::{now_millis, AppError, ItemStatus};
+use visrecall_domain::{now_millis, AppError};
 use visrecall_library::{vector_upsert_tx, FtsColumns, IndexCounts, Library, DEFAULT_VECTOR_TABLE};
 use visrecall_search::tokenizer::tokenize_for_fts;
 
 use crate::handlers::index::document_for;
 use crate::handlers::{joined_entities, joined_tag_names, read_original_text};
-use crate::worker::{PRIORITY_NEW, PRIORITY_REBUILD, PRIORITY_RETRY};
-use crate::{STAGE_INDEX, STAGE_VLM};
+use crate::worker::{PRIORITY_NEW, PRIORITY_REBUILD};
+use crate::STAGE_INDEX;
 
 /// 启动自检结果（供日志与 `AppStatus` 使用）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,11 +20,12 @@ pub struct StartupReport {
     pub counts: IndexCounts,
     /// 因缺失 FTS/向量行而重新入队的素材数。
     pub repaired: usize,
-    /// 因 `status='pending'` 而重新入队 `vlm` 的素材数。
-    pub pending_retried: usize,
 }
 
-/// 启动自检：行数比对 → 缺失派生数据入队 `index`（`PRIORITY_REBUILD`）+ `pending` 重试轮。
+/// 启动自检：行数比对 → 缺失派生数据入队 `index`（`PRIORITY_REBUILD`）。
+///
+/// 只修复**派生数据缺失**（FTS/向量行被外部删掉）；不重跑 `pending` 素材的 `vlm`。
+/// 解析失败的素材保持原状，等用户手动在详情里重新解析（`item_reparse`）。
 pub fn run_startup_checks(library: &Library) -> Result<StartupReport, AppError> {
     let counts = library.index_counts()?;
     let mut repaired = 0usize;
@@ -44,30 +45,7 @@ pub fn run_startup_checks(library: &Library) -> Result<StartupReport, AppError> 
         }
     }
 
-    let pending_retried = retry_pending(library)?;
-    Ok(StartupReport {
-        counts,
-        repaired,
-        pending_retried,
-    })
-}
-
-/// `pending` 素材重跑一轮 `vlm`（`attempts` 归零，靠 enqueue 的冲突分支重置）。
-pub fn retry_pending(library: &Library) -> Result<usize, AppError> {
-    let mut retried = 0usize;
-    for item in library.items_with_status(ItemStatus::Pending, 200)? {
-        match library.enqueue_stage(&item.id, STAGE_VLM, PRIORITY_RETRY) {
-            Ok(_) => retried += 1,
-            Err(err) => tracing::warn!(item = %item.id, %err, "enqueue pending retry failed"),
-        }
-    }
-    if retried > 0 {
-        tracing::info!(
-            count = retried,
-            "re-enqueued pending items for a vlm retry round"
-        );
-    }
-    Ok(retried)
+    Ok(StartupReport { counts, repaired })
 }
 
 /// 蓝绿重建的结果。
