@@ -11,6 +11,32 @@ pub enum ItemKind {
     Link,
 }
 
+impl ItemKind {
+    pub const ALL: [ItemKind; 3] = [Self::Image, Self::Text, Self::Link];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Text => "text",
+            Self::Link => "link",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        let lower = raw.trim().to_ascii_lowercase();
+        Self::ALL.into_iter().find(|kind| kind.as_str() == lower)
+    }
+
+    /// 中文展示名（chips 用）。
+    pub fn label_zh(self) -> &'static str {
+        match self {
+            Self::Image => "图片",
+            Self::Text => "文本",
+            Self::Link => "链接",
+        }
+    }
+}
+
 /// 素材处理状态，对应 `items.status` 的 `parsing`/`ready`/`pending`/`failed`。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

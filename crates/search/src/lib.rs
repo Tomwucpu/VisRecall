@@ -7,9 +7,13 @@
 //! 保证写入侧与查询侧词形一致。
 
 pub mod document;
+pub mod filters;
 pub mod fts_query;
+pub mod parser;
 pub mod tokenizer;
 
 pub use document::{build_search_document, DocumentFields, DOC_CHAR_BUDGET};
+pub use filters::{to_sql, SqlFilter};
 pub use fts_query::{build_match_expr, escape_phrase};
+pub use parser::{parse_query, parse_query_at};
 pub use tokenizer::{terms_for_query, tokenize_for_fts, words, TOKENIZER_VERSION};

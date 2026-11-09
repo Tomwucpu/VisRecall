@@ -212,6 +212,29 @@ impl Library {
         })
     }
 
+    /// 执行「候选集 SQL」（`search::filters::to_sql` 的产物）并返回 `items.rowid`。
+    ///
+    /// SQL 由上游用编号占位符拼好、参数逐一绑定——本方法不接受字符串插值，
+    /// 也不做任何改写（唯一职责是执行与收集）。
+    pub fn candidate_rowids(
+        &self,
+        sql: &str,
+        params: &[rusqlite::types::Value],
+    ) -> Result<Vec<i64>, AppError> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(sql).map_err(db_error)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(db_error)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(db_error)?);
+        }
+        Ok(out)
+    }
+
     /// 缺失派生数据的素材 `(rowid, item_id)`：没有 FTS 行、或没有活跃向量行。
     ///
     /// 启动自检据此入队修复（P3-R12「缺失派生数据自动入队修复」）。

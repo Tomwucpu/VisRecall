@@ -551,15 +551,15 @@ cargo clippy -p visrecall-app-core --all-targets -- -D warnings
 - Consumes: `terms_for_query`、颜色/图表/时间词表
 - Produces: `parse_query(raw) -> ParsedQuery`；`filters::to_sql(&ParsedQuery) -> SqlFilter`（`{ clause: String, params: Vec<Value> }`，含 candidates 查询：`SELECT rowid FROM items LEFT JOIN insights ... WHERE ...`）
 
-- [ ] **Step 1: 规则表实现（design §6.6）**
+- [x] **Step 1: 规则表实现（design §6.6）**
 
 时间词计算 `TimeRange`（本地时区、周一起始、`最近 N 天` N≤365）；颜色同义词表（含深色/浅色多值映射）；`app:X`/`来自X`/`在X里`；`tag:X`/`#X`；`"..."` 引号；「公式」→ hasFormula。匹配从原文中**剥离**已消费片段，剩余进 `semantic_text`；一个词只消费一次（「上个月」不得同时当时间与语义词）。
 
-- [ ] **Step 2: filters.rs**
+- [x] **Step 2: filters.rs**
 
 生成候选 SQL：`items` 与 `insights`（`primary_color IN (...)`、`chart_type=?`、`has_formula=?`）、`items`（`captured_at BETWEEN`、`kind=?`、`source_app LIKE ? COLLATE NOCASE`）、`item_tags JOIN tags`（标签名精确 NOCASE）。无任何过滤器 → clause 为空（全集）。
 
-- [ ] **Step 3: 测试**
+- [x] **Step 3: 测试**
 
 - 每规则正/反例（requirements P3-R06 验收清单）；混合查询「上个月来自 chrome 的橙色漏斗图 "季度营收"」全解析。
 - proptest：随机输入不 panic、`semantic_text` 不含已剥离片段、往返（chips 重建的查询文本再解析等价）。
