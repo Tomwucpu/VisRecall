@@ -216,6 +216,8 @@ pnpm build
 | 蓝绿重建的驱动方式 | Task 9 Step 4「`start_rebuild` → 入队批量 `rebuild` 任务（每批 100 rowid）→ 全部完成后计数比对 → 切指针」 | `lifecycle::rebuild_embeddings` **同步**完成（每批 100 条，20 条规模一次跑完）；`rebuild` **任务**只用于单条素材的派生数据修复（与 `index` 同一份代码） | `jobs` 表没有 payload 列，「目标表名/新模型 id」只能塞 `settings` 或额外建表；20 条规模下 job 调度是纯开销。验收口径（新建表 → 行数校验 → 原子切指针 → 旧表保留 → 检索零中断）全部满足，见 `lifecycle.rs` 测试 |
 | `fts.tokenizer_version` 记录点 | design §4.2「写入时取当前」 | `Library::open` 的自检里首次写入、之后不一致只 `warn` | 与原意一致，明确记录时机 |
 | 单条 FTS 修复 | 无 | 新增 `lifecycle::rebuild_fts_row`（无 UI 的管理入口） | 排障/评测用，未改变任何需求行为 |
+| 语义通道截断 | design §6.3「vec_top = vector_index.search(query_vec, 200, candidates)」未提阈值 | `execute::SEMANTIC_RELATIVE_FLOOR = 0.5`：丢掉非正相似度 + 只保留「最高分 × 0.5」以上的向量命中 | 20 条规模下 `top_k=200` 等于全库，RRF 按名次给分会把整个库塞进结果列表（语义检索看起来「什么都搜得到」）。绝对阈值对 int8 量化与不同模型不可移植，故用相对阈值；**该系数是 V0.1 经验值，由 Task 15 的 20 条评测集调**（P3-R14 的调参回路） |
+| `vlm` 的 `model_name` | design §4.3 `insights.model_name` | 写入 `NULL` | 阶段二的 handler 只拿到 `&dyn VisionProvider`（`id()` 是槽位名），模型名在 `ModelConfig` 里；避免为传一个字符串把 `Provider` trait 扩成携带元数据。`model_provider` 记槽位（`vlm-primary`/`vlm-backup`），已足够定位来源 |
 
 ## 5. 结论
 
