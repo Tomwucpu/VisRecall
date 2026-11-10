@@ -332,6 +332,42 @@
   padding-top: 6px;
 }
 
+.d-reference {
+  margin: 16px 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.d-reference dl {
+  margin: 10px 0 0;
+}
+
+.d-reference dl > div {
+  display: grid;
+  grid-template-columns: 62px minmax(0, 1fr);
+  gap: 8px;
+  margin-top: 7px;
+  font-size: 10px;
+}
+
+.d-reference dt {
+  color: var(--ink-3);
+}
+
+.d-reference dd {
+  overflow: hidden;
+  margin: 0;
+  color: var(--ink-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.d-reference-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
 .d-meta-row {
   display: flex;
   justify-content: space-between;

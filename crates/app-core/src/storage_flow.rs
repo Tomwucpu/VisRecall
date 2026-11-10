@@ -49,6 +49,16 @@ pub fn prune_expired(library: &Library, sink: &dyn EventSink) -> PruneReport {
 
     let mut report = PruneReport::default();
     for item in expired {
+        // 自动保留策略首版只处理库内自有原件，目录引用由用户显式管理。
+        match library.external_asset_for_item(&item.id) {
+            Ok(Some(_)) => continue,
+            Ok(None) => {}
+            Err(err) => {
+                report.failed += 1;
+                tracing::warn!(id = %item.id, %err, "failed to check item ownership");
+                continue;
+            }
+        }
         match library.delete_item(&item.id) {
             Ok(_) => report.deleted += 1,
             Err(err) => {

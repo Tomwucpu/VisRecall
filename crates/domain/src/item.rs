@@ -11,6 +11,34 @@ pub enum ItemKind {
     Link,
 }
 
+/// 素材原件的存储归属。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageMode {
+    /// 原件由 VisRecall 保存在素材库内。
+    #[default]
+    Managed,
+    /// 原件由用户保管，素材库只保存只读路径引用。
+    Reference,
+}
+
+impl StorageMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Managed => "managed",
+            Self::Reference => "reference",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "managed" => Some(Self::Managed),
+            "reference" => Some(Self::Reference),
+            _ => None,
+        }
+    }
+}
+
 impl ItemKind {
     pub const ALL: [ItemKind; 3] = [Self::Image, Self::Text, Self::Link];
 

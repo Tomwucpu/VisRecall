@@ -12,6 +12,9 @@ export const queryKeys = {
   purgePreview: ["purge-preview"] as const,
   modelConfig: ["model-config"] as const,
   search: ["search"] as const,
+  importTask: (id: string) => ["import-task", id] as const,
+  importTasks: ["import-tasks"] as const,
+  importSources: ["import-sources"] as const,
 };
 
 /**

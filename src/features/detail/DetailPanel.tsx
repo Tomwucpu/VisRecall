@@ -35,6 +35,14 @@ const SUMMARY_SOURCE_LABEL: Record<string, string> = {
   user: "已编辑",
 };
 
+const REFERENCE_STATUS_LABEL: Record<string, string> = {
+  available: "可用",
+  missing: "文件缺失",
+  permission_denied: "无访问权限",
+  changed: "文件已变化",
+  removed: "来源已移除",
+};
+
 /**
  * 详情面板（T4）。
  *
@@ -59,6 +67,7 @@ export function DetailPanel({ item, onClose }: Props) {
   const [overlayMode, setOverlayMode] = useState<OverlayMode>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [reparseBusy, setReparseBusy] = useState(false);
+  const [referenceBusy, setReferenceBusy] = useState(false);
 
   // 保存是异步的：期间切到别的素材时，旧的结果不能写进新素材的本地状态。
   const activeId = useRef(item.id);
@@ -74,6 +83,7 @@ export function DetailPanel({ item, onClose }: Props) {
     setOverlayMode(null);
     setConfirmOpen(false);
     setReparseBusy(false);
+    setReferenceBusy(false);
   }, [item.id]);
 
   // 真实备注到达后作为初始值；用户已经开始编辑则不覆盖。
@@ -226,6 +236,7 @@ export function DetailPanel({ item, onClose }: Props) {
     }))
     .filter((box) => box.w > 0 && box.h > 0);
   const bodyText = extras?.bodyText ?? null;
+  const reference = extras?.reference ?? null;
   // `get_item_ext` 返回的是逻辑协议 URL，必须转成 WebView 能加载的地址，
   // 否则覆盖层加载失败后会静默回退到 480px 缩略图（看起来「不是原图」）。
   const originalUrl = toOriginalSrc(extras?.originalUrl ?? null);
@@ -249,6 +260,17 @@ export function DetailPanel({ item, onClose }: Props) {
         : noteDirty
           ? "未保存"
           : "";
+
+  const openReference = async (reveal: boolean) => {
+    setReferenceBusy(true);
+    try {
+      await api.openReferenceFile(item.id, reveal);
+    } catch (error) {
+      pushToast(errorMessage(error), "error");
+    } finally {
+      setReferenceBusy(false);
+    }
+  };
 
   return (
     <>
@@ -464,6 +486,22 @@ export function DetailPanel({ item, onClose }: Props) {
             </div>
           </section>
 
+          {reference !== null && (
+            <section className="d-reference" aria-labelledby="reference-title">
+              <div className="d-section-title" id="reference-title">引用文件</div>
+              <dl>
+                <div><dt>来源目录</dt><dd title={reference.sourcePath}>{reference.sourcePath}</dd></div>
+                <div><dt>相对路径</dt><dd title={reference.relativePath}>{reference.relativePath}</dd></div>
+                <div><dt>状态</dt><dd>{REFERENCE_STATUS_LABEL[reference.status] ?? reference.status}</dd></div>
+                <div><dt>最后索引</dt><dd>{reference.lastIndexedAt == null ? "—" : formatAbsoluteTime(reference.lastIndexedAt)}</dd></div>
+              </dl>
+              <div className="d-reference-actions">
+                <button type="button" className="mini-btn" disabled={referenceBusy} onClick={() => void openReference(false)}>打开原文件</button>
+                <button type="button" className="mini-btn" disabled={referenceBusy} onClick={() => void openReference(true)}>打开所在目录</button>
+              </div>
+            </section>
+          )}
+
           <div className="d-actions">
             <button type="button" className="btn primary" onClick={() => void copy()}>
               {copyLabel(item.kind)}
@@ -536,7 +574,7 @@ export function DetailPanel({ item, onClose }: Props) {
       {confirmOpen && (
         <ConfirmDialog
           title="彻底删除这条素材？"
-          description="原图、缩略图与索引条目会一并移除，不做软删除，不可恢复。"
+          description={reference !== null ? "索引、备注、标签与派生缓存会一并移除；外部原文件不会被修改或删除。此操作不可恢复。" : "原图、缩略图与索引条目会一并移除，不做软删除，不可恢复。"}
           confirmLabel="彻底删除"
           danger
           onConfirm={() => void removeItem()}

@@ -248,7 +248,7 @@ impl Library {
         let mut stmt = conn
             .prepare(&format!(
                 "SELECT {COLUMNS} FROM {FROM}
-                 WHERE i.captured_at < ?1
+                 WHERE i.captured_at < ?1 AND i.storage_mode = 'managed'
                  ORDER BY i.captured_at ASC, i.rowid ASC
                  LIMIT ?2"
             ))

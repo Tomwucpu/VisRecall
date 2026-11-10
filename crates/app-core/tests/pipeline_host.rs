@@ -4,15 +4,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use visrecall_app_core::pipeline_host::{
-    enqueue_initial_indexing, EventBridge, ProviderRegistry,
-};
+use visrecall_app_core::pipeline_host::{enqueue_initial_indexing, EventBridge, ProviderRegistry};
 use visrecall_app_core::{
     AppCore, AppError, AppEvent, AppPaths, EventSink, ModelConfigPatch, ModelEntryInput,
     RecordingSink,
 };
 use visrecall_domain::{ItemKind, NewItem};
-use visrecall_library::{Library, ModelConfig, ModelEntry};
+use visrecall_library::{AppConfig, Library, ModelConfig, ModelEntry};
 use visrecall_pipeline::{PipelineEvents, PRIORITY_NEW, STAGE_INDEX, STAGE_OCR, STAGE_VLM};
 
 fn paths_in(dir: &std::path::Path) -> AppPaths {
@@ -24,8 +22,16 @@ fn paths_in(dir: &std::path::Path) -> AppPaths {
 
 /// 只关心事件到达、不关心热键的打开方式。
 fn open(dir: &std::path::Path) -> (AppCore, Arc<RecordingSink>) {
+    let paths = paths_in(dir);
+    // 测试库必须位于临时目录，避免误用真实用户库。
+    AppConfig {
+        library_path: paths.default_library_root.clone(),
+        ..AppConfig::default()
+    }
+    .save_atomic(&paths.config_file)
+    .expect("write test config");
     let sink = Arc::new(RecordingSink::default());
-    let core = AppCore::open(paths_in(dir), sink.clone());
+    let core = AppCore::open(paths, sink.clone());
     (core, sink)
 }
 
@@ -233,8 +239,7 @@ fn deleting_all_models_clears_the_config() {
     .unwrap();
     assert_eq!(core.model_config().entries.len(), 1);
 
-    core.set_model_config(ModelConfigPatch::default())
-        .unwrap();
+    core.set_model_config(ModelConfigPatch::default()).unwrap();
     assert!(core.model_config().is_empty());
     assert_eq!(core.model_config().active_id, None);
 }
@@ -310,10 +315,7 @@ fn sample_job(stage: &str) -> visrecall_library::Job {
     }
 }
 
-fn bridge_with(
-    sink: &Arc<RecordingSink>,
-    registry: Arc<ProviderRegistry>,
-) -> EventBridge {
+fn bridge_with(sink: &Arc<RecordingSink>, registry: Arc<ProviderRegistry>) -> EventBridge {
     EventBridge::new(Arc::clone(sink) as Arc<dyn EventSink>, registry)
 }
 
@@ -350,7 +352,10 @@ fn job_failed_reaches_the_sink_when_model_configured() {
 #[test]
 fn job_failed_is_silent_for_vlm_when_no_model_configured() {
     let sink = Arc::new(RecordingSink::default());
-    let bridge = bridge_with(&sink, ProviderRegistry::from_config(&ModelConfig::default()));
+    let bridge = bridge_with(
+        &sink,
+        ProviderRegistry::from_config(&ModelConfig::default()),
+    );
 
     // 未配置模型是预期状态（UI 已注明「仅本地 OCR」），vlm 失败不打扰用户
     bridge.job_failed(
@@ -458,10 +463,18 @@ impl EventSink for CountingSink {
 #[test]
 fn pipeline_status_events_reach_the_sink() {
     let dir = tempfile::tempdir().unwrap();
+    let paths = paths_in(dir.path());
+    // 与其他宿主测试一致显式绑定临时库，避免默认配置指向真实用户目录。
+    AppConfig {
+        library_path: paths.default_library_root.clone(),
+        ..AppConfig::default()
+    }
+    .save_atomic(&paths.config_file)
+    .expect("write test config");
     let counting = Arc::new(CountingSink {
         count: AtomicUsize::new(0),
     });
-    let core = AppCore::open(paths_in(dir.path()), counting.clone());
+    let core = AppCore::open(paths, counting.clone());
     core.start_pipeline().unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(10);

@@ -142,5 +142,5 @@ test("relocation reports that a restart is required", async () => {
 });
 
 test("exposes the single allowed AI summary placeholder", () => {
-  expect(SUMMARY_PLACEHOLDER).toBe("待解析（阶段 03 提供）");
+  expect(SUMMARY_PLACEHOLDER).toBe("待解析");
 });

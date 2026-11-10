@@ -91,6 +91,7 @@ const commands = vi.hoisted(() => ({
     storageOrphansGet: vi.fn(async () => ({ files: 0, bytes: 0, missingThumbs: 0 })),
     storageOrphansCleanup: vi.fn(async () => ({ files: 0, bytes: 0, missingThumbs: 0 })),
     storageRelocate: vi.fn(async () => ({ restartRequired: true, newRoot: "E:/new" })),
+    listImportTasks: vi.fn(async () => []),
   }));
 
 vi.mock("../lib/bindings", () => ({ commands }));
@@ -120,11 +121,11 @@ test("opens the detail panel from a card and closes it with Escape", async () =>
 
   const card = await screen.findByRole("button", { name: /第一条素材/ });
   fireEvent.click(card);
-  expect(await screen.findByText("待解析（阶段 03 提供）")).toBeInTheDocument();
+  expect(await screen.findByText("待解析")).toBeInTheDocument();
 
   fireEvent.keyDown(window, { key: "Escape" });
   await waitFor(() => {
-    expect(screen.queryByText("待解析（阶段 03 提供）")).not.toBeInTheDocument();
+    expect(screen.queryByText("待解析")).not.toBeInTheDocument();
   });
   expect(screen.getByText("从中间选一条素材")).toBeInTheDocument();
 });
@@ -141,6 +142,12 @@ test("shows the library total from usage instead of the loaded page", async () =
   // 列表只加载了 1 条，但计数取后端的库总量。
   expect(await screen.findByText("找到 42 项")).toBeInTheDocument();
   expect(await screen.findByText("42 条素材")).toBeInTheDocument();
+});
+
+test("keeps the add entry beside search in the normal library", async () => {
+  renderApp();
+  expect(await screen.findByRole("button", { name: "添加素材" })).toBeInTheDocument();
+  expect(screen.getByRole("searchbox", { name: "搜索素材" })).toBeInTheDocument();
 });
 
 test("toggles the sidebar with B and the theme with T", async () => {

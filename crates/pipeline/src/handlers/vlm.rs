@@ -29,6 +29,12 @@ impl JobHandler for VlmHandler {
             .library
             .get_item(ctx.item_id())?
             .ok_or(AppError::NotFound)?;
+        // 防御性检查：旧队列或手动重新解析也不能绕过来源级云端授权。
+        if !ctx.library.cloud_ai_allowed(&item.id)? {
+            ctx.library
+                .update_status(&item.id, visrecall_domain::ItemStatus::Ready, None)?;
+            return Ok(());
+        }
         let now = now_millis();
         let mut insight = ctx
             .library

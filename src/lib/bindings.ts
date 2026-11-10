@@ -72,6 +72,23 @@ export const commands = {
 	setModelConfig: (patch: ModelConfigPatchDto_Deserialize) => __TAURI_INVOKE<ModelConfigDto_Serialize>("set_model_config", { patch }),
 	/**  触发向量蓝绿重建（当前模型 id/维度；重建期间检索零中断）。 */
 	embeddingRebuild: () => __TAURI_INVOKE<EmbeddingRebuildDto>("embedding_rebuild"),
+	pickImportFiles: () => __TAURI_INVOKE<FileSelectionDto_Serialize | null>("pick_import_files"),
+	pickImportDirectory: () => __TAURI_INVOKE<DirectorySelectionDto | null>("pick_import_directory"),
+	discardImportSelection: () => __TAURI_INVOKE<void>("discard_import_selection"),
+	startFileImport: (token: string, entryIds: string[]) => __TAURI_INVOKE<ImportTaskDto_Serialize>("start_file_import", { token, entryIds }),
+	createTextItem: (title: string | null, body: string, tags: string[]) => __TAURI_INVOKE<string>("create_text_item", { title, body, tags }),
+	scanImportDirectory: (token: string, options: DirectoryScanOptionsDto) => __TAURI_INVOKE<ImportTaskDto_Serialize>("scan_import_directory", { token, options }),
+	startDirectoryImport: (scanTaskId: string) => __TAURI_INVOKE<ImportTaskDto_Serialize>("start_directory_import", { scanTaskId }),
+	getImportTask: (id: string) => __TAURI_INVOKE<ImportTaskDto_Serialize>("get_import_task", { id }),
+	listImportTasks: (limit: number | null) => __TAURI_INVOKE<ImportTaskDto_Serialize[]>("list_import_tasks", { limit }),
+	listImportTaskEntries: (taskId: string, cursor: number | null, limit: number | null) => __TAURI_INVOKE<ImportTaskEntriesPageDto_Serialize>("list_import_task_entries", { taskId, cursor, limit }),
+	cancelImportTask: (id: string) => __TAURI_INVOKE<ImportTaskDto_Serialize>("cancel_import_task", { id }),
+	listImportSources: () => __TAURI_INVOKE<ImportSourceDto_Serialize[]>("list_import_sources"),
+	refreshImportSource: (id: string) => __TAURI_INVOKE<ImportTaskDto_Serialize>("refresh_import_source", { id }),
+	relocateImportSource: (id: string, token: string) => __TAURI_INVOKE<ImportSourceDto_Serialize>("relocate_import_source", { id, token }),
+	removeImportSource: (id: string, removeItems: boolean) => __TAURI_INVOKE<number>("remove_import_source", { id, removeItems }),
+	openReferenceFile: (itemId: string, reveal: boolean | null) => __TAURI_INVOKE<null>("open_reference_file", { itemId, reveal }),
+	setImportDropTarget: (target: DropTargetDto | null) => __TAURI_INVOKE<void>("set_import_drop_target", { target }),
 };
 
 /* Types */
@@ -106,6 +123,7 @@ export type DetailExtrasDto_Deserialize = {
 	/**  图片素材的原图协议 URL；文本/链接为 `None`。 */
 	originalUrl?: string | null,
 	tags: TagChipDto_Deserialize[],
+	reference?: ReferenceInfoDto_Deserialize | null,
 };
 
 /**  详情面板的额外内容。 */
@@ -121,6 +139,26 @@ export type DetailExtrasDto_Serialize = {
 	/**  图片素材的原图协议 URL；文本/链接为 `None`。 */
 	originalUrl: string | null,
 	tags: TagChipDto_Serialize[],
+	reference: ReferenceInfoDto_Serialize | null,
+};
+
+export type DirectoryScanOptionsDto = {
+	includeSubdirectories: boolean,
+	includeImages: boolean,
+	includeText: boolean,
+	aiAllowed: boolean,
+};
+
+export type DirectorySelectionDto = {
+	token: string,
+	path: string,
+};
+
+export type DropTargetDto = {
+	x: number | null,
+	y: number | null,
+	width: number | null,
+	height: number | null,
 };
 
 /**  蓝绿重建结果。 */
@@ -137,6 +175,136 @@ export type ExplanationDto = {
 	terms: string[],
 	semantic: boolean,
 	highlightBoxes: OcrBoxDto[],
+};
+
+export type FileSelectionDto = FileSelectionDto_Serialize | FileSelectionDto_Deserialize;
+
+export type FileSelectionDto_Deserialize = {
+	token: string,
+	files: ImportFileSummaryDto_Deserialize[],
+};
+
+export type FileSelectionDto_Serialize = {
+	token: string,
+	files: ImportFileSummaryDto_Serialize[],
+};
+
+export type ImportFileSummaryDto = ImportFileSummaryDto_Serialize | ImportFileSummaryDto_Deserialize;
+
+export type ImportFileSummaryDto_Deserialize = {
+	entryId: string,
+	fileName: string,
+	size: number,
+	supported: boolean,
+	reason?: string | null,
+};
+
+export type ImportFileSummaryDto_Serialize = {
+	entryId: string,
+	fileName: string,
+	size: number,
+	supported: boolean,
+	reason: string | null,
+};
+
+export type ImportSourceDto = ImportSourceDto_Serialize | ImportSourceDto_Deserialize;
+
+export type ImportSourceDto_Deserialize = {
+	id: string,
+	rootPath: string,
+	includeSubdirectories: boolean,
+	includeImages: boolean,
+	includeText: boolean,
+	aiAllowed: boolean,
+	status: string,
+	lastScannedAt?: number | null,
+	itemCount: number,
+};
+
+export type ImportSourceDto_Serialize = {
+	id: string,
+	rootPath: string,
+	includeSubdirectories: boolean,
+	includeImages: boolean,
+	includeText: boolean,
+	aiAllowed: boolean,
+	status: string,
+	lastScannedAt: number | null,
+	itemCount: number,
+};
+
+export type ImportTaskDto = ImportTaskDto_Serialize | ImportTaskDto_Deserialize;
+
+export type ImportTaskDto_Deserialize = {
+	id: string,
+	sourceId?: string | null,
+	kind: string,
+	status: string,
+	totalCount: number,
+	processedCount: number,
+	succeededCount: number,
+	skippedCount: number,
+	failedCount: number,
+	originalBytes: number,
+	cancelRequested: boolean,
+	errorSummary?: string | null,
+	createdAt: number,
+	updatedAt: number,
+};
+
+export type ImportTaskDto_Serialize = {
+	id: string,
+	sourceId: string | null,
+	kind: string,
+	status: string,
+	totalCount: number,
+	processedCount: number,
+	succeededCount: number,
+	skippedCount: number,
+	failedCount: number,
+	originalBytes: number,
+	cancelRequested: boolean,
+	errorSummary: string | null,
+	createdAt: number,
+	updatedAt: number,
+};
+
+export type ImportTaskEntriesPageDto = ImportTaskEntriesPageDto_Serialize | ImportTaskEntriesPageDto_Deserialize;
+
+export type ImportTaskEntriesPageDto_Deserialize = {
+	entries: ImportTaskEntryDto_Deserialize[],
+	nextCursor?: number | null,
+};
+
+export type ImportTaskEntriesPageDto_Serialize = {
+	entries: ImportTaskEntryDto_Serialize[],
+	nextCursor: number | null,
+};
+
+export type ImportTaskEntryDto = ImportTaskEntryDto_Serialize | ImportTaskEntryDto_Deserialize;
+
+export type ImportTaskEntryDto_Deserialize = {
+	rowid: number,
+	entryKey: string,
+	relativePath: string,
+	displayName: string,
+	size: number,
+	status: string,
+	errorCode?: string | null,
+	errorMessage?: string | null,
+	itemId?: string | null,
+};
+
+export type ImportTaskEntryDto_Serialize = {
+	rowid: number,
+	entryKey: string,
+	relativePath: string,
+	displayName: string,
+	size: number,
+	status: string,
+	errorCode: string | null,
+	errorMessage: string | null,
+	itemId: string | null,
 };
 
 /**  详情聚合结果。 */
@@ -339,6 +507,24 @@ export type PruneReportDto = {
 export type PurgePreview = {
 	itemCount: number,
 	confirmationWord: string,
+};
+
+export type ReferenceInfoDto = ReferenceInfoDto_Serialize | ReferenceInfoDto_Deserialize;
+
+export type ReferenceInfoDto_Deserialize = {
+	sourceId: string,
+	sourcePath: string,
+	relativePath: string,
+	status: string,
+	lastIndexedAt?: number | null,
+};
+
+export type ReferenceInfoDto_Serialize = {
+	sourceId: string,
+	sourcePath: string,
+	relativePath: string,
+	status: string,
+	lastIndexedAt: number | null,
 };
 
 /**  库迁移结果：必须重启才生效。 */

@@ -317,6 +317,10 @@
   font-size: 12px;
 }
 
+.empty .btn {
+  margin: 18px auto 14px;
+}
+
 .grid-more {
   display: flex;
   justify-content: center;

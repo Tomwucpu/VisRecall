@@ -14,6 +14,14 @@ import {
   type ApiError,
   type AppStatus,
   type EmbeddingRebuildDto,
+  type DirectoryScanOptionsDto,
+  type DirectorySelectionDto,
+  type DropTargetDto,
+  type FileSelectionDto,
+  type ImportSourceDto,
+  type ImportTaskDto,
+  type ImportTaskEntriesPageDto,
+  type ImportTaskEntryDto,
   type ItemDetailDto,
   type ItemDto,
   type ModelConfigDto,
@@ -37,6 +45,14 @@ export type {
   ApiError,
   AppStatus,
   EmbeddingRebuildDto,
+  DirectoryScanOptionsDto,
+  DirectorySelectionDto,
+  DropTargetDto,
+  FileSelectionDto,
+  ImportSourceDto,
+  ImportTaskDto,
+  ImportTaskEntriesPageDto,
+  ImportTaskEntryDto,
   ItemDetailDto,
   ItemDto,
   ModelConfigDto,
@@ -74,10 +90,90 @@ export type MigrationProgress = {
   total: number;
 };
 
-const PHASE_03 = "阶段 03";
-
 export const api = {
   getStatus: (): Promise<AppStatus> => commands.getAppStatus(),
+
+  /** 原生选择只返回短期令牌与摘要，路径保留在 Rust 侧。 */
+  pickImportFiles: (): Promise<FileSelectionDto | null> => commands.pickImportFiles(),
+
+  pickImportDirectory: (): Promise<DirectorySelectionDto | null> => commands.pickImportDirectory(),
+
+  discardImportSelection: async (): Promise<void> => {
+    await commands.discardImportSelection();
+  },
+
+  startFileImport: (token: string, entryIds: string[]): Promise<ImportTaskDto> =>
+    commands.startFileImport(token, entryIds),
+
+  createTextItem: (title: string | null, body: string, tags: string[]): Promise<string> =>
+    commands.createTextItem(title, body, tags),
+
+  scanImportDirectory: (
+    token: string,
+    options: DirectoryScanOptionsDto,
+  ): Promise<ImportTaskDto> => commands.scanImportDirectory(token, options),
+
+  startDirectoryImport: (scanTaskId: string): Promise<ImportTaskDto> =>
+    commands.startDirectoryImport(scanTaskId),
+
+  getImportTask: (id: string): Promise<ImportTaskDto> => commands.getImportTask(id),
+
+  listImportTasks: (limit = 20): Promise<ImportTaskDto[]> => commands.listImportTasks(limit),
+
+  listImportTaskEntries: (
+    taskId: string,
+    cursor: number | null,
+    limit = 100,
+  ): Promise<ImportTaskEntriesPageDto> => commands.listImportTaskEntries(taskId, cursor, limit),
+
+  cancelImportTask: (id: string): Promise<ImportTaskDto> => commands.cancelImportTask(id),
+
+  listImportSources: (): Promise<ImportSourceDto[]> => commands.listImportSources(),
+
+  refreshImportSource: (id: string): Promise<ImportTaskDto> => commands.refreshImportSource(id),
+
+  relocateImportSource: (id: string, token: string): Promise<ImportSourceDto> =>
+    commands.relocateImportSource(id, token),
+
+  removeImportSource: (id: string, removeItems: boolean): Promise<number> =>
+    commands.removeImportSource(id, removeItems),
+
+  openReferenceFile: async (itemId: string, reveal = false): Promise<void> => {
+    await commands.openReferenceFile(itemId, reveal);
+  },
+
+  setImportDropTarget: async (target: DropTargetDto | null): Promise<void> => {
+    await commands.setImportDropTarget(target);
+  },
+
+  /** 订阅原生拖放结果；监听器在弹窗卸载时全部释放。 */
+  subscribeImportDrop(handlers: {
+    onReady: (selection: FileSelectionDto) => void;
+    onHover: (overTarget: boolean) => void;
+  }): () => void {
+    let disposed = false;
+    const unlisteners: UnlistenFn[] = [];
+    const subscriptions = [
+      listen<FileSelectionDto>("import_drop_ready", (event) => {
+        if (!disposed) handlers.onReady(event.payload);
+      }),
+      listen<{ overTarget: boolean }>("import_drop_hover", (event) => {
+        if (!disposed) handlers.onHover(event.payload.overTarget);
+      }),
+    ];
+    for (const pending of subscriptions) {
+      void pending
+        .then((unlisten) => {
+          if (disposed) unlisten();
+          else unlisteners.push(unlisten);
+        })
+        .catch((error: unknown) => console.error("监听导入拖放失败", error));
+    }
+    return () => {
+      disposed = true;
+      for (const unlisten of unlisteners.splice(0)) unlisten();
+    };
+  },
 
   listItems: (cursor: number | null, limit: number): Promise<ItemDto[]> =>
     commands.listItems(cursor, limit),
@@ -227,4 +323,4 @@ export const api = {
 };
 
 /** 详情面板需要的 AI 描述占位文案（阶段 03 前唯一允许的显示内容）。 */
-export const SUMMARY_PLACEHOLDER = `待解析（${PHASE_03} 提供）`;
+export const SUMMARY_PLACEHOLDER = `待解析`;

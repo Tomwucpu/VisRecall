@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 
 type Props = {
   title: string;
@@ -9,6 +9,7 @@ type Props = {
   danger?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
+  children?: ReactNode;
 };
 
 /**
@@ -26,6 +27,7 @@ export function ConfirmDialog({
   danger = false,
   onConfirm,
   onCancel,
+  children,
 }: Props) {
   const panelRef = useRef<HTMLDivElement>(null);
 
@@ -54,6 +56,7 @@ export function ConfirmDialog({
       >
         <h2 id="confirm-title">{title}</h2>
         <p id="confirm-desc">{description}</p>
+        {children}
         <div className="confirm-actions">
           <button type="button" className="btn" onClick={onCancel}>
             {cancelLabel}

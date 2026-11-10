@@ -24,6 +24,7 @@ import { QueryChips } from "../features/search/QueryChips";
 import { stripChip } from "../lib/searchTypes";
 import { ResultGrid } from "../features/search/ResultGrid";
 import { useSearch } from "../features/search/useSearch";
+import { ImportDialog } from "../features/import/ImportDialog";
 
 type LoadState =
   | { status: "loading" }
@@ -54,6 +55,7 @@ export default function App() {
   // 默认不显示详情列，选中素材后滑入，关闭后整列滑出（原型 `.detail.is-hidden`）。
   const [detailHidden, setDetailHidden] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [migration, setMigration] = useState<MigrationProgress | null>(null);
@@ -270,12 +272,18 @@ export default function App() {
               <span className="sep">/</span>
               <span className="here">{searching ? "检索" : "全部素材"}</span>
             </div>
-            <SearchBar
-              value={query}
-              onChange={setQuery}
-              busy={search.busy}
-              semanticReady={pipeline.semanticReady}
-            />
+            <div className="search-actions">
+              <SearchBar
+                value={query}
+                onChange={setQuery}
+                busy={search.busy}
+                semanticReady={pipeline.semanticReady}
+              />
+              <button type="button" className="btn import-entry-button" aria-label="添加素材" onClick={() => setImportOpen(true)}>
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M8 3v10M3 8h10" /></svg>
+                <span>添加</span>
+              </button>
+            </div>
             <div className="result-bar">
               <div className="result-title">
                 <h1>{searching ? "检索结果" : "全部素材"}</h1>
@@ -318,7 +326,7 @@ export default function App() {
                 selectedId={selectedId}
               />
             ) : !items.isPending && !items.isError && list.length === 0 ? (
-              <EmptyState />
+              <EmptyState onAdd={() => setImportOpen(true)} />
             ) : (
               <ItemGrid
                 items={list}
@@ -353,8 +361,20 @@ export default function App() {
         status={status}
         version={state.status === "ready" ? state.app.version : null}
         pipeline={pipeline}
+        onOpenImports={() => setImportOpen(true)}
       />
       {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} />}
+      {importOpen && (
+        <ImportDialog
+          searching={searching}
+          onShowAll={() => {
+            setActiveTag(null);
+            setQuery("");
+            setImportOpen(false);
+          }}
+          onClose={() => setImportOpen(false)}
+        />
+      )}
       <ToastViewport />
     </div>
   );

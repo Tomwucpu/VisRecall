@@ -1,5 +1,6 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { QueryClient } from "@tanstack/react-query";
+import type { ImportTaskDto, ImportTaskEntryDto } from "./api";
 import { queryClient, queryKeys } from "./queryClient";
 
 /**
@@ -23,7 +24,9 @@ type EventName =
   | "item_indexed"
   | "item_enriched"
   | "pipeline_status"
-  | "semantic_status";
+  | "semantic_status"
+  | "import_task_progress"
+  | "import_task_finished";
 
 /** 需要重置列表的事件（分页状态一并丢弃）。 */
 const LIST_EVENTS = [
@@ -55,6 +58,8 @@ const ALL_EVENTS: EventName[] = [
   "item_enriched",
   "pipeline_status",
   "semantic_status",
+  "import_task_progress",
+  "import_task_finished",
 ];
 
 function itemIdOf(payload: unknown): string | null {
@@ -65,6 +70,29 @@ function itemIdOf(payload: unknown): string | null {
     }
   }
   return null;
+}
+
+/**
+ * 终态事件里的任务快照与失败明细。
+ *
+ * 导入任务一进终态就被删除（库里不留导入历史），所以 `import_task_finished`
+ * 是拿到最终计数与失败原因的唯一来源，不能再靠回查任务。
+ */
+function finishedTaskOf(
+  payload: unknown,
+): { task: ImportTaskDto; failures: ImportTaskEntryDto[] } | null {
+  if (typeof payload !== "object" || payload === null) {
+    return null;
+  }
+  const task = (payload as { task?: unknown }).task;
+  if (typeof task !== "object" || task === null) {
+    return null;
+  }
+  const failures = (payload as { failures?: unknown }).failures;
+  return {
+    task: task as ImportTaskDto,
+    failures: Array.isArray(failures) ? (failures as ImportTaskEntryDto[]) : [],
+  };
 }
 
 function phaseOf(payload: unknown): string | null {
@@ -108,6 +136,28 @@ function subscribe(names: readonly EventName[], client: QueryClient): () => void
 
   const handle = (name: EventName, payload: unknown) => {
     if (disposed) {
+      return;
+    }
+
+    if (name === "import_task_progress") {
+      const id = itemIdOf(payload);
+      if (id !== null) void client.invalidateQueries({ queryKey: queryKeys.importTask(id) });
+      void client.invalidateQueries({ queryKey: queryKeys.importTasks });
+      return;
+    }
+
+    if (name === "import_task_finished") {
+      // 终态任务行已被删除：直接把事件快照写进缓存，失效重取只会拿到 404。
+      const finished = finishedTaskOf(payload);
+      if (finished !== null) {
+        client.setQueryData(queryKeys.importTask(finished.task.id), finished.task);
+        client.setQueryData([...queryKeys.importTask(finished.task.id), "failures"], {
+          entries: finished.failures,
+          nextCursor: null,
+        });
+      }
+      void client.invalidateQueries({ queryKey: queryKeys.importTasks });
+      void client.invalidateQueries({ queryKey: queryKeys.importSources });
       return;
     }
 

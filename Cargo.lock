@@ -5719,6 +5719,7 @@ dependencies = [
  "visrecall-app-core",
  "visrecall-capture",
  "visrecall-domain",
+ "visrecall-library",
  "windows",
 ]
 
@@ -5815,6 +5816,7 @@ dependencies = [
 name = "visrecall-library"
 version = "0.1.0"
 dependencies = [
+ "encoding_rs",
  "jieba-rs",
  "rusqlite",
  "serde",

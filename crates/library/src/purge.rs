@@ -87,12 +87,14 @@ impl Library {
             // insights 与向量表靠 `items` 的 ON DELETE CASCADE 清空。
             for sql in [
                 "DELETE FROM jobs",
+                "DELETE FROM import_tasks",
                 "DELETE FROM queries",
                 "DELETE FROM items_fts",
                 "DELETE FROM item_tags",
                 "DELETE FROM tag_suppressions",
                 "DELETE FROM tags",
                 "DELETE FROM items",
+                "DELETE FROM import_sources",
             ] {
                 tx.execute(sql, []).map_err(crate::db::db_error)?;
             }

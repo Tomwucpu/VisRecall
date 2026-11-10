@@ -82,7 +82,7 @@ impl From<visrecall_domain::Item> for ItemDto {
         let thumb_url = item
             .thumb_path
             .as_ref()
-            .map(|_| format!("visrecall://thumb/{}", item.id));
+            .map(|_| format!("visrecall://thumb/{}?rev={}", item.id, item.revision));
         ItemDto {
             id: item.id,
             kind: kind_str(item.kind).to_string(),
@@ -376,6 +376,17 @@ pub struct DetailExtrasDto {
     /// 图片素材的原图协议 URL；文本/链接为 `None`。
     pub original_url: Option<String>,
     pub tags: Vec<TagChipDto>,
+    pub reference: Option<ReferenceInfoDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferenceInfoDto {
+    pub source_id: String,
+    pub source_path: String,
+    pub relative_path: String,
+    pub status: String,
+    pub last_indexed_at: Option<i64>,
 }
 
 /// 详情聚合结果。
@@ -407,6 +418,7 @@ impl From<visrecall_app_core::ItemDetail> for ItemDetailDto {
                     .into_iter()
                     .map(TagChipDto::from)
                     .collect(),
+                reference: None,
             },
         }
     }
@@ -569,9 +581,27 @@ fn capture_failed_tooltip(code: &str, message: &str) -> String {
 #[specta::specta]
 pub async fn get_item_ext(app: tauri::AppHandle, id: String) -> Result<ItemDetailDto, ApiError> {
     run_blocking(app, move |core| {
-        core.detail(&id)
+        let mut detail = core
+            .detail(&id)
             .map(ItemDetailDto::from)
-            .map_err(|err| ApiError::from(&err))
+            .map_err(|err| ApiError::from(&err))?;
+        let library = core.library().map_err(ApiError::from)?;
+        if let Some(asset) = library
+            .external_asset_for_item(&id)
+            .map_err(|err| ApiError::from(&err))?
+        {
+            let source = library
+                .get_import_source(&asset.source_id)
+                .map_err(|err| ApiError::from(&err))?;
+            detail.extras.reference = Some(ReferenceInfoDto {
+                source_id: asset.source_id,
+                source_path: source.map(|source| source.root_path).unwrap_or_default(),
+                relative_path: asset.relative_path,
+                status: asset.source_status,
+                last_indexed_at: asset.indexed_at,
+            });
+        }
+        Ok(detail)
     })
     .await
 }
@@ -1089,7 +1119,24 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             model_probe,
             get_model_config,
             set_model_config,
-            embedding_rebuild
+            embedding_rebuild,
+            crate::import_ipc::pick_import_files,
+            crate::import_ipc::pick_import_directory,
+            crate::import_ipc::discard_import_selection,
+            crate::import_ipc::start_file_import,
+            crate::import_ipc::create_text_item,
+            crate::import_ipc::scan_import_directory,
+            crate::import_ipc::start_directory_import,
+            crate::import_ipc::get_import_task,
+            crate::import_ipc::list_import_tasks,
+            crate::import_ipc::list_import_task_entries,
+            crate::import_ipc::cancel_import_task,
+            crate::import_ipc::list_import_sources,
+            crate::import_ipc::refresh_import_source,
+            crate::import_ipc::relocate_import_source,
+            crate::import_ipc::remove_import_source,
+            crate::import_ipc::open_reference_file,
+            crate::import_ipc::set_import_drop_target
         ])
         // 前端用 try/catch 处理 `ApiError`，而不是每处解包 `{ status }`。
         .error_handling(tauri_specta::ErrorHandlingMode::Throw)
@@ -1124,7 +1171,7 @@ pub fn export_bindings(builder: &tauri_specta::Builder<tauri::Wry>) -> Result<()
 ///
 /// SQLite 查询与配置落盘（`save_atomic` + `sync_all`）都是同步 IO，既不能跑在
 /// Tauri 主线程（架构 §3），也会拖住 async worker，所以统一丢给 blocking 线程池。
-async fn run_blocking<T, F>(app: tauri::AppHandle, work: F) -> Result<T, ApiError>
+pub(crate) async fn run_blocking<T, F>(app: tauri::AppHandle, work: F) -> Result<T, ApiError>
 where
     T: Send + 'static,
     F: FnOnce(&AppCore) -> Result<T, ApiError> + Send + 'static,
@@ -1335,7 +1382,7 @@ mod tests {
         };
         assert_eq!(
             ItemDto::from(with_thumb).thumb_url.as_deref(),
-            Some("visrecall://thumb/id-1")
+            Some("visrecall://thumb/id-1?rev=0")
         );
     }
 

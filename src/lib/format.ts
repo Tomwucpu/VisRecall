@@ -12,6 +12,10 @@ type AssetKind = "thumb" | "original";
  * 编码成 `%3A`/`%2F`，协议处理器就只看到一段路径了。所以这里只交给它固定的
  * 资源类别段，再由自己拼 `/<id>`。非本协议的 URL（含已转换过的地址）原样返回，
  * 因此转换是幂等的。
+ *
+ * 后端会在 id 后面追加缓存失效参数（列表 `?rev=N`、原图 `?revision=N`）。查询串
+ * 必须留在 `?` 之后原样拼接：一旦跟着 id 一起被编码成 `%3Frev%3D0`，协议处理器
+ * 拿到的 id 就带百分号，会按非法 id 直接返回 400（图片因此加载失败）。
  */
 function toAssetSrc(url: string | null, kind: AssetKind): string | null {
   if (!url) {
@@ -21,8 +25,11 @@ function toAssetSrc(url: string | null, kind: AssetKind): string | null {
   if (!url.startsWith(prefix)) {
     return url;
   }
-  const id = url.slice(prefix.length);
-  return `${convertFileSrc(kind, ASSET_SCHEME)}/${encodeURIComponent(id)}`;
+  const rest = url.slice(prefix.length);
+  const suffixAt = rest.search(/[?#]/);
+  const id = suffixAt === -1 ? rest : rest.slice(0, suffixAt);
+  const query = suffixAt === -1 ? "" : rest.slice(suffixAt);
+  return `${convertFileSrc(kind, ASSET_SCHEME)}/${encodeURIComponent(id)}${query}`;
 }
 
 /** `ItemDto.thumbUrl`（`visrecall://thumb/<id>`）→ WebView 可加载的缩略图地址。 */

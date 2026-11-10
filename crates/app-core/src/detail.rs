@@ -67,7 +67,14 @@ pub fn load_detail(library: &Library, id: &str) -> Result<ItemDetail, AppError> 
 
     let body_text = read_body_text(library, &item);
     let original_url = match item.kind {
-        ItemKind::Image => Some(format!("{ORIGINAL_URL_PREFIX}{}", item.id)),
+        ItemKind::Image => {
+            let suffix = if library.external_asset_for_item(&item.id)?.is_some() {
+                format!("?revision={}", item.revision)
+            } else {
+                String::new()
+            };
+            Some(format!("{ORIGINAL_URL_PREFIX}{}{suffix}", item.id))
+        }
         ItemKind::Text | ItemKind::Link => None,
     };
 
@@ -97,8 +104,9 @@ pub fn read_body_text(library: &Library, item: &Item) -> Option<String> {
     if item.kind != ItemKind::Text {
         return None;
     }
-    let path = library.root().join(&item.original_path);
-    let text = fs::read_to_string(path).ok()?;
+    let text = visrecall_library::AssetReader::new(library)
+        .read_text(&item.id, u64::MAX)
+        .ok()?;
     Some(truncate_body(&text))
 }
 
@@ -137,6 +145,17 @@ pub fn read_preview(library: &Library, item: &Item) -> Option<String> {
 /// 读文本文件头部；非 UTF-8 按「不可预览」处理，与详情 `body_text` 的口径一致
 /// （详情也不会猜 GBK 编码，避免卡片上出现一段乱码）。
 fn read_head_text(library: &Library, item: &Item) -> Option<String> {
+    if library
+        .external_asset_for_item(&item.id)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        let text = visrecall_library::AssetReader::new(library)
+            .read_text(&item.id, u64::MAX)
+            .ok()?;
+        return Some(text.chars().take(PREVIEW_CHARS).collect());
+    }
     let path = library.root().join(&item.original_path);
     let mut file = fs::File::open(path).ok()?;
     let mut buf = Vec::with_capacity(PREVIEW_MAX_BYTES);

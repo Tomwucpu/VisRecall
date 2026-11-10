@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { resetToasts } from "../../lib/toast";
+import type { ItemDetail } from "../../lib/api";
 import { ToastViewport } from "../shell/ToastViewport";
 import type { ItemCardData } from "../library/ItemCard";
 import { DetailPanel } from "./DetailPanel";
@@ -20,13 +21,14 @@ const commands = vi.hoisted(() => {
       height: 800,
       charCount: null as number | null,
       note: "",
-      thumbUrl: "visrecall://thumb/1",
+      thumbUrl: "visrecall://thumb/1" as string | null,
     },
     extras: {
       summary: null as string | null,
       bodyText: null as string | null,
       originalUrl: "visrecall://original/abc123" as string | null,
       tags: [] as { id: string; name: string; auto: boolean; hue: string | null; itemCount: number }[],
+      reference: null as ItemDetail["extras"]["reference"],
     },
   }));
 
@@ -39,7 +41,33 @@ const commands = vi.hoisted(() => {
     tagAdd: vi.fn(async () => ({ id: "t1", name: "work", auto: false, hue: null, itemCount: 1 })),
     tagDetach: vi.fn(async () => undefined),
     tagsList: vi.fn(async () => []),
+    openReferenceFile: vi.fn(async () => null),
   };
+});
+
+test("shows reference provenance and opens the original without copying it", async () => {
+  commands.getItemExt.mockResolvedValueOnce({
+    item: {
+      id: "abc123", kind: "image", status: "ready", capturedAt: 1_700_000_000_000,
+      sourceApp: "VisRecall", sourceTitle: "引用.png", sourceUrl: null,
+      width: 800, height: 600, charCount: null, note: "", thumbUrl: null,
+    },
+    extras: {
+      summary: null, bodyText: null, originalUrl: null, tags: [],
+      reference: {
+        sourceId: "source-1", sourcePath: "D:\\素材", relativePath: "目录\\引用.png",
+        status: "available", lastIndexedAt: 1_700_000_000_000,
+      },
+    },
+  });
+  renderPanel(<DetailPanel item={item} onClose={() => {}} />);
+  expect(await screen.findByText("引用文件")).toBeInTheDocument();
+  expect(screen.getByText("D:\\素材")).toBeInTheDocument();
+  expect(screen.getByText("目录\\引用.png")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "打开原文件" }));
+  await waitFor(() => expect(commands.openReferenceFile).toHaveBeenCalledWith("abc123", false));
+  fireEvent.click(screen.getByRole("button", { name: "打开所在目录" }));
+  await waitFor(() => expect(commands.openReferenceFile).toHaveBeenCalledWith("abc123", true));
 });
 
 vi.mock("../../lib/bindings", () => ({ commands }));
@@ -72,7 +100,7 @@ afterEach(() => {
 test("shows the AI summary placeholder and keeps copy disabled", async () => {
   renderPanel(<DetailPanel item={item} onClose={() => {}} />);
 
-  expect(await screen.findByText("待解析（阶段 03 提供）")).toBeInTheDocument();
+  expect(await screen.findByText("待解析")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "复制" })).toBeDisabled();
   expect(screen.getByRole("button", { name: "复制原图" })).toBeEnabled();
 });
@@ -266,6 +294,7 @@ test("removes a tag through tag_detach without editing the local array", async (
       bodyText: null,
       originalUrl: "visrecall://original/abc123",
       tags: [{ id: "t1", name: "work", auto: false, hue: "jade", itemCount: 3 }],
+      reference: null,
     },
   });
   renderPanel(<DetailPanel item={item} onClose={() => {}} />);

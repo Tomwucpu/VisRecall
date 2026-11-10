@@ -140,11 +140,20 @@ test("maps dto thumb url to a custom-protocol address", () => {
   expect(toThumbSrc("visrecall://thumb/abc")).toBe("http://visrecall.localhost/thumb/abc");
   expect(toThumbSrc(null)).toBeNull();
   expect(toThumbSrc("http://example.test/a.png")).toBe("http://example.test/a.png");
+  // 后端会给缩略图 URL 追加 `?rev=N`；查询串须原样保留在 `?` 之后，
+  // 不能跟着 id 一起被编码（否则协议处理器按非法 id 返回 400，图片加载失败）。
+  expect(toThumbSrc("visrecall://thumb/abc123?rev=2")).toBe(
+    "http://visrecall.localhost/thumb/abc123?rev=2",
+  );
 });
 
 test("maps the original protocol url to a loadable address", () => {
   expect(toOriginalSrc("visrecall://original/abc123")).toBe(
     "http://visrecall.localhost/original/abc123",
+  );
+  // 外部素材的原图 URL 带 `?revision=N`，同样要保留查询串、只编码 id。
+  expect(toOriginalSrc("visrecall://original/abc123?revision=3")).toBe(
+    "http://visrecall.localhost/original/abc123?revision=3",
   );
   expect(toOriginalSrc(null)).toBeNull();
   expect(toOriginalSrc("https://example.test/a.png")).toBe("https://example.test/a.png");

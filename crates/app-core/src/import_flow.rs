@@ -135,6 +135,61 @@ impl ImportFlow {
         }
     }
 
+    /// 主窗口手动选择或弹窗拖放导入；来源不再猜测当前前台窗口。
+    pub fn import_manual_file(&self, path: &Path) -> Result<Item, AppError> {
+        let source = Source {
+            app: Some("VisRecall".into()),
+            title: Some("手动导入".into()),
+        };
+        match FileKind::of(path) {
+            Ok(FileKind::Image) => self.import_image_file(path, &source, None),
+            Ok(FileKind::Text) => self.import_text_file(path, &source),
+            Err(failure) => Err(failure),
+        }
+        .map_err(|failure| failure.error)
+    }
+
+    /// 创建明确的手动文字素材，正文像 URL 时也保持文本类型。
+    pub fn create_text_item(
+        &self,
+        title: Option<&str>,
+        body: &str,
+        tags: &[String],
+    ) -> Result<Item, AppError> {
+        let chars = body.chars().count();
+        if body.trim().is_empty() {
+            return Err(AppError::InvalidInput("正文不能为空".into()));
+        }
+        if chars > MAX_SNIPPET_CHARS {
+            return Err(AppError::InvalidInput(format!(
+                "文字最多 {MAX_SNIPPET_CHARS} 字符，当前为 {chars}"
+            )));
+        }
+        let title = title
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| snippet_title(body));
+        let source = Source {
+            app: Some("VisRecall".into()),
+            title: Some("新建文字".into()),
+        };
+        let item = self
+            .persist_text(body, title, &source)
+            .map_err(|failure| failure.error)?;
+        for tag in tags {
+            if let Err(err) = self.library.tag_add(&item.id, tag) {
+                warn!(id = %item.id, error = %err, "手动文字标签保存失败");
+            }
+        }
+        self.emit_created(&[item.clone()]);
+        Ok(item)
+    }
+
+    pub fn emit_item_created(&self, item: &Item) {
+        self.emit_created(std::slice::from_ref(item));
+    }
+
     /// 悬浮球拒绝了一次拖放（无数据/不支持）：发 `capture_failed { DROP_REJECTED }`。
     pub fn emit_rejected(&self, message: &str) {
         self.emit_failed("DROP_REJECTED", message);
@@ -631,6 +686,11 @@ fn decode_text(bytes: &[u8]) -> String {
             .unwrap_or_else(|_| decode_without_bom(bytes)),
         _ => decode_without_bom(bytes),
     }
+}
+
+/// 目录引用建立元数据时复用同一套文本解码规则。
+pub fn decode_imported_text(bytes: &[u8]) -> String {
+    decode_text(bytes)
 }
 
 /// 去掉解码后残留的 U+FEFF（重复 BOM 或编码声明错误时可能出现）。

@@ -6,12 +6,37 @@
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
+use visrecall_library::{ImportTask, ImportTaskEntry};
 
 /// `item_created` 载荷。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemEvent {
     pub id: String,
+}
+
+/// 导入任务进度事件只携带 ID，计数由前端重新查询数据库。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportTaskEvent {
+    pub id: String,
+}
+
+/// 终态事件最多带出的失败明细条数：任务行随后即删，前端不会再查得到。
+pub const MAX_FINISHED_FAILURES: usize = 100;
+
+/// `import_task_finished` 载荷。
+///
+/// 导入任务进入终态后立即删除任务行（库里不保留导入历史），因此终态计数与失败
+/// 明细必须随事件带出；前端用快照渲染结果，不再回查已删除的任务。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportTaskFinishedEvent {
+    pub id: String,
+    /// 终态快照；任务行读取失败时为 `None`（前端仅按 ID 失效缓存）。
+    pub task: Option<ImportTask>,
+    /// 失败条目；无失败为空数组。
+    pub failures: Vec<ImportTaskEntry>,
 }
 
 /// `item_updated` 载荷；`fields` 为本次变更字段名。
@@ -101,6 +126,8 @@ impl MigrationProgressEvent {
 /// 阶段 01 + 阶段 02 的事件集合；后续任务只增字段/变体，不改已有名字。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppEvent {
+    ImportTaskProgress(ImportTaskEvent),
+    ImportTaskFinished(ImportTaskFinishedEvent),
     ItemCreated(ItemEvent),
     ItemUpdated(ItemUpdatedEvent),
     CaptureFailed(CaptureFailedEvent),
@@ -138,6 +165,8 @@ impl AppEvent {
     /// 前端订阅的事件名（snake_case，与 design §11.2 一致）。
     pub fn name(&self) -> &'static str {
         match self {
+            AppEvent::ImportTaskProgress(_) => "import_task_progress",
+            AppEvent::ImportTaskFinished(_) => "import_task_finished",
             AppEvent::ItemCreated(_) => "item_created",
             AppEvent::ItemUpdated(_) => "item_updated",
             AppEvent::CaptureFailed(_) => "capture_failed",
@@ -162,6 +191,8 @@ impl AppEvent {
     /// 事件的 JSON 载荷，交给 shell 层序列化发送。
     pub fn payload(&self) -> serde_json::Value {
         match self {
+            AppEvent::ImportTaskProgress(payload) => json(payload),
+            AppEvent::ImportTaskFinished(payload) => json(payload),
             AppEvent::ItemCreated(payload) => json(payload),
             AppEvent::ItemUpdated(payload) => json(payload),
             AppEvent::CaptureFailed(payload) => json(payload),

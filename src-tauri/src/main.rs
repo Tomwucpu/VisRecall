@@ -1,6 +1,7 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod import_ipc;
 mod ipc;
 mod protocol;
 mod tray;
@@ -32,6 +33,12 @@ fn main() {
     }
 
     let app = tauri::Builder::default()
+        .manage(import_ipc::ImportSelectionState::default())
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::DragDrop(event) = event {
+                import_ipc::handle_drag_drop(window, event.clone());
+            }
+        })
         // 单实例插件必须第一个注册：第二进程在创建任何窗口前退出并唤醒已有实例。
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             tracing::info!("second instance detected; showing main window");

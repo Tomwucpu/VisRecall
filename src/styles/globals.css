@@ -22,6 +22,7 @@
 @import "./dialogs.css";
 @import "./search.css";
 @import "./models.css";
+@import "./import.css";
 
 /* 默认窗口 1100：详情列收窄到 320（原型窄窗取值），主区才放得下两列卡片。
    覆盖 `--dw` 而不是 `width`：列的宽度与 flex-basis 都读这个变量。 */

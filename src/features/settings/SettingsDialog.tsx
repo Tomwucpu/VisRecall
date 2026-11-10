@@ -7,15 +7,17 @@ import { errorMessage } from "../../lib/errors";
 import { pushToast } from "../../lib/toast";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { ModelSettingsPane } from "./ModelSettingsPane";
+import { ImportSourcesPane } from "./ImportSourcesPane";
 
 type Props = {
   onClose: () => void;
 };
 
-type PaneId = "capture" | "storage" | "models";
+type PaneId = "capture" | "sources" | "storage" | "models";
 
 const PANE_META: Record<PaneId, { title: string; sub: string }> = {
   capture: { title: "捕获", sub: "快捷键 · 悬浮球" },
+  sources: { title: "导入目录", sub: "引用 · 同步 · 重新定位" },
   storage: { title: "存储", sub: "位置 · 容量 · 保留策略" },
   models: { title: "模型", sub: "自定义模型与协议" },
 };
@@ -374,6 +376,8 @@ export function SettingsDialog({ onClose }: Props) {
           <div className="modal-content">
             {pane === "models" ? (
               <ModelSettingsPane />
+            ) : pane === "sources" ? (
+              <ImportSourcesPane />
             ) : pane === "capture" ? (
               <div className="pane">
                 <p className="pane-desc">

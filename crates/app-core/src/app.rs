@@ -210,6 +210,11 @@ impl AppCore {
 
         let library = match Library::open(library_path.clone()) {
             Ok(library) => {
+                // 异常退出留下的导入任务直接丢弃：导入历史不入库，重启后也不自动
+                // 扫描或触发云端分析。
+                if let Err(err) = library.discard_unfinished_import_tasks() {
+                    tracing::warn!(error = %err, "failed to discard unfinished import tasks");
+                }
                 match library.recover_jobs() {
                     Ok(0) => {}
                     Ok(count) => {
@@ -346,6 +351,47 @@ impl AppCore {
     /// 事件发送端，供后续任务（捕获流程）复用。
     pub fn sink(&self) -> &Arc<dyn EventSink> {
         &self.sink
+    }
+
+    /// 长时间导入任务需要在线程间共享同一个库连接。
+    pub fn library_arc(&self) -> Result<Arc<Library>, AppError> {
+        match &self.library {
+            Ok(library) => Ok(Arc::clone(library)),
+            Err(_) => Err(AppError::ConfigMissing),
+        }
+    }
+
+    fn manual_import_flow(&self) -> Result<ImportFlow, AppError> {
+        Ok(ImportFlow::new(
+            self.library_arc()?,
+            Arc::new(Win32WindowProbe),
+            Arc::clone(&self.sink),
+        ))
+    }
+
+    pub fn import_files(&self, paths: &[PathBuf]) -> Result<crate::FileImportReport, AppError> {
+        crate::ImportService::new(Arc::new(self.manual_import_flow()?)).import_files(paths)
+    }
+
+    pub fn inspect_import_files(paths: &[PathBuf]) -> Vec<crate::ImportFileSummary> {
+        crate::ImportService::inspect(paths)
+    }
+
+    pub fn create_text_item(
+        &self,
+        title: Option<&str>,
+        body: &str,
+        tags: &[String],
+    ) -> Result<visrecall_domain::Item, AppError> {
+        self.manual_import_flow()?
+            .create_text_item(title, body, tags)
+    }
+
+    pub fn directory_imports(&self) -> Result<crate::DirectoryImportService, AppError> {
+        Ok(crate::DirectoryImportService::new(
+            self.library_arc()?,
+            Arc::clone(&self.sink),
+        ))
     }
 
     /// 启动捕获运行时：悬浮球线程 → 覆盖层线程 → ShellEvent 通道 → 捕获循环线程。
@@ -658,7 +704,11 @@ impl AppCore {
 
     /// 单条彻底删除；成功后发 `item_deleted`。
     pub fn delete_item(&self, id: &str) -> Result<(), AppError> {
-        self.library_required()?.delete_item(id)?;
+        let library = self.library_required()?;
+        if let Some(asset) = library.external_asset_for_item(id)? {
+            library.exclude_source_path(&asset.source_id, &asset.relative_path)?;
+        }
+        library.delete_item(id)?;
         self.sink
             .emit(AppEvent::ItemDeleted(ItemEvent { id: id.to_string() }));
         Ok(())
@@ -814,13 +864,8 @@ impl AppCore {
                 visrecall_shell::clipboard::copy_image_png(&bytes)
             }
             ItemKind::Text => {
-                let path = library.root().join(&item.original_path);
-                let text = fs::read_to_string(&path).map_err(|err| match err.kind() {
-                    std::io::ErrorKind::NotFound => {
-                        AppError::FileMissing(item.original_path.clone())
-                    }
-                    _ => AppError::Io(format!("read {}: {err}", item.original_path)),
-                })?;
+                let text = visrecall_library::AssetReader::new(library)
+                    .read_text(item_id, crate::import_flow::MAX_TEXT_BYTES)?;
                 visrecall_shell::clipboard::copy_text(&text)
             }
             ItemKind::Link => match item.source_url.as_deref() {

@@ -2,7 +2,7 @@
 //! search document → 嵌入 → **同事务**写 insights + FTS + 向量 → `item_indexed`。
 
 use visrecall_domain::vector_math::quantize_i8;
-use visrecall_domain::{now_millis, AppError, Insight, Item, ItemKind};
+use visrecall_domain::{now_millis, AppError, Insight, Item, ItemKind, ItemStatus};
 use visrecall_library::{fts_upsert_tx, insight_upsert_tx, vector_upsert_tx, FtsColumns, Library};
 use visrecall_search::document::{build_search_document, DocumentFields};
 use visrecall_search::tokenizer::tokenize_for_fts;
@@ -107,6 +107,11 @@ pub(crate) fn run_for(ctx: &JobCtx<'_>) -> Result<(), AppError> {
 
     // 此刻起三路可检索；`status` 仍是 parsing（阶段二才置 ready）
     ctx.events.item_indexed(&item.id);
+    // 未授权云端 AI 的目录引用在本地索引完成后即可使用，不能一直停留在 parsing。
+    if !ctx.library.cloud_ai_allowed(&item.id)? {
+        ctx.library
+            .update_status(&item.id, ItemStatus::Ready, None)?;
+    }
     Ok(())
 }
 

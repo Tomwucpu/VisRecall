@@ -5,8 +5,10 @@
 pub mod app;
 pub mod capture_flow;
 pub mod detail;
+pub mod directory_import;
 pub mod events;
 pub mod import_flow;
+pub mod import_service;
 pub mod pipeline_host;
 pub mod search_flow;
 pub mod storage_flow;
@@ -23,11 +25,17 @@ pub use capture_flow::{
 pub use detail::{
     load_detail, read_preview, DetailExtras, ItemDetail, BODY_TEXT_LIMIT, PREVIEW_CHARS,
 };
+pub use directory_import::{
+    finish_import_task, DirectoryImportService, DirectoryScanOptions, ALREADY_IMPORTED,
+    MAX_DIRECTORY_DEPTH, MAX_DIRECTORY_FILES,
+};
 pub use events::{
-    AppEvent, AppRecoveredEvent, CaptureFailedEvent, EventSink, HotkeyConflictEvent, ItemEvent,
-    ItemUpdatedEvent, NullEventSink, PipelineStatusEvent, RecordingSink, SemanticStatusEvent,
+    AppEvent, AppRecoveredEvent, CaptureFailedEvent, EventSink, HotkeyConflictEvent,
+    ImportTaskEvent, ImportTaskFinishedEvent, ItemEvent, ItemUpdatedEvent, NullEventSink,
+    PipelineStatusEvent, RecordingSink, SemanticStatusEvent, MAX_FINISHED_FAILURES,
 };
 pub use import_flow::ImportFlow;
+pub use import_service::{FileImportReport, ImportFileSummary, ImportService};
 pub use pipeline_host::{
     start_pipeline, ProviderRegistry, RoutedText, RoutedVision, StartedPipeline,
 };

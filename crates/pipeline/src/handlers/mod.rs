@@ -17,7 +17,7 @@ pub use vlm::VlmHandler;
 
 use visrecall_domain::insight::{Insight, SummarySource};
 use visrecall_domain::{AppError, Item, ItemKind};
-use visrecall_library::Library;
+use visrecall_library::{AssetReader, Library};
 
 /// 占位摘要长度（OCR 摘录 / 原文摘录）。
 pub const PLACEHOLDER_CHARS: usize = 280;
@@ -26,14 +26,12 @@ pub const ORIGINAL_TEXT_LIMIT: usize = 10_000;
 
 /// 读原图/原文文件的字节。
 pub(crate) fn read_original_bytes(library: &Library, item: &Item) -> Result<Vec<u8>, AppError> {
-    let path = library.resolve_existing_or_join(&item.original_path)?;
-    std::fs::read(&path).map_err(|_| AppError::FileMissing(item.original_path.clone()))
+    AssetReader::new(library).read_bytes(&item.id, u64::MAX)
 }
 
 /// 读文本素材原文（截到 [`ORIGINAL_TEXT_LIMIT`] 字符）。
 pub(crate) fn read_original_text(library: &Library, item: &Item) -> Result<String, AppError> {
-    let bytes = read_original_bytes(library, item)?;
-    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let text = AssetReader::new(library).read_text(&item.id, u64::MAX)?;
     Ok(first_chars(&text, ORIGINAL_TEXT_LIMIT))
 }
 

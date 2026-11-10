@@ -26,6 +26,7 @@ pub const ORIGINAL_PREFIX: &str = "original";
 
 /// 缩略图内容按素材 id 命名、生成后不再变化：一年的 `immutable` 长缓存。
 const CACHE_IMMUTABLE: &str = "public, max-age=31536000, immutable";
+const CACHE_REVALIDATE: &str = "no-cache";
 
 /// 只读方法；其他方法一律 405（协议只提供图片，不接受写入）。
 const ALLOWED_METHODS: &str = "GET, HEAD";
@@ -172,10 +173,20 @@ fn asset_response(library: Option<&Library>, method: &Method, path: &str) -> Res
             response
                 .headers_mut()
                 .insert(CONTENT_TYPE, HeaderValue::from_static(mime));
-            // 资产按素材 id 命名、入库后不再变化（design §11.3）。
+            let cache = if library
+                .external_asset_for_item(item_id)
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                CACHE_REVALIDATE
+            } else {
+                CACHE_IMMUTABLE
+            };
+            // 引用原件可能变化，必须重新校验；托管资产仍按 ID 长缓存。
             response
                 .headers_mut()
-                .insert(CACHE_CONTROL, HeaderValue::from_static(CACHE_IMMUTABLE));
+                .insert(CACHE_CONTROL, HeaderValue::from_static(cache));
             response
         }
         Err(AppError::InvalidInput(_)) => error_response(ProtocolError::BadRequest),

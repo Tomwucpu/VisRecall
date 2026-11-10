@@ -1,5 +1,7 @@
-/** 空库引导：告诉用户怎么产生第一条素材。 */
-export function EmptyState() {
+type Props = { onAdd: () => void };
+
+/** 空库引导与常驻入口打开同一个添加弹窗。 */
+export function EmptyState({ onAdd }: Props) {
   return (
     <section className="empty">
       <div className="mark">
@@ -18,6 +20,7 @@ export function EmptyState() {
         </svg>
       </div>
       <h3>还没有素材</h3>
+      <button type="button" className="btn primary" onClick={onAdd}>＋ 添加素材</button>
       <p>按 Ctrl+Shift+S 或点击悬浮球开始捕获</p>
       <p>也可以把图片文件拖到悬浮球上导入。</p>
     </section>

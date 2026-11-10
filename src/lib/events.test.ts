@@ -61,10 +61,53 @@ test("subscribes to every cache-affecting event", async () => {
     "item_enriched",
     "pipeline_status",
     "semantic_status",
+    "import_task_progress",
+    "import_task_finished",
   ]);
 
   cleanup();
-  expect(mocks.unlisten).toHaveBeenCalledTimes(14);
+  expect(mocks.unlisten).toHaveBeenCalledTimes(16);
+});
+
+test("import events refresh authoritative task and source queries", async () => {
+  const { client, invalidate } = makeClient();
+  const cleanup = subscribeAppEvents(client);
+  await flush();
+
+  emit("import_task_progress", { id: "task-1" });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["import-task", "task-1"] });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["import-tasks"] });
+  expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["import-sources"] });
+
+  emit("import_task_finished", { id: "task-1" });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["import-sources"] });
+  cleanup();
+});
+
+test("finished import tasks are cached from the event snapshot", async () => {
+  const { client } = makeClient();
+  const cleanup = subscribeAppEvents(client);
+  await flush();
+
+  const finished = {
+    id: "task-1", sourceId: null, kind: "files", status: "completed_with_errors",
+    totalCount: 1, processedCount: 1, succeededCount: 0, skippedCount: 0,
+    failedCount: 1, originalBytes: 12, cancelRequested: false,
+    errorSummary: null, createdAt: 1, updatedAt: 2,
+  };
+  const failure = {
+    rowid: 1, entryKey: "0", relativePath: "a.txt", displayName: "a.txt", size: 12,
+    status: "failed", errorCode: "IMPORT_FAILED", errorMessage: "读取失败", itemId: null,
+  };
+  emit("import_task_finished", { id: "task-1", task: finished, failures: [failure] });
+
+  // 任务行在终态后已从库里删除，只能靠事件快照渲染结果。
+  expect(client.getQueryData(["import-task", "task-1"])).toEqual(finished);
+  expect(client.getQueryData(["import-task", "task-1", "failures"])).toEqual({
+    entries: [failure],
+    nextCursor: null,
+  });
+  cleanup();
 });
 
 test("list events reset the items query and refresh usage", async () => {

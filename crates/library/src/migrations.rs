@@ -21,6 +21,8 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_core.sql")),
     (2, include_str!("../migrations/0002_library_detail.sql")),
     (3, include_str!("../migrations/0003_ai_search.sql")),
+    (4, include_str!("../migrations/0004_import_references.sql")),
+    (5, include_str!("../migrations/0005_drop_import_history.sql")),
 ];
 
 const MIGRATIONS_TABLE: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (\n  version INTEGER PRIMARY KEY,\n  applied_at INTEGER NOT NULL\n)";

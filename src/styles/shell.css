@@ -180,3 +180,10 @@
   opacity: 0.8;
   flex: 0 0 auto;
 }
+
+.status-import {
+  padding: 0;
+  color: var(--hue-slate);
+  background: transparent;
+  font: inherit;
+}

@@ -149,6 +149,13 @@ pub fn load_original_bytes(
         )));
     }
 
+    if let Some(external) = library.external_asset_for_item(item_id)? {
+        let asset = visrecall_library::AssetReader::new(library).resolve(item_id)?;
+        let bytes = fs::read(&asset.path)
+            .map_err(|err| AppError::Io(format!("读取引用原图失败：{err}")))?;
+        return Ok((bytes, image_mime(&external.relative_path)));
+    }
+
     // 纵深防御：协议只服务原图，库里的路径再坏也不能读到 `texts/` 等其他库内文件。
     if !is_under_dir(&item.original_path, ORIGINAL_DIR) {
         return Err(AppError::InvalidInput(format!(
@@ -195,6 +202,7 @@ struct ThumbnailJob {
     sink: Arc<dyn EventSink>,
     item_id: String,
     original_path: String,
+    revision: i64,
 }
 
 /// 全局任务队列；首次派发时创建 worker（见 [`queue`]）。
@@ -246,11 +254,16 @@ pub fn spawn_thumbnail(
     item_id: String,
     original_path: String,
 ) -> Result<(), AppError> {
+    let revision = library
+        .get_item(&item_id)?
+        .ok_or(AppError::NotFound)?
+        .revision;
     let job = ThumbnailJob {
         library,
         sink,
         item_id,
         original_path,
+        revision,
     };
     queue()?
         .send(job)
@@ -278,6 +291,7 @@ fn run_job(job: &ThumbnailJob) {
             job.sink.as_ref(),
             &job.item_id,
             &job.original_path,
+            job.revision,
         )
     }));
 
@@ -307,7 +321,7 @@ fn run_job(job: &ThumbnailJob) {
 pub fn generate_for_item(library: &Library, sink: &dyn EventSink, item_id: &str) {
     match library.get_item(item_id) {
         Ok(Some(item)) if item.kind == ItemKind::Image => {
-            run_task(library, sink, item_id, &item.original_path)
+            run_task(library, sink, item_id, &item.original_path, item.revision)
         }
         Ok(Some(_)) => warn!(id = item_id, "item is not an image; no thumbnail"),
         Ok(None) => warn!(id = item_id, "item disappeared before thumbnailing"),
@@ -319,20 +333,42 @@ pub fn generate_for_item(library: &Library, sink: &dyn EventSink, item_id: &str)
 }
 
 /// 一张图的完整处理：读原图 → 写缩略图 → 写回状态 → 发事件。
-fn run_task(library: &Library, sink: &dyn EventSink, item_id: &str, original_path: &str) {
+fn run_task(
+    library: &Library,
+    sink: &dyn EventSink,
+    item_id: &str,
+    original_path: &str,
+    revision: i64,
+) {
+    // 刷新目录时同一素材会递增 revision，旧任务不得覆盖新内容的状态和预览。
+    if !revision_is_current(library, item_id, revision) {
+        return;
+    }
     match build_thumbnail(library, item_id, original_path) {
-        Ok(relative) => match library.update_status(item_id, ItemStatus::Ready, Some(&relative)) {
-            Ok(()) => {
-                info!(id = item_id, path = %relative, "thumbnail generated");
-                emit_updated(sink, item_id);
+        Ok(relative) if revision_is_current(library, item_id, revision) => {
+            match library.update_status(item_id, ItemStatus::Ready, Some(&relative)) {
+                Ok(()) => {
+                    info!(id = item_id, path = %relative, "thumbnail generated");
+                    emit_updated(sink, item_id);
+                }
+                Err(err) => report_status_failure(sink, item_id, "store the thumbnail path", &err),
             }
-            Err(err) => report_status_failure(sink, item_id, "store the thumbnail path", &err),
-        },
-        Err(err) => {
+        }
+        Ok(_) => {}
+        Err(err) if revision_is_current(library, item_id, revision) => {
             warn!(id = item_id, error = %err, "thumbnail generation failed; keeping the original");
             mark_failed(library, sink, item_id);
         }
+        Err(_) => {}
     }
+}
+
+fn revision_is_current(library: &Library, item_id: &str, revision: i64) -> bool {
+    library
+        .get_item(item_id)
+        .ok()
+        .flatten()
+        .is_some_and(|item| item.revision == revision)
 }
 
 /// 把素材标 `failed` 并发 `item_updated`（失败不删原图）。
@@ -364,13 +400,13 @@ fn build_thumbnail(
     item_id: &str,
     original_path: &str,
 ) -> Result<String, AppError> {
-    if original_path.is_empty() {
-        return Err(AppError::InvalidInput(format!(
-            "item {item_id} has no image to thumbnail"
-        )));
-    }
-
-    let source = library.relative_to_root(original_path)?;
+    let source = if original_path.is_empty() {
+        visrecall_library::AssetReader::new(library)
+            .resolve(item_id)?
+            .path
+    } else {
+        library.relative_to_root(original_path)?
+    };
     let relative = thumb_relative_path(item_id);
     let target = library.root().join(&relative);
     generate_thumbnail(&source, &target, THUMB_MAX_EDGE)?;
@@ -706,6 +742,7 @@ mod tests {
             sink: Arc::new(PanickingSink),
             item_id: id.to_string(),
             original_path: relative.to_string(),
+            revision: 0,
         };
         // `catch_unwind` 会打印 panic 信息；测试只关心兜底结果。
         // 与并发峰值断言互斥：这条 `run_job` 不走 worker 池，会让进程级峰值偏大。

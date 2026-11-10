@@ -4,12 +4,15 @@
 //! 文件落盘（图片/文本/缩略图）由上层编排调用 [`files`] 完成；本 crate 只负责元数据
 //! 与索引原语（FTS/向量/insights 的读写在各自模块里）。
 
+pub mod assets;
 pub mod cleanup;
 pub mod config;
 pub mod db;
 pub mod files;
 pub mod fts;
 pub mod hooks;
+pub mod import_sources;
+pub mod import_tasks;
 pub mod insights;
 pub mod items;
 pub mod jobs;
@@ -24,6 +27,7 @@ pub mod tags;
 pub mod vector_index;
 pub mod vectors;
 
+pub use assets::{validate_relative_path, AssetReader, ResolvedAsset};
 pub use cleanup::StartupCleanup;
 pub use config::{
     AppConfig, BallConfig, CaptureConfig, HotkeyConfig, ModelConfig, ModelEntry, PrivacyConfig,
@@ -32,6 +36,8 @@ pub use config::{
 pub use db::{IndexCounts, Library};
 pub use fts::{fts_delete_tx, fts_upsert_tx, FtsColumns, FtsHit};
 pub use hooks::MetadataHook;
+pub use import_sources::{ExternalAsset, ImportSource, NewImportSource, SourceStatus};
+pub use import_tasks::{ImportTask, ImportTaskEntry, ImportTaskStatus, NewImportTask};
 pub use insights::insight_upsert_tx;
 pub use jobs::{Job, JobState};
 pub use paths::{ensure_library_root, AppPaths, LibraryMeta};

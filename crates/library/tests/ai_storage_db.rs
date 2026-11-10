@@ -49,7 +49,7 @@ fn fts_cols() -> FtsColumns<'static> {
 }
 
 #[test]
-fn migration_0003_is_idempotent_and_creates_tables() {
+fn migrations_are_idempotent_and_create_tables() {
     let dir = tempfile::tempdir().unwrap();
     // 打开两次 = 两次 apply（第二次无待应用迁移）
     drop(Library::open(dir.path().to_path_buf()).unwrap());
@@ -67,7 +67,7 @@ fn migration_0003_is_idempotent_and_creates_tables() {
             "表 {table} 应存在"
         );
     }
-    assert_eq!(lib.max_schema_version_for_test().unwrap(), 3);
+    assert_eq!(lib.max_schema_version_for_test().unwrap(), 5);
 }
 
 #[test]
@@ -111,11 +111,11 @@ fn upgrading_from_0002_keeps_data_and_defaults_revision_to_zero() {
     assert_eq!(item.revision, 0, "旧数据升级后 revision 默认 0");
     assert!(item.primary_color.is_none());
 
-    // 迁移前备份存在（bak-3）
+    // 连续升级到最新版本后，按保留策略留下最新迁移前备份。
     let backups = dir.path().join("backups");
     assert!(
-        backups.join("visrecall.db.bak-3").is_file(),
-        "0002 → 0003 迁移前应留备份"
+        backups.join("visrecall.db.bak-5").is_file(),
+        "升级到 0005 前应留备份"
     );
 }
 
