@@ -274,7 +274,6 @@ impl Drop for BallHandle {
 pub fn spawn_ball_thread(config: BallConfig, events: Sender<ShellEvent>) -> BallHandle {
     let hwnd = Arc::new(AtomicIsize::new(0));
     let visible = Arc::new(AtomicBool::new(false));
-    let requested_size = config.size;
     let (ready_tx, ready_rx) = bounded::<Result<(), AppError>>(1);
 
     let thread_hwnd = Arc::clone(&hwnd);
@@ -286,7 +285,8 @@ pub fn spawn_ball_thread(config: BallConfig, events: Sender<ShellEvent>) -> Ball
 
     match spawned {
         Ok(_) => match ready_rx.recv_timeout(BALL_READY_TIMEOUT) {
-            Ok(Ok(())) => info!(size = requested_size, "floating ball thread started"),
+            // 成功路径由线程内的「floating ball window created」记录（含尺寸与位置）。
+            Ok(Ok(())) => {}
             Ok(Err(err)) => error!(error = %err, "floating ball unavailable"),
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => warn!(
                 timeout_ms = BALL_READY_TIMEOUT.as_millis() as u64,
@@ -1124,7 +1124,6 @@ fn release_ball(hwnd: HWND) {
             ny,
         },
     );
-    info!(display_id = %target.id, nx, ny, "floating ball moved");
 
     // 贴边判定与收起定时器交给状态机：`work_area` 用球所在显示器的工作区。
     let now = now_ms(hwnd);

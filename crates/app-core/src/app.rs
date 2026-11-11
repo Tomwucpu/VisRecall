@@ -564,7 +564,6 @@ impl AppCore {
         };
 
         *self.lock_hotkey() = Some(handle);
-        tracing::info!(hotkey = %spec, "capture hotkey started");
         Ok(())
     }
 
@@ -1059,7 +1058,6 @@ impl AppCore {
             let old = self.lock_hotkey().replace(handle);
             drop(old);
             self.sink.emit(AppEvent::HotkeyRestored);
-            tracing::info!(hotkey = %next.hotkeys.capture, "capture hotkey reloaded");
         }
 
         // 6. 悬浮球：可见性、尺寸与显示开关都立即生效

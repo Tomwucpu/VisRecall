@@ -340,7 +340,8 @@ fn hotkey_thread_main(
         }
 
         if msg.message == WM_HOTKEY {
-            tracing::info!(hotkey = %spec, "hotkey pressed");
+            // 按键本身由 app-core 的「capture requested」统一记录，这里只留排障细节。
+            tracing::debug!(hotkey = %spec, "hotkey pressed");
             if tx
                 .send(ShellEvent::CaptureRequest(CaptureTrigger::Hotkey))
                 .is_err()

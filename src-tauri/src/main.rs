@@ -127,9 +127,13 @@ fn resolve_paths() -> visrecall_app_core::AppPaths {
 fn init_logging() {
     use tracing_subscriber::EnvFilter;
 
+    // `ort` 开了 tracing feature：加载 dylib、建 session、图优化会打印数百条 info
+    // （`GraphTransformer ...`、`Reserving memory ...`），把应用自己的启动日志淹没。
+    // 默认只保留它的 warn/error；排障时需要细节用 `VISRECALL_LOG=info,ort=debug`。
+    const DEFAULT_FILTER: &str = "info,ort=warn";
     let filter = EnvFilter::try_from_env("VISRECALL_LOG")
-        .or_else(|_| EnvFilter::try_new("info"))
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+        .or_else(|_| EnvFilter::try_new(DEFAULT_FILTER))
+        .unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
