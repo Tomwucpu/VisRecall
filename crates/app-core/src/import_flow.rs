@@ -184,7 +184,7 @@ impl ImportFlow {
                 warn!(id = %item.id, error = %err, "手动文字标签保存失败");
             }
         }
-        self.emit_created(&[item.clone()]);
+        self.emit_created(std::slice::from_ref(&item));
         Ok(item)
     }
 

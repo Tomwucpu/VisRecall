@@ -40,7 +40,7 @@ pub fn source_url_of(raw: &str) -> Option<&str> {
     const KEY: &str = "SourceURL:";
     let index = raw.find(KEY)?;
     let rest = &raw[index + KEY.len()..];
-    let end = rest.find(|c| c == '\r' || c == '\n').unwrap_or(rest.len());
+    let end = rest.find(['\r', '\n']).unwrap_or(rest.len());
     let value = rest[..end].trim();
     (!value.is_empty()).then_some(value)
 }

@@ -240,11 +240,10 @@ impl DirectoryImportService {
         let source = self.source(source_id)?;
         let root = PathBuf::from(&source.root_path);
         let options = options_from_source(&source);
-        validate_existing_root(&self.library, &root).map_err(|err| {
+        validate_existing_root(&self.library, &root).inspect_err(|_| {
             let _ = self
                 .library
                 .set_import_source_status(source_id, SourceStatus::Offline);
-            err
         })?;
         // 刷新后旧的未确认扫描结果过期。
         self.library.delete_directory_scan_tasks(&source.id)?;
@@ -494,7 +493,7 @@ impl DirectoryImportService {
                 )));
             }
             // 批量写库和发事件，避免大目录下逐文件产生数据库与 UI 开销。
-            if output.len() % 100 == 0 {
+            if output.len().is_multiple_of(100) {
                 self.library.update_import_task_scan_progress(
                     &task.id,
                     stats.total_count,
@@ -908,6 +907,80 @@ fn is_reparse_or_cloud(metadata: &fs::Metadata) -> bool {
     }
 }
 
+/// 读取前后都核验元数据，避免索引到的哈希与随后读取的原文件不是同一版本。
+fn read_snapshot(root: &Path, entry: &ImportTaskEntry) -> Result<Snapshot, AppError> {
+    validate_relative_path(&entry.relative_path)?;
+    let path = root.join(&entry.relative_path);
+    let before = fs::symlink_metadata(&path)
+        .map_err(|err| AppError::FileMissing(format!("{}: {err}", path.display())))?;
+    if is_reparse_or_cloud(&before) || !before.is_file() {
+        return Err(AppError::InvalidInput("引用文件已变为不支持的对象".into()));
+    }
+    let canonical =
+        fs::canonicalize(&path).map_err(|err| AppError::FileMissing(err.to_string()))?;
+    if !canonical.starts_with(root) {
+        return Err(AppError::InvalidInput("引用路径逃逸来源目录".into()));
+    }
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let (kind, maximum) = match extension.as_str() {
+        "png" | "jpg" | "jpeg" | "webp" | "gif" => (ItemKind::Image, MAX_IMAGE_BYTES),
+        "txt" | "md" => (ItemKind::Text, MAX_TEXT_BYTES),
+        _ => return Err(AppError::InvalidInput("不支持的文件类型".into())),
+    };
+    if before.len() > maximum {
+        return Err(AppError::InvalidInput("文件超过大小限制".into()));
+    }
+    let bytes = fs::read(&canonical).map_err(|err| AppError::Io(format!("读取引用失败：{err}")))?;
+    let after = fs::metadata(&canonical).map_err(|err| AppError::FileMissing(err.to_string()))?;
+    let before_modified = modified_millis(&before);
+    if before.len() != after.len() || before_modified != modified_millis(&after) {
+        return Err(AppError::Busy(
+            "文件在读取过程中发生变化，请稍后重试".into(),
+        ));
+    }
+    let hash = format!("{:x}", Sha256::digest(&bytes));
+    let title = Path::new(&entry.display_name)
+        .file_stem()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| entry.display_name.clone());
+    let (width, height, char_count) = if kind == ItemKind::Image {
+        let dimensions = image::ImageReader::new(Cursor::new(&bytes))
+            .with_guessed_format()
+            .map_err(|err| AppError::InvalidInput(format!("无法识别图片：{err}")))?
+            .into_dimensions()
+            .map_err(|err| AppError::InvalidInput(format!("无法读取图片尺寸：{err}")))?;
+        (Some(dimensions.0), Some(dimensions.1), None)
+    } else {
+        let text = decode_imported_text(&bytes);
+        (
+            None,
+            None,
+            Some(text.chars().count().min(u32::MAX as usize) as u32),
+        )
+    };
+    Ok(Snapshot {
+        size: before.len(),
+        modified_at: before_modified,
+        hash: hash.clone(),
+        new_item: NewItem {
+            kind,
+            captured_at: now_millis(),
+            source_app: Some("VisRecall".into()),
+            source_title: Some(title),
+            source_url: None,
+            width,
+            height,
+            char_count,
+            original_path: String::new(),
+            content_hash: hash,
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1259,78 +1332,4 @@ mod tests {
         assert_eq!(fs::read_to_string(note).unwrap(), "保留到重新添加");
         assert_eq!(fs::read_to_string(old).unwrap(), "此前单条删除");
     }
-}
-
-/// 读取前后都核验元数据，避免索引到的哈希与随后读取的原文件不是同一版本。
-fn read_snapshot(root: &Path, entry: &ImportTaskEntry) -> Result<Snapshot, AppError> {
-    validate_relative_path(&entry.relative_path)?;
-    let path = root.join(&entry.relative_path);
-    let before = fs::symlink_metadata(&path)
-        .map_err(|err| AppError::FileMissing(format!("{}: {err}", path.display())))?;
-    if is_reparse_or_cloud(&before) || !before.is_file() {
-        return Err(AppError::InvalidInput("引用文件已变为不支持的对象".into()));
-    }
-    let canonical =
-        fs::canonicalize(&path).map_err(|err| AppError::FileMissing(err.to_string()))?;
-    if !canonical.starts_with(root) {
-        return Err(AppError::InvalidInput("引用路径逃逸来源目录".into()));
-    }
-    let extension = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let (kind, maximum) = match extension.as_str() {
-        "png" | "jpg" | "jpeg" | "webp" | "gif" => (ItemKind::Image, MAX_IMAGE_BYTES),
-        "txt" | "md" => (ItemKind::Text, MAX_TEXT_BYTES),
-        _ => return Err(AppError::InvalidInput("不支持的文件类型".into())),
-    };
-    if before.len() > maximum {
-        return Err(AppError::InvalidInput("文件超过大小限制".into()));
-    }
-    let bytes = fs::read(&canonical).map_err(|err| AppError::Io(format!("读取引用失败：{err}")))?;
-    let after = fs::metadata(&canonical).map_err(|err| AppError::FileMissing(err.to_string()))?;
-    let before_modified = modified_millis(&before);
-    if before.len() != after.len() || before_modified != modified_millis(&after) {
-        return Err(AppError::Busy(
-            "文件在读取过程中发生变化，请稍后重试".into(),
-        ));
-    }
-    let hash = format!("{:x}", Sha256::digest(&bytes));
-    let title = Path::new(&entry.display_name)
-        .file_stem()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| entry.display_name.clone());
-    let (width, height, char_count) = if kind == ItemKind::Image {
-        let dimensions = image::ImageReader::new(Cursor::new(&bytes))
-            .with_guessed_format()
-            .map_err(|err| AppError::InvalidInput(format!("无法识别图片：{err}")))?
-            .into_dimensions()
-            .map_err(|err| AppError::InvalidInput(format!("无法读取图片尺寸：{err}")))?;
-        (Some(dimensions.0), Some(dimensions.1), None)
-    } else {
-        let text = decode_imported_text(&bytes);
-        (
-            None,
-            None,
-            Some(text.chars().count().min(u32::MAX as usize) as u32),
-        )
-    };
-    Ok(Snapshot {
-        size: before.len(),
-        modified_at: before_modified,
-        hash: hash.clone(),
-        new_item: NewItem {
-            kind,
-            captured_at: now_millis(),
-            source_app: Some("VisRecall".into()),
-            source_title: Some(title),
-            source_url: None,
-            width,
-            height,
-            char_count,
-            original_path: String::new(),
-            content_hash: hash,
-        },
-    })
 }
