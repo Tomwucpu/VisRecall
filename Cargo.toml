@@ -26,6 +26,8 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 proptest = "1"
 rusqlite = { version = "0.41", features = ["bundled"] }
+# 把 `\\?\`/verbatim 路径转回普通写法（Windows 专用，其他平台为 no-op）。
+dunce = "1"
 
 # --- 阶段 03 新增（锁定于 Cargo.lock；升级前跑完整测试） ---
 async-trait = "0.1"

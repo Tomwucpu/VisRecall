@@ -5816,6 +5816,7 @@ dependencies = [
 name = "visrecall-library"
 version = "0.1.0"
 dependencies = [
+ "dunce",
  "encoding_rs",
  "jieba-rs",
  "rusqlite",

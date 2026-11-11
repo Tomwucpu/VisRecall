@@ -703,10 +703,13 @@ impl AppCore {
     }
 
     /// 单条彻底删除；成功后发 `item_deleted`。
+    ///
+    /// 引用素材（目录导入）只删库内记录、派生缓存与缩略图，外部原文件不动；同时清掉该路径
+    /// 的排除记录，保证下次扫描同一目录时还能重新导入删除过的文件。
     pub fn delete_item(&self, id: &str) -> Result<(), AppError> {
         let library = self.library_required()?;
         if let Some(asset) = library.external_asset_for_item(id)? {
-            library.exclude_source_path(&asset.source_id, &asset.relative_path)?;
+            library.clear_source_path_exclusion(&asset.source_id, &asset.relative_path)?;
         }
         library.delete_item(id)?;
         self.sink
@@ -2198,5 +2201,65 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         drop(tx);
+    }
+
+    /// 删除引用素材：外部原文件不动，库内记录与排除记录都清掉，重扫同一目录还能再导入。
+    #[test]
+    fn deleting_reference_item_keeps_original_and_allows_rescan() {
+        use visrecall_library::NewImportSource;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (core, _sink) = open(dir.path());
+        let source_dir = tempfile::tempdir().unwrap();
+        let file = source_dir.path().join("note.txt");
+        std::fs::write(&file, "外部原文").unwrap();
+
+        let library = core.library().unwrap();
+        let source = library
+            .create_import_source(NewImportSource {
+                root_path: source_dir.path().display().to_string(),
+                include_subdirectories: true,
+                include_images: true,
+                include_text: true,
+                ai_allowed: false,
+            })
+            .unwrap();
+        let item = library
+            .insert_reference_item(
+                &source.id,
+                "note.txt",
+                12,
+                1,
+                visrecall_domain::NewItem {
+                    kind: ItemKind::Text,
+                    captured_at: 1,
+                    source_app: Some("VisRecall".into()),
+                    source_title: Some("note".into()),
+                    source_url: None,
+                    width: None,
+                    height: None,
+                    char_count: Some(4),
+                    original_path: String::new(),
+                    content_hash: "hash".into(),
+                },
+            )
+            .unwrap();
+
+        core.delete_item(&item.id).unwrap();
+
+        assert!(library.get_item(&item.id).unwrap().is_none());
+        assert!(library
+            .external_asset_for_item(&item.id)
+            .unwrap()
+            .is_none());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "外部原文");
+
+        // 旧实现会在这里写入排除记录，导致重扫 total_count 为 0。
+        let scan = core
+            .directory_imports()
+            .unwrap()
+            .scan(source_dir.path(), crate::DirectoryScanOptions::default())
+            .unwrap();
+        assert_eq!(scan.total_count, 1);
     }
 }

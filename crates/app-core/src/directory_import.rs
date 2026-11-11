@@ -857,23 +857,25 @@ fn validate_new_root(
     Ok(canonical)
 }
 
-/// 两个目录是否是同一个（忽略大小写与末尾分隔符）。
-fn same_directory(left: &Path, right: &str) -> bool {
-    path_identity(&left.display().to_string())
-        .trim_end_matches('\\')
-        .eq_ignore_ascii_case(path_identity(right).trim_end_matches('\\'))
+/// 路径比较用的规范形态：去掉 `\\?\` 前缀、统一分隔符后按组件切分（Windows 下小写）。
+fn identity_components(path: &Path) -> Vec<String> {
+    path_identity(&path.display().to_string())
+        .split('\\')
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
+/// 两个目录是否是同一个（忽略大小写、末尾分隔符与路径写法差异）。
+fn same_directory(left: &Path, right: &str) -> bool {
+    identity_components(left) == identity_components(Path::new(right))
+}
+
+/// 按路径组件判断父子/相同关系，避免 `C:\a` 与 `C:\ab` 这类字符串前缀误判。
 fn paths_overlap(left: &Path, right: &Path) -> bool {
-    let left = path_identity(&left.display().to_string())
-        .trim_end_matches('\\')
-        .to_string();
-    let right = path_identity(&right.display().to_string())
-        .trim_end_matches('\\')
-        .to_string();
-    left == right
-        || left.starts_with(&format!("{right}\\"))
-        || right.starts_with(&format!("{left}\\"))
+    let left = identity_components(left);
+    let right = identity_components(right);
+    left.starts_with(right.as_slice()) || right.starts_with(left.as_slice())
 }
 
 fn is_hidden_or_system(metadata: &fs::Metadata, name: &str) -> bool {
@@ -1228,7 +1230,7 @@ mod tests {
     }
 
     #[test]
-    fn removing_items_clears_exclusions_so_readding_can_rebuild_all_items() {
+    fn deleting_item_lets_a_followup_scan_import_it_again() {
         let library_dir = tempfile::tempdir().unwrap();
         let source_dir = tempfile::tempdir().unwrap();
         let note = source_dir.path().join("note.txt");
@@ -1242,25 +1244,21 @@ mod tests {
             .unwrap();
         service.start_import(&first_scan.id).unwrap();
         let source_id = first_scan.source_id.unwrap();
-        let assets = library.list_external_assets(&source_id).unwrap();
-        let old_asset = assets
-            .iter()
-            .find(|asset| asset.relative_path == "old.txt")
-            .unwrap();
-        library
-            .exclude_source_path(&source_id, &old_asset.relative_path)
+        let old_asset = library
+            .external_asset_at_path(&source_id, "old.txt")
+            .unwrap()
             .unwrap();
         library.delete_item(&old_asset.item_id).unwrap();
 
-        assert_eq!(service.remove(&source_id, true).unwrap(), 1);
-        assert!(note.exists() && old.exists());
+        // 删除后重扫同一目录：来源复用，未删的标记跳过，删掉的那条回到可导入。
         let second_scan = service
             .scan(source_dir.path(), DirectoryScanOptions::default())
             .unwrap();
         assert_eq!(second_scan.source_id.as_deref(), Some(source_id.as_str()));
         assert_eq!(second_scan.total_count, 2);
+        assert_eq!(second_scan.skipped_count, 1);
         let second_import = service.start_import(&second_scan.id).unwrap();
-        assert_eq!(second_import.succeeded_count, 2);
+        assert_eq!(second_import.succeeded_count, 1);
         let rebuilt = library.list_external_assets(&source_id).unwrap();
         assert_eq!(rebuilt.len(), 2);
         assert!(rebuilt

@@ -67,7 +67,8 @@ fn migrations_are_idempotent_and_create_tables() {
             "表 {table} 应存在"
         );
     }
-    assert_eq!(lib.max_schema_version_for_test().unwrap(), 5);
+    let latest = visrecall_library::migrations::MIGRATIONS.last().unwrap().0;
+    assert_eq!(lib.max_schema_version_for_test().unwrap(), latest);
 }
 
 #[test]
@@ -112,10 +113,11 @@ fn upgrading_from_0002_keeps_data_and_defaults_revision_to_zero() {
     assert!(item.primary_color.is_none());
 
     // 连续升级到最新版本后，按保留策略留下最新迁移前备份。
+    let latest = visrecall_library::migrations::MIGRATIONS.last().unwrap().0;
     let backups = dir.path().join("backups");
     assert!(
-        backups.join("visrecall.db.bak-5").is_file(),
-        "升级到 0005 前应留备份"
+        backups.join(format!("visrecall.db.bak-{latest}")).is_file(),
+        "升级到最新版本前应留备份"
     );
 }
 

@@ -574,7 +574,7 @@ export function DetailPanel({ item, onClose }: Props) {
       {confirmOpen && (
         <ConfirmDialog
           title="彻底删除这条素材？"
-          description={reference !== null ? "索引、备注、标签与派生缓存会一并移除；外部原文件不会被修改或删除。此操作不可恢复。" : "原图、缩略图与索引条目会一并移除，不做软删除，不可恢复。"}
+          description={reference !== null ? "索引、备注、标签与派生缓存会一并移除；外部原文件不会被修改或删除，之后重新扫描该目录仍可再次导入。" : "原图、缩略图与索引条目会一并移除，不做软删除，不可恢复。"}
           confirmLabel="彻底删除"
           danger
           onConfirm={() => void removeItem()}

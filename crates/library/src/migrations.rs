@@ -23,6 +23,7 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
     (3, include_str!("../migrations/0003_ai_search.sql")),
     (4, include_str!("../migrations/0004_import_references.sql")),
     (5, include_str!("../migrations/0005_drop_import_history.sql")),
+    (6, include_str!("../migrations/0006_normalize_import_paths.sql")),
 ];
 
 const MIGRATIONS_TABLE: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (\n  version INTEGER PRIMARY KEY,\n  applied_at INTEGER NOT NULL\n)";
@@ -277,6 +278,54 @@ mod tests {
                 [],
             )
             .is_err());
+    }
+
+    /// 0006：旧来源路径去掉 `\\?\` 前缀，并清掉旧删除流程留下的排除记录。
+    #[test]
+    fn migration_0006_normalizes_source_paths_and_clears_exclusions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = open_file_db(dir.path());
+        conn.execute_batch(MIGRATIONS_TABLE).unwrap();
+        for (version, sql) in MIGRATIONS.iter().take(5) {
+            conn.execute_batch(sql).unwrap();
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![version, now_millis()],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            r"INSERT INTO import_sources
+               (id, root_path, path_key, include_subdirectories, include_images,
+                include_text, ai_allowed, status, last_scanned_at, created_at, updated_at)
+             VALUES ('s1', '\\?\C:\pics', '\\?\c:\pics', 1, 1, 1, 0, 'available', NULL, 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO source_exclusions (source_id, relative_path, path_key, created_at)
+             VALUES ('s1', 'a.webp', 'a.webp', 0)",
+            [],
+        )
+        .unwrap();
+
+        apply(&mut conn, dir.path()).unwrap();
+
+        let (root, key): (String, String) = conn
+            .query_row(
+                "SELECT root_path, path_key FROM import_sources WHERE id = 's1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(root, r"C:\pics");
+        assert_eq!(key, r"c:\pics");
+        let exclusions: i64 = conn
+            .query_row("SELECT COUNT(*) FROM source_exclusions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(exclusions, 0);
     }
 
     #[test]

@@ -1,5 +1,7 @@
 //! 目录来源与外部资产映射的持久化。
 
+use std::path::Path;
+
 use rusqlite::{OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use visrecall_domain::item::{Item, NewItem};
@@ -73,9 +75,41 @@ pub struct ExternalAsset {
     pub source_status: String,
 }
 
+/// 统一为不带 `\\?\` 前缀的完整路径。
+///
+/// `fs::canonicalize` 在 Windows 上返回扩展长度前缀，直接入库会让同一目录出现两个来源
+/// （`\\?\C:\a` 与 `C:\a` 的 `path_key` 不同）。这里用 `dunce` 把本地路径转回普通写法；
+/// 简化后无法安全表达的路径（UNC、卷 GUID、超过 260 字符）保持原样，不会把能用的路径改坏。
+/// 末尾分隔符同时收敛。
+pub fn normalize_root_path(raw: &str) -> String {
+    let unified = if cfg!(windows) {
+        raw.replace('/', "\\")
+    } else {
+        raw.to_string()
+    };
+    let simplified = dunce::simplified(Path::new(&unified))
+        .to_string_lossy()
+        .into_owned();
+    let separator = if cfg!(windows) { '\\' } else { '/' };
+    let trimmed = simplified.trim_end_matches(separator);
+    // 盘符根（`C:\`）、`/`、`\\` 等长度不足以再截的路径保留原样。
+    if trimmed.is_empty() || trimmed.len() == simplified.len() || trimmed.ends_with(':') {
+        return simplified;
+    }
+    trimmed.to_string()
+}
+
+/// 路径身份比较用的分隔符归一（`/` 与 `\` 视为同一个分隔符）。
+///
+/// 只在身份比较/`path_key` 上做：POSIX 上同一路径可能混写两种分隔符，老的
+/// `path_key` 也是这种形态，保持兼容。
+pub fn unified_separators(raw: &str) -> String {
+    normalize_root_path(raw).replace('/', "\\")
+}
+
 /// 统一 Windows 路径身份比较；其他平台保留大小写。
 pub fn path_identity(raw: &str) -> String {
-    let normalized = raw.replace('/', "\\");
+    let normalized = unified_separators(raw);
     #[cfg(windows)]
     {
         normalized.to_lowercase()
@@ -90,7 +124,9 @@ impl Library {
     pub fn create_import_source(&self, new: NewImportSource) -> Result<ImportSource, AppError> {
         let id = new_item_id();
         let now = now_millis();
-        let key = path_identity(&new.root_path);
+        // 入库前统一路径写法：同一目录不能因为 `\\?\` 前缀或末尾分隔符变成两个来源。
+        let root_path = normalize_root_path(&new.root_path);
+        let key = path_identity(&root_path);
         let conn = self.conn()?;
         conn.execute(
             "INSERT INTO import_sources
@@ -106,7 +142,7 @@ impl Library {
                status = 'available', updated_at = excluded.updated_at",
             rusqlite::params![
                 id,
-                new.root_path,
+                root_path,
                 key,
                 new.include_subdirectories,
                 new.include_images,
@@ -117,7 +153,7 @@ impl Library {
         )
         .map_err(db_error)?;
         drop(conn);
-        self.find_import_source_by_path(&new.root_path)?
+        self.find_import_source_by_path(&root_path)?
             .ok_or(AppError::NotFound)
     }
 
@@ -147,12 +183,13 @@ impl Library {
     }
 
     pub fn update_import_source_root(&self, id: &str, root: &str) -> Result<(), AppError> {
+        let root_path = normalize_root_path(root);
         let conn = self.conn()?;
         let changed = conn
             .execute(
                 "UPDATE import_sources SET root_path = ?2, path_key = ?3,
                    status = 'available', updated_at = ?4 WHERE id = ?1",
-                rusqlite::params![id, root, path_identity(root), now_millis()],
+                rusqlite::params![id, root_path, path_identity(&root_path), now_millis()],
             )
             .map_err(db_error)?;
         if changed == 0 {
@@ -383,16 +420,17 @@ impl Library {
         self.get_item(&id)?.ok_or(AppError::NotFound)
     }
 
-    pub fn exclude_source_path(
+    /// 删除素材时清掉该路径的排除记录：用户删掉一条引用素材后，重新扫描同一目录
+    /// 必须还能再导入它。老版本删除时会写排除记录，这里顺带清掉这些历史残留。
+    pub fn clear_source_path_exclusion(
         &self,
         source_id: &str,
         relative_path: &str,
     ) -> Result<(), AppError> {
         let conn = self.conn()?;
         conn.execute(
-            "INSERT OR REPLACE INTO source_exclusions(source_id, relative_path, path_key, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![source_id, relative_path, path_identity(relative_path), now_millis()],
+            "DELETE FROM source_exclusions WHERE source_id = ?1 AND path_key = ?2",
+            rusqlite::params![source_id, path_identity(relative_path)],
         )
         .map_err(db_error)?;
         Ok(())
@@ -472,4 +510,40 @@ fn source_from_row(row: &Row<'_>) -> rusqlite::Result<ImportSource> {
         created_at: row.get(10)?,
         updated_at: row.get(11)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trailing_separator_is_trimmed_but_roots_are_kept() {
+        #[cfg(windows)]
+        {
+            assert_eq!(normalize_root_path(r"C:\a\b\"), r"C:\a\b");
+            assert_eq!(normalize_root_path(r"C:\"), r"C:\");
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(normalize_root_path("/tmp/a/"), "/tmp/a");
+            assert_eq!(normalize_root_path("/"), "/");
+        }
+    }
+
+    /// `fs::canonicalize` 的 verbatim 写法入库前被还原；无法安全还原的路径保持原样。
+    #[cfg(windows)]
+    #[test]
+    fn verbatim_prefix_is_simplified() {
+        assert_eq!(normalize_root_path(r"\\?\C:\a\b"), r"C:\a\b");
+        assert_eq!(path_identity(r"\\?\C:\Pics\"), path_identity(r"c:\pics"));
+        // UNC 与卷 GUID 简化后无法保证等价，保持 verbatim（UNC 来源本来就被校验拒绝）。
+        assert_eq!(
+            normalize_root_path(r"\\?\UNC\srv\share\dir"),
+            r"\\?\UNC\srv\share\dir"
+        );
+        assert_eq!(
+            normalize_root_path(r"\\?\Volume{6f0b}\pics"),
+            r"\\?\Volume{6f0b}\pics"
+        );
+    }
 }

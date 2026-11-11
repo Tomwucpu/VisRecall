@@ -155,3 +155,51 @@ fn deleting_an_import_task_drops_its_entries() {
     assert!(library.get_import_task(&task.id).unwrap().is_none());
     assert!(library.import_task_entry_paths(&task.id).unwrap().is_empty());
 }
+
+/// 目录来源按不带 `\\?\` 前缀的完整路径入库。
+#[cfg(windows)]
+#[test]
+fn import_source_root_is_stored_without_extended_prefix() {
+    let library_dir = tempfile::tempdir().unwrap();
+    let source_dir = tempfile::tempdir().unwrap();
+    let library = Library::open(library_dir.path().to_path_buf()).unwrap();
+    let plain = source_dir.path().display().to_string();
+
+    let source = library
+        .create_import_source(NewImportSource {
+            root_path: format!(r"\\?\{plain}"),
+            include_subdirectories: true,
+            include_images: true,
+            include_text: true,
+            ai_allowed: false,
+        })
+        .unwrap();
+    assert_eq!(source.root_path, plain);
+    assert!(!source.path_key.starts_with(r"\\?\"));
+}
+
+/// 同一目录只差末尾分隔符也算同一来源：复用，不新建一条。
+#[test]
+fn import_source_reuses_source_for_trailing_separator() {
+    let library_dir = tempfile::tempdir().unwrap();
+    let source_dir = tempfile::tempdir().unwrap();
+    let library = Library::open(library_dir.path().to_path_buf()).unwrap();
+    let plain = source_dir.path().display().to_string();
+    let new_source = |root: String| NewImportSource {
+        root_path: root,
+        include_subdirectories: true,
+        include_images: true,
+        include_text: true,
+        ai_allowed: false,
+    };
+
+    let first = library.create_import_source(new_source(plain.clone())).unwrap();
+    let second = library
+        .create_import_source(new_source(format!(
+            "{plain}{}",
+            std::path::MAIN_SEPARATOR
+        )))
+        .unwrap();
+    assert_eq!(second.id, first.id);
+    assert_eq!(second.root_path, plain);
+}
