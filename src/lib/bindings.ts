@@ -34,6 +34,8 @@ export const commands = {
 	libraryPurge: (confirm: string) => __TAURI_INVOKE<null>("library_purge", { confirm }),
 	storageUsageGet: () => __TAURI_INVOKE<StorageUsageDto>("storage_usage_get"),
 	storageCapacitySet: (gigabytes: number) => __TAURI_INVOKE<null>("storage_capacity_set", { gigabytes }),
+	/**  文本/片段是否允许上传云端解析；库内策略，默认关闭。 */
+	cloudTextAiSet: (enabled: boolean) => __TAURI_INVOKE<null>("cloud_text_ai_set", { enabled }),
 	retentionSet: (days: number | null) => __TAURI_INVOKE<null>("retention_set", { days }),
 	retentionPreview: (days: number | null) => __TAURI_INVOKE<RetentionPreviewDto>("retention_preview", { days }),
 	retentionApply: () => __TAURI_INVOKE<PruneReportDto>("retention_apply"),
@@ -633,6 +635,8 @@ export type SettingsDto_Deserialize = {
 	capacityGb: number,
 	/**  库里保存的保留天数；`null` 为永久保留。 */
 	retentionDays?: number | null,
+	/**  文本/片段是否允许上传云端解析；库不可用时为默认值（关闭）。 */
+	cloudTextAi: boolean,
 };
 
 export type SettingsDto_Serialize = {
@@ -648,6 +652,8 @@ export type SettingsDto_Serialize = {
 	capacityGb: number,
 	/**  库里保存的保留天数；`null` 为永久保留。 */
 	retentionDays: number | null,
+	/**  文本/片段是否允许上传云端解析；库不可用时为默认值（关闭）。 */
+	cloudTextAi: boolean,
 };
 
 export type SettingsPatch = SettingsPatch_Serialize | SettingsPatch_Deserialize;

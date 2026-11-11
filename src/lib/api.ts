@@ -274,6 +274,11 @@ export const api = {
     await commands.retentionSet(days);
   },
 
+  /** 文本/片段是否允许上传云端解析（库内策略，默认关闭）。 */
+  setCloudTextAi: async (enabled: boolean): Promise<void> => {
+    await commands.cloudTextAiSet(enabled);
+  },
+
   /** 清理预估：会删掉多少条、释放多少字节（保存前必须让用户看到）。 */
   getRetentionPreview: (days: number | null): Promise<RetentionPreviewDto> =>
     commands.retentionPreview(days),

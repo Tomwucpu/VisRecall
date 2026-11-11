@@ -103,6 +103,16 @@ pub trait VisionProvider: Send + Sync {
 #[async_trait]
 pub trait TextProvider: Send + Sync {
     fn id(&self) -> &str;
+
+    /// 是否已配置可用模型（与 [`EmbeddingProvider::ready`] 同构）。
+    ///
+    /// `false` 表示这次调用注定失败（未配置 / 无 Key）：调用方应直接跳过而不是
+    /// 排队重试——文本素材在离线时仍需保持 `ready`，不该被标成「待重试」。
+    /// 默认 `true` 兼容既有实现（测试假实现按需覆盖）。
+    fn ready(&self) -> bool {
+        true
+    }
+
     async fn summarize(&self, text: &str) -> Result<TextInsight, AppError>;
 }
 

@@ -322,6 +322,8 @@ pub struct SettingsDto {
     pub capacity_gb: u32,
     /// 库里保存的保留天数；`null` 为永久保留。
     pub retention_days: Option<u32>,
+    /// 文本/片段是否允许上传云端解析；库不可用时为默认值（关闭）。
+    pub cloud_text_ai: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, specta::Type)]
@@ -347,6 +349,8 @@ impl SettingsDto {
             .map(|library| (library.capacity_bytes() / (1024 * 1024 * 1024)) as u32)
             .unwrap_or(visrecall_domain::storage::DEFAULT_CAPACITY_GB);
         let retention_days = library.and_then(|library| library.retention().days);
+        // 隐私保守：库不可用（读不到策略）时按「不上传」处理。
+        let cloud_text_ai = library.is_some_and(Library::cloud_text_ai_enabled);
 
         SettingsDto {
             library_path: config.library_path.display().to_string(),
@@ -357,6 +361,7 @@ impl SettingsDto {
             hide_in_fullscreen: config.ball.hide_in_fullscreen,
             capacity_gb,
             retention_days,
+            cloud_text_ai,
         }
     }
 }
@@ -848,6 +853,17 @@ pub async fn retention_set(app: tauri::AppHandle, days: Option<u32>) -> Result<(
     .await
 }
 
+/// 文本/片段是否允许上传云端解析；库内策略，默认关闭。
+#[tauri::command]
+#[specta::specta]
+pub async fn cloud_text_ai_set(app: tauri::AppHandle, enabled: bool) -> Result<(), ApiError> {
+    run_blocking(app, move |core| {
+        core.set_cloud_text_ai(enabled)
+            .map_err(|err| ApiError::from(&err))
+    })
+    .await
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn retention_preview(
@@ -1198,6 +1214,7 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             library_purge,
             storage_usage_get,
             storage_capacity_set,
+            cloud_text_ai_set,
             retention_set,
             retention_preview,
             retention_apply,
@@ -1469,6 +1486,32 @@ mod tests {
         let restart = ApiError::from(&AppError::InvalidInput("restart required".into()));
         assert_eq!(restart.code, "INVALID_INPUT");
         assert_eq!(restart.message, "restart required");
+    }
+
+    /// 「文本上传云端解析」来自库内策略：默认关闭，写入后随 SettingsDto 一起回前端。
+    #[test]
+    fn settings_dto_reads_cloud_text_ai_from_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = Library::open(dir.path().to_path_buf()).unwrap();
+        let config = visrecall_app_core::AppConfig::default();
+
+        let dto = SettingsDto::from_config(&config, Some(&library));
+        assert!(!dto.cloud_text_ai, "默认必须是关闭");
+        // 前端契约：JSON 键名是 camelCase。
+        let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json["cloudTextAi"], serde_json::Value::Bool(false));
+
+        library.set_cloud_text_ai(true).unwrap();
+        let dto = SettingsDto::from_config(&config, Some(&library));
+        assert!(dto.cloud_text_ai);
+    }
+
+    /// 库打不开时也应回默认（关闭），而不是 panic 或报错。
+    #[test]
+    fn settings_dto_cloud_text_ai_defaults_when_library_unavailable() {
+        let config = visrecall_app_core::AppConfig::default();
+        let dto = SettingsDto::from_config(&config, None);
+        assert!(!dto.cloud_text_ai);
     }
 
     #[test]

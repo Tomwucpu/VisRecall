@@ -950,6 +950,56 @@ mod tests {
         assert!(fixture.sink.events().is_empty());
     }
 
+    /// 拖入文本的云端解析由「上传云端解析」开关控制（默认关闭）。
+    #[test]
+    fn dropped_text_only_queues_cloud_analysis_when_enabled() {
+        let fixture = fixture();
+        let off = fixture
+            .flow
+            .ingest(DropContent::Text {
+                plain: "关闭时不上云".into(),
+                html: None,
+            })
+            .unwrap();
+        fixture.flow.emit_created(&off);
+        assert!(
+            fixture
+                .library
+                .jobs_for_stage(&off[0].id, visrecall_pipeline::STAGE_VLM)
+                .unwrap()
+                .is_empty(),
+            "默认关闭：文本不得排队上云"
+        );
+        assert_eq!(
+            fixture
+                .library
+                .jobs_for_stage(&off[0].id, visrecall_pipeline::STAGE_INDEX)
+                .unwrap()
+                .len(),
+            1,
+            "本地索引照常"
+        );
+
+        fixture.library.set_cloud_text_ai(true).unwrap();
+        let on = fixture
+            .flow
+            .ingest(DropContent::Text {
+                plain: "开启后上云".into(),
+                html: None,
+            })
+            .unwrap();
+        fixture.flow.emit_created(&on);
+        assert_eq!(
+            fixture
+                .library
+                .jobs_for_stage(&on[0].id, visrecall_pipeline::STAGE_VLM)
+                .unwrap()
+                .len(),
+            1,
+            "开启后文本要进阶段二"
+        );
+    }
+
     /// 富文本片段：正文照旧落 txt，HTML 单独存库供复制时写 `CF_HTML`。
     #[test]
     fn text_snippet_keeps_its_html_for_copy() {

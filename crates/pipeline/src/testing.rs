@@ -247,6 +247,7 @@ pub struct FakeText {
     pub calls: AtomicUsize,
     summary: Mutex<TextInsight>,
     fail: Mutex<Option<FakeFail>>,
+    ready: AtomicBool,
 }
 
 impl FakeText {
@@ -259,7 +260,15 @@ impl FakeText {
                 confidence: Some(0.9),
             }),
             fail: Mutex::new(None),
+            ready: AtomicBool::new(true),
         }
+    }
+
+    /// 模拟「没有可用模型」（未配置 / 无 Key）的降级场景。
+    pub fn not_ready() -> Self {
+        let fake = Self::new("", &[]);
+        fake.ready.store(false, Ordering::SeqCst);
+        fake
     }
 
     pub fn failing(fail: FakeFail) -> Self {
@@ -277,6 +286,10 @@ impl FakeText {
 impl TextProvider for FakeText {
     fn id(&self) -> &str {
         "vlm-primary"
+    }
+
+    fn ready(&self) -> bool {
+        self.ready.load(Ordering::SeqCst)
     }
 
     async fn summarize(&self, _text: &str) -> Result<TextInsight, AppError> {

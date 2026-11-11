@@ -642,16 +642,8 @@ impl DirectoryImportService {
                 tracing::warn!(item = %item.id, %err, "引用缩略图入队失败");
             }
         }
-        crate::pipeline_host::enqueue_initial_indexing(&self.library, item);
-        if item.kind != ItemKind::Image && self.library.cloud_ai_allowed(&item.id).unwrap_or(false)
-        {
-            if let Err(err) =
-                self.library
-                    .enqueue_stage(&item.id, visrecall_pipeline::STAGE_VLM, 100)
-            {
-                tracing::warn!(item = %item.id, %err, "引用云端任务入队失败");
-            }
-        }
+        // 阶段一 + （开关打开时的）阶段二统一从这里入队；批量导入的云端任务降优先级。
+        crate::pipeline_host::enqueue_bulk_indexing(&self.library, item);
     }
 
     fn mark_missing_after_complete_scan(

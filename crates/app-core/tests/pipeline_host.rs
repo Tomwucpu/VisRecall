@@ -4,7 +4,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use visrecall_app_core::pipeline_host::{enqueue_initial_indexing, EventBridge, ProviderRegistry};
+use visrecall_app_core::pipeline_host::{
+    enqueue_initial_indexing, EventBridge, ProviderRegistry, RoutedText,
+};
 use visrecall_app_core::{
     AppCore, AppError, AppEvent, AppPaths, EventSink, ModelConfigPatch, ModelEntryInput,
     RecordingSink,
@@ -77,6 +79,47 @@ fn initial_indexing_enqueues_ocr_for_images_and_index_for_text() {
         .jobs_for_stage(&text.id, STAGE_OCR)
         .unwrap()
         .is_empty());
+}
+
+/// 文本是否进阶段二由「上传云端解析」开关决定（默认关闭）；图片不受影响。
+#[test]
+fn initial_indexing_enqueues_vlm_for_text_only_when_cloud_text_ai_is_enabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let library = Library::open(dir.path().join("library")).unwrap();
+    let off = insert_item(&library, ItemKind::Text, "off");
+    enqueue_initial_indexing(&library, &off);
+    assert_eq!(
+        library.jobs_for_stage(&off.id, STAGE_INDEX).unwrap().len(),
+        1
+    );
+    assert!(
+        library
+            .jobs_for_stage(&off.id, STAGE_VLM)
+            .unwrap()
+            .is_empty(),
+        "默认关闭时文本不得排队上云"
+    );
+
+    library.set_cloud_text_ai(true).unwrap();
+    let on = insert_item(&library, ItemKind::Text, "on");
+    enqueue_initial_indexing(&library, &on);
+    assert_eq!(
+        library.jobs_for_stage(&on.id, STAGE_INDEX).unwrap().len(),
+        1
+    );
+    assert_eq!(
+        library.jobs_for_stage(&on.id, STAGE_VLM).unwrap().len(),
+        1,
+        "开启后文本要进阶段二（摘要 + 自动标签）"
+    );
+
+    // 图片仍只入队 ocr：vlm 由 ocr handler 接力，不受该开关影响
+    let image = insert_item(&library, ItemKind::Image, "img");
+    enqueue_initial_indexing(&library, &image);
+    assert_eq!(
+        library.jobs_for_stage(&image.id, STAGE_OCR).unwrap().len(),
+        1
+    );
 }
 
 #[test]
@@ -300,6 +343,23 @@ fn registry_reload_swaps_the_active_provider_in_place() {
     assert_eq!(registry.active_slot(), "vlm-primary");
 }
 
+/// 文本 Provider 的「是否有可用模型」跟随注册表：未配置即不排队、不标待重试。
+#[test]
+fn routed_text_ready_follows_the_registry() {
+    use visrecall_domain::providers::TextProvider;
+
+    let text = RoutedText::new(ProviderRegistry::from_config(&ModelConfig::default()));
+    assert!(!text.ready(), "未配置模型时文本 Provider 不可用");
+
+    let config = ModelConfig {
+        entries: vec![model_entry("m1", "model-a")],
+        active_id: Some("m1".into()),
+        ..ModelConfig::default()
+    };
+    let text = RoutedText::new(ProviderRegistry::from_config(&config));
+    assert!(text.ready(), "配置了模型即可用");
+}
+
 fn sample_job(stage: &str) -> visrecall_library::Job {
     visrecall_library::Job {
         id: "job-1".into(),
@@ -423,6 +483,8 @@ fn reparse_text_enqueues_index_and_vlm_at_same_revision() {
     let dir = tempfile::tempdir().unwrap();
     let (core, _sink) = open(dir.path());
     let library = core.library().expect("library");
+    // 文本重新解析要上云，必须先打开「上传云端解析」。
+    core.set_cloud_text_ai(true).unwrap();
     let text = insert_item(library, ItemKind::Text, "txt");
 
     core.reparse_item(&text.id).expect("reparse 应成功");
@@ -440,6 +502,43 @@ fn reparse_text_enqueues_index_and_vlm_at_same_revision() {
         assert_eq!(jobs[0].revision, reloaded.revision);
         assert_eq!(jobs[0].state, visrecall_library::JobState::Queued);
     }
+}
+
+/// 开关关闭时点「重新解析」：明确告知去设置里开启，且不改状态、不排任务。
+#[test]
+fn reparse_text_is_rejected_while_cloud_text_ai_is_disabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let (core, _sink) = open(dir.path());
+    let library = core.library().expect("library");
+    let text = insert_item(library, ItemKind::Text, "txt-off");
+    library
+        .update_status(&text.id, visrecall_domain::ItemStatus::Ready, None)
+        .unwrap();
+
+    let err = core.reparse_item(&text.id).expect_err("关闭时应明确拒绝");
+    assert!(
+        matches!(err, visrecall_app_core::AppError::InvalidInput(_)),
+        "err={err:?}"
+    );
+    let message = err.to_string();
+    assert!(message.contains("设置"), "提示要指向设置页：{message}");
+
+    let reloaded = library.get_item(&text.id).unwrap().unwrap();
+    assert_eq!(
+        reloaded.status,
+        visrecall_domain::ItemStatus::Ready,
+        "拒绝时不能把素材卡在解析中"
+    );
+    for stage in [STAGE_INDEX, STAGE_VLM] {
+        assert!(
+            library.jobs_for_stage(&text.id, stage).unwrap().is_empty(),
+            "{stage} 不得入队"
+        );
+    }
+
+    // 图片重新解析不受该开关约束（保持现状）
+    let image = insert_item(library, ItemKind::Image, "img-off");
+    core.reparse_item(&image.id).expect("图片 reparse 应成功");
 }
 
 #[test]

@@ -780,6 +780,12 @@ impl AppCore {
     pub fn reparse_item(&self, id: &str) -> Result<(), AppError> {
         let library = self.library_required()?;
         let item = library.get_item(id)?.ok_or(AppError::NotFound)?;
+        // 文本上云需要用户显式授权：先校验再改状态，避免「拒绝后卡在解析中」。
+        if item.kind == ItemKind::Text && !library.cloud_text_ai_enabled() {
+            return Err(AppError::InvalidInput(
+                "云端文本解析未开启：请先在「设置 → 模型」中开启「文本上传云端解析」".to_string(),
+            ));
+        }
         // 状态回 parsing：卡片/详情立即出现「解析中」反馈，由 vlm 结果再翻 Ready/Pending
         library.update_status(id, visrecall_domain::ItemStatus::Parsing, None)?;
         if item.kind == ItemKind::Image {
@@ -838,6 +844,13 @@ impl AppCore {
     /// 保存保留策略；`None` = 永久。
     pub fn set_retention(&self, days: Option<u32>) -> Result<(), AppError> {
         self.library_required()?.set_retention(days)
+    }
+
+    /// 文本/片段是否允许上传云端解析（库内策略，默认关闭）。
+    ///
+    /// 只影响自动链路（导入时的初始入队）；图片不受它约束。
+    pub fn set_cloud_text_ai(&self, enabled: bool) -> Result<(), AppError> {
+        self.library_required()?.set_cloud_text_ai(enabled)
     }
 
     /// 清理预估：按给定天数算出会删多少条、释放多少字节。

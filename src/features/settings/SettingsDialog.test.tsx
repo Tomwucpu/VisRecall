@@ -14,6 +14,7 @@ const commands = vi.hoisted(() => ({
     hideInFullscreen: true,
     capacityGb: 50,
     retentionDays: null as number | null,
+    cloudTextAi: false,
   })),
   updateSettings: vi.fn(async (patch: Record<string, unknown>) => ({
     libraryPath: "D:\\VisRecall\\library",
@@ -24,7 +25,9 @@ const commands = vi.hoisted(() => ({
     hideInFullscreen: true,
     capacityGb: 50,
     retentionDays: null as number | null,
+    cloudTextAi: false,
   })),
+  cloudTextAiSet: vi.fn(async () => undefined),
   openLibraryFolder: vi.fn(async () => null),
   storageUsageGet: vi.fn(async () => ({
     usedBytes: 1024 * 1024,

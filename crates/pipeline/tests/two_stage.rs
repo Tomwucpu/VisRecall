@@ -63,6 +63,11 @@ struct Harness {
 
 impl Harness {
     fn new(ocr: FakeOcr, vision: FakeVision) -> Self {
+        Self::with_text(ocr, vision, FakeText::new("会议纪要要点", &["会议"]))
+    }
+
+    /// 指定文本 Provider（用于覆盖「未配置模型」等降级分支）。
+    fn with_text(ocr: FakeOcr, vision: FakeVision, text: FakeText) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let library = Arc::new(Library::open(dir.path().to_path_buf()).unwrap());
         library.init_embedding_space(FakeEmbed::ID, 8).unwrap();
@@ -95,7 +100,7 @@ impl Harness {
             ocr: Arc::new(ocr),
             embed: Arc::new(FakeEmbed::new()),
             vision: Arc::new(vision),
-            text: Arc::new(FakeText::new("会议纪要要点", &["会议"])),
+            text: Arc::new(text),
             events: Arc::new(Events::default()),
             reindex_calls,
         }
@@ -532,6 +537,8 @@ fn note_change_cancels_old_index_job_and_writes_new_note_to_fts() {
 #[test]
 fn text_item_gets_extractive_summary_and_full_text_in_fts() {
     let harness = Harness::new(FakeOcr::empty(), FakeVision::typical("摘要", &[]));
+    // 文本上传云端解析默认关闭：显式开启后才走阶段二。
+    harness.library.set_cloud_text_ai(true).unwrap();
     let body = "这是一份很长的会议纪要，讨论了季度营收、漏斗图转化率与下一步行动项。";
     let item = harness.insert_text("hash-text", body);
     harness
@@ -560,6 +567,90 @@ fn text_item_gets_extractive_summary_and_full_text_in_fts() {
     );
     let insight = harness.library.insight_get(&item).unwrap().unwrap();
     assert_eq!(insight.summary_source, SummarySource::Vlm);
+}
+
+/// 默认关闭：即使队列里有文本的 `vlm` 任务（旧队列 / 重新解析），也不得上云。
+#[test]
+fn text_vlm_is_skipped_when_cloud_text_ai_is_disabled() {
+    let harness = Harness::new(FakeOcr::empty(), FakeVision::typical("摘要", &[]));
+    let item = harness.insert_text("hash-off", "本地摘录即可，不上传");
+    assert!(!harness.library.cloud_text_ai_enabled(), "默认必须关闭");
+    harness
+        .library
+        .enqueue_stage(&item, STAGE_INDEX, PRIORITY_NEW)
+        .unwrap();
+    harness
+        .library
+        .enqueue_stage(&item, STAGE_VLM, PRIORITY_NEW)
+        .unwrap();
+
+    let handle = harness.spawn();
+    assert!(
+        wait_until(
+            || job_state(&harness, &item, STAGE_VLM) == Some(JobState::Succeeded),
+            Duration::from_secs(5)
+        ),
+        "关闭时 vlm 任务应被跳过而不是失败"
+    );
+    handle.shutdown();
+
+    assert_eq!(
+        harness.text.calls.load(Ordering::SeqCst),
+        0,
+        "关闭时不得调用云端文本模型"
+    );
+    assert_eq!(
+        harness.library.get_item(&item).unwrap().unwrap().status,
+        ItemStatus::Ready,
+        "跳过不等于失败：素材保持 ready"
+    );
+    assert!(
+        harness.events.pending.lock().unwrap().is_empty(),
+        "关闭时不得产生「待重试」噪音"
+    );
+    let insight = harness.library.insight_get(&item).unwrap().unwrap();
+    assert_eq!(
+        insight.summary_source,
+        SummarySource::Extractive,
+        "摘要应保持本地摘录"
+    );
+}
+
+/// 开关打开但模型不可用（未配置 / 无 Key）：同样不上云，也不制造 pending。
+#[test]
+fn text_vlm_is_skipped_when_text_provider_is_not_ready() {
+    let harness = Harness::with_text(
+        FakeOcr::empty(),
+        FakeVision::typical("摘要", &[]),
+        FakeText::not_ready(),
+    );
+    harness.library.set_cloud_text_ai(true).unwrap();
+    let item = harness.insert_text("hash-nomodel", "没有可用模型时的正文");
+    harness
+        .library
+        .enqueue_stage(&item, STAGE_INDEX, PRIORITY_NEW)
+        .unwrap();
+    harness
+        .library
+        .enqueue_stage(&item, STAGE_VLM, PRIORITY_NEW)
+        .unwrap();
+
+    let handle = harness.spawn();
+    assert!(
+        wait_until(
+            || job_state(&harness, &item, STAGE_VLM) == Some(JobState::Succeeded),
+            Duration::from_secs(5)
+        ),
+        "没有可用模型时应跳过而不是失败重试"
+    );
+    handle.shutdown();
+
+    assert_eq!(harness.text.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        harness.library.get_item(&item).unwrap().unwrap().status,
+        ItemStatus::Ready
+    );
+    assert!(harness.events.pending.lock().unwrap().is_empty());
 }
 
 #[test]

@@ -4,6 +4,7 @@
 //! 文件落盘（图片/文本/缩略图）由上层编排调用 [`files`] 完成；本 crate 只负责元数据
 //! 与索引原语（FTS/向量/insights 的读写在各自模块里）。
 
+pub mod ai_policy;
 pub mod assets;
 pub mod cleanup;
 pub mod config;

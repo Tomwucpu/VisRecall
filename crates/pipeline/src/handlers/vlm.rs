@@ -29,8 +29,11 @@ impl JobHandler for VlmHandler {
             .library
             .get_item(ctx.item_id())?
             .ok_or(AppError::NotFound)?;
-        // 防御性检查：旧队列或手动重新解析也不能绕过来源级云端授权。
-        if !ctx.library.cloud_ai_allowed(&item.id)? {
+        // 防御性检查：旧队列也不能绕过云端授权。
+        // - 来源级授权对全部素材生效；
+        // - 文本/片段另受「上传云端解析」开关约束（默认关闭）；
+        // - 没配置可用模型时直接跳过，避免离线把文本批量标成「待重试」。
+        if !ctx.library.cloud_ai_allowed(&item.id)? || !cloud_text_allowed(ctx, &item)? {
             ctx.library
                 .update_status(&item.id, visrecall_domain::ItemStatus::Ready, None)?;
             return Ok(());
@@ -141,6 +144,24 @@ impl JobHandler for VlmHandler {
         ctx.events.item_enriched(&item.id);
         Ok(())
     }
+}
+
+/// 文本/片段是否有资格上云：开关打开且文本 Provider 已配置。
+///
+/// 图片不受影响（沿用既有模型设置）；`Link` 素材没有本地原文，保持原状不额外放开。
+fn cloud_text_allowed(ctx: &JobCtx<'_>, item: &visrecall_domain::Item) -> Result<bool, AppError> {
+    if item.kind != ItemKind::Text {
+        return Ok(true);
+    }
+    if !ctx.library.cloud_text_ai_enabled() {
+        tracing::debug!(item = %item.id, "cloud text ai disabled; skipping vlm");
+        return Ok(false);
+    }
+    if !ctx.deps.text.ready() {
+        tracing::debug!(item = %item.id, "text provider not ready; skipping vlm");
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 /// 把模型结果写进 insight（保留已有 OCR 字段）。

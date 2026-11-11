@@ -1,11 +1,33 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { beforeEach, test, vi } from "vitest";
+import { afterEach, beforeEach, test, vi } from "vitest";
 
-import { api, type ModelConfigDto, type ModelConfigPatchDto } from "../../lib/api";
+import {
+  api,
+  type ModelConfigDto,
+  type ModelConfigPatchDto,
+  type SettingsDto,
+} from "../../lib/api";
+import { resetToasts } from "../../lib/toast";
+import { ToastViewport } from "../shell/ToastViewport";
 import { ModelSettingsPane } from "./ModelSettingsPane";
 
 const EMPTY: ModelConfigDto = { entries: [], activeId: null };
+
+/** 设置 DTO 的完整形状（新增字段时这里必须一起改，避免用例悄悄失效）。 */
+function settings(cloudTextAi: boolean): SettingsDto {
+  return {
+    libraryPath: "D:\\VisRecall\\library",
+    captureHotkey: "Ctrl+Shift+S",
+    ballEnabled: true,
+    ballSize: 48,
+    ballEdgeHide: true,
+    hideInFullscreen: true,
+    capacityGb: 50,
+    retentionDays: null,
+    cloudTextAi,
+  };
+}
 
 const CONFIGURED: ModelConfigDto = {
   entries: [
@@ -36,6 +58,7 @@ function renderPane() {
   return render(
     <QueryClientProvider client={client}>
       <ModelSettingsPane />
+      <ToastViewport />
     </QueryClientProvider>,
   );
 }
@@ -69,6 +92,12 @@ async function openNewForm() {
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  // 默认每个用例都有可用的设置快照（开关关闭），用例可再覆盖。
+  vi.spyOn(api, "getSettings").mockResolvedValue(settings(false));
+});
+
+afterEach(() => {
+  resetToasts();
 });
 
 test("renders the model cards with only a boolean key state, never the secret", async () => {
@@ -198,4 +227,40 @@ test("test connection reports success and failure states", async () => {
 
   fireEvent.click(screen.getByText("测试连接"));
   expect(await screen.findByText("测试失败：HTTP 401")).toBeInTheDocument();
+});
+
+test("cloud text ai switch is off by default and persists a toggle", async () => {
+  vi.spyOn(api, "getModelConfig").mockResolvedValue(EMPTY);
+  let enabled = false;
+  vi.spyOn(api, "getSettings").mockImplementation(async () => settings(enabled));
+  const save = vi.spyOn(api, "setCloudTextAi").mockImplementation(async (next) => {
+    enabled = next;
+  });
+  renderPane();
+
+  const toggle = await screen.findByRole("switch", { name: "文本上传云端解析" });
+  expect(toggle).toHaveAttribute("aria-checked", "false");
+  // 设置到达前开关是禁用的（避免把「未读到」当成「关闭」写回去）。
+  await waitFor(() => expect(toggle).toBeEnabled());
+
+  fireEvent.click(toggle);
+  await waitFor(() => expect(save).toHaveBeenCalledWith(true));
+  // 保存后重新读取设置，开关跟着落盘值走
+  await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
+});
+
+test("cloud text ai toggle failure keeps the old state and reports an error", async () => {
+  vi.spyOn(api, "getModelConfig").mockResolvedValue(EMPTY);
+  vi.spyOn(api, "setCloudTextAi").mockRejectedValue({
+    code: "DATABASE",
+    message: "database is locked",
+  });
+  renderPane();
+
+  const toggle = await screen.findByRole("switch", { name: "文本上传云端解析" });
+  await waitFor(() => expect(toggle).toBeEnabled());
+  fireEvent.click(toggle);
+
+  expect(await screen.findByText(/保存失败/)).toBeInTheDocument();
+  expect(toggle).toHaveAttribute("aria-checked", "false");
 });

@@ -45,6 +45,11 @@ export function ModelSettingsPane() {
     queryKey: queryKeys.modelConfig,
     queryFn: api.getModelConfig,
   });
+  // 与设置弹窗共享同一份缓存：开关状态和设置页其它字段始终一致。
+  const settings = useQuery({
+    queryKey: queryKeys.settings,
+    queryFn: api.getSettings,
+  });
 
   // `null` = 尚未本地编辑；之后以后端返回的整表为准，避免编辑中被重取覆盖。
   const [snapshot, setSnapshot] = useState<ModelSnapshot | null>(null);
@@ -53,6 +58,7 @@ export function ModelSettingsPane() {
   const [probe, setProbe] = useState<ProbeOutcomeDto | null>(null);
   const [probing, setProbing] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [togglingCloudText, setTogglingCloudText] = useState(false);
 
   const view: ModelSnapshot = snapshot ?? fromConfig(config.data);
   const active =
@@ -186,12 +192,42 @@ export function ModelSettingsPane() {
   };
 
   const text = probeText(probe, probing);
+  // 读不到设置时按最保守的「关闭」显示：宁可少上传，不可默认上传。
+  const cloudTextAi = settings.data?.cloudTextAi ?? false;
+
+  /**
+   * 切换「文本上传云端解析」：写库成功后再以重新读取的值为准。
+   *
+   * 不做乐观更新——开关关系到数据出网，界面必须显示真实落盘值；
+   * 失败时提示并保持原状态（重新拉一次设置，避免显示与库不一致）。
+   */
+  const toggleCloudTextAi = async () => {
+    if (togglingCloudText) {
+      return;
+    }
+    const next = !cloudTextAi;
+    setTogglingCloudText(true);
+    try {
+      await api.setCloudTextAi(next);
+      await queryClient.invalidateQueries({ queryKey: queryKeys.settings });
+      pushToast(
+        next
+          ? "已开启：新导入的文本会生成云端摘要与标签"
+          : "已关闭：文本只在本地解析，不再上传",
+      );
+    } catch (error) {
+      pushToast(`保存失败：${errorMessage(error)}`, "error");
+      void queryClient.invalidateQueries({ queryKey: queryKeys.settings });
+    } finally {
+      setTogglingCloudText(false);
+    }
+  };
 
   return (
     <div className="pane">
       <p className="pane-desc">
         不预置任何厂商模型。每个模型由你定义名称、ID、接口地址、通信协议与密钥。点击卡片即可选用，右侧按钮用于修改或删除。
-        摘要与标签由云端 VLM 生成，解析、字面检索与嵌入完全本地；密钥只写入 Windows 凭据管理器，界面永不回显。
+        图片的摘要与标签由云端 VLM 生成，文本是否上传由下方开关决定；解析、字面检索与嵌入完全本地；密钥只写入 Windows 凭据管理器，界面永不回显。
       </p>
 
       <div className={`mc-head${editor !== null ? " mc-hidden" : ""}`}>
@@ -317,6 +353,30 @@ export function ModelSettingsPane() {
           {text}
         </p>
       )}
+
+      <div className="row">
+        <div>
+          <div className="row-t">文本上传云端解析</div>
+          <div className="row-d">
+            开启后，新导入的文本/片段会把原文发送给当前模型生成摘要与自动标签；关闭时只在本地解析，摘要保留原文摘录。
+            图片不受此开关影响；关闭状态下点「重新解析」会提示先开启。
+          </div>
+        </div>
+        <div className="row-r">
+          <button
+            type="button"
+            className={`switch${cloudTextAi ? " on" : ""}`}
+            role="switch"
+            aria-checked={cloudTextAi}
+            aria-label="文本上传云端解析"
+            title={cloudTextAi ? "当前允许上传文本" : "当前禁止上传文本"}
+            disabled={settings.isPending || togglingCloudText}
+            onClick={() => void toggleCloudTextAi()}
+          >
+            <i />
+          </button>
+        </div>
+      </div>
 
       <div className="row">
         <div>
