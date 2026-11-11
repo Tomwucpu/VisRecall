@@ -8,12 +8,16 @@
 //! 悬浮球线程内放大球体并绘制动作文案；回调不直接触碰球窗口的 `RefCell` 状态。
 //!
 //! 支持的剪贴板格式：`CF_HDROP`、`CF_UNICODETEXT`、`CF_HTML`（注册格式
-//! `HTML Format`）、`CF_DIB`/`TYMED_GDI`，以及拖拽源注册的 `PNG`。PNG 优先于
-//! `CF_DIB`：解码失败再回退 `CF_DIB`（design §9.2）。
+//! `HTML Format`）、`CF_DIB`/`TYMED_GDI`、`CF_BITMAP`（GDI 位图），以及拖拽源注册的
+//! `PNG`。位图优先级 PNG → `CF_DIB` → `CF_BITMAP`（design §9.2）。
+//!
+//! `CF_BITMAP` 必须单独探测：浏览器拖网页图片通常只给这一种载体，而 OLE 只会在剪贴板
+//! 场景把 `CF_BITMAP` 合成为 `CF_DIB`，拖拽的 `IDataObject` 不会。
 //!
 //! 只有 `HTML Format`（没有 `CF_UNICODETEXT`）的源也算文本：`DragEnter` 判定与 `Drop`
 //! 读取都会回退到 HTML 片段剥离结果。`CF_DIB` 在交给 GDI 之前校验尺寸/位深，
-//! 畸形头部直接拒绝（不越界读）。
+//! 畸形头部直接拒绝（不越界读）。图文混选（位图 + 非 URL 文本 + HTML）存为**片段**，
+//! 图片保留为 HTML 里的 URL，避免文字被位图吞掉。
 
 use std::ffi::c_void;
 use std::mem::size_of;
@@ -35,13 +39,14 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
 use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::System::Ole::{
-    IDropTarget, IDropTarget_Impl, RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop, CF_DIB,
-    CF_HDROP, CF_UNICODETEXT, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE,
+    IDropTarget, IDropTarget_Impl, RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop, CF_BITMAP,
+    CF_DIB, CF_HDROP, CF_UNICODETEXT, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE,
 };
 use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
 use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
+use crate::html_snippet::{fragment_of, sanitize};
 use crate::ShellEvent;
 
 pub use visrecall_domain::drop::DropContent;
@@ -59,12 +64,18 @@ const MAX_DIB_PIXELS: usize = 8000 * 8000;
 pub(crate) const WM_BALL_DROP_VISUAL: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 2;
 
 /// 拖拽源提供的格式（只做 `QueryGetData`，不读取数据）。
+///
+/// 位图有三种常见载体：注册格式 `PNG`（HGLOBAL）、`CF_DIB`（HGLOBAL/GDI）与
+/// `CF_BITMAP`（GDI）。浏览器拖网页图片时通常只给最后一种——OLE 只在剪贴板场景
+/// 把 `CF_BITMAP` 合成为 `CF_DIB`，拖拽的 `IDataObject` 不会，所以必须单独探测。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DropFormats {
     pub hdrop: bool,
     pub unicode_text: bool,
     pub html: bool,
     pub dib: bool,
+    /// `CF_BITMAP`：浏览器/Office 拖图片时最常提供的 DDB 位图（OLE 不会把它合成 `CF_DIB`）。
+    pub bitmap: bool,
 }
 
 /// 悬浮球窗口在拖拽中的视觉状态。
@@ -416,7 +427,10 @@ fn decision_for(data: &IDataObject) -> DragDecision {
         return DragDecision::accepted(&format!("导入 {} 个文件", files.len()));
     }
 
-    if formats.dib || png_format(data).is_some() {
+    // 图文混选（浏览器里连文字带图片一起拖）：HTML 片段与非 URL 文本都在时按片段处理，
+    // 图片保留为 HTML 里的 URL；只有「图片 + 图片地址」才是纯粹的图片拖拽。
+    let prose = snippet_text(plain.as_deref());
+    if image_available(data, &formats) && !(formats.html && prose.is_some()) {
         return DragDecision::accepted("存为图片");
     }
 
@@ -432,6 +446,19 @@ fn decision_for(data: &IDataObject) -> DragDecision {
         }
         None => DragDecision::rejected_static(),
     }
+}
+
+/// 拖拽源是否提供了任何可解码的位图载体。
+fn image_available(data: &IDataObject, formats: &DropFormats) -> bool {
+    formats.dib || formats.bitmap || png_format(data).is_some()
+}
+
+/// 非 URL、非空白的文本：只有这种文本才说明用户拖的是「文字 + 图片」而不是一张图。
+fn snippet_text(plain: Option<&str>) -> Option<&str> {
+    plain
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .filter(|text| single_http_url(text).is_none())
 }
 
 /// 读取 `CF_HDROP`；没有该格式时返回空列表，格式存在但读不出来时返回错误（不静默当空）。
@@ -462,37 +489,45 @@ fn plain_text_for_decision(
         return plain;
     }
     read_html(data)
-        .map(|raw| strip_html(html_fragment(&raw)))
+        .map(|raw| strip_html(fragment_of(&raw)))
         .filter(|text| !text.trim().is_empty())
 }
 
-/// 读取完整拖放载荷；文件 → 文本 → 位图的优先级与 design §9.2 一致。
+/// 读取完整拖放载荷；文件 → 位图 → 文本的优先级与 design §9.2 一致。
+///
+/// 唯一例外是浏览器「文字 + 图片」混选：位图与 HTML 片段同时存在、且文本不是单个 URL 时，
+/// 按片段入库（图片保留为 HTML 里的 URL），否则文字会被位图整块吞掉。
 fn read_content(data: &IDataObject) -> Result<DropContent, AppError> {
     let formats = available_formats(data);
     let files = read_optional_files(data, &formats)?;
 
-    let html = if formats.html {
-        read_html(data).map(|raw| {
-            let fragment = html_fragment(&raw).to_string();
-            (raw, strip_html(&fragment))
-        })
-    } else {
-        None
-    };
+    let raw_html = if formats.html { read_html(data) } else { None };
+    // 片段：清洗后入库、复制时写回 CF_HTML；HTML 剥离结果只用作纯文本回退。
+    let snippet = raw_html.as_deref().and_then(sanitize);
+    let html_text = raw_html
+        .as_deref()
+        .map(|raw| strip_html(fragment_of(raw)))
+        .filter(|text| !text.trim().is_empty());
     let plain = if formats.unicode_text {
         read_utf16_text(data, CF_UNICODETEXT.0)
     } else {
         None
     }
-    .or_else(|| html.as_ref().map(|(_, text)| text.clone()))
+    .or(html_text)
     .filter(|text| !text.trim().is_empty());
 
     if !files.is_empty() {
         return classify_drop(&formats, plain.as_deref(), &files);
     }
 
-    if formats.dib || png_format(data).is_some() {
+    if image_available(data, &formats) {
         if let Some(image) = read_image(data) {
+            if let (Some(text), Some(html)) = (snippet_text(plain.as_deref()), snippet.as_deref()) {
+                return Ok(DropContent::Text {
+                    plain: text.to_string(),
+                    html: Some(html.to_string()),
+                });
+            }
             return Ok(image);
         }
         debug!("bitmap drop could not be decoded; falling back to text/files");
@@ -500,7 +535,7 @@ fn read_content(data: &IDataObject) -> Result<DropContent, AppError> {
 
     let mut content = classify_drop(&formats, plain.as_deref(), &files)?;
     if let DropContent::Text { html: slot, .. } = &mut content {
-        *slot = html.map(|(raw, _)| raw);
+        *slot = snippet;
     }
     Ok(content)
 }
@@ -560,6 +595,7 @@ fn available_formats(data: &IDataObject) -> DropFormats {
         unicode_text: has_format(data, CF_UNICODETEXT.0, TYMED_HGLOBAL),
         html: html_format(data).is_some(),
         dib: has_format(data, CF_DIB.0, TYMED_HGLOBAL) || has_format(data, CF_DIB.0, TYMED_GDI),
+        bitmap: has_format(data, CF_BITMAP.0, TYMED_GDI),
     }
 }
 
@@ -688,7 +724,7 @@ fn read_files(data: &IDataObject) -> Result<Vec<PathBuf>, AppError> {
 }
 
 // ---------------------------------------------------------------------------
-// 位图：注册 PNG 优先，失败回退 CF_DIB（GetDIBits → top-down BGRA）
+// 位图：注册 PNG 优先，失败回退 CF_DIB，最后回退 CF_BITMAP（GetDIBits → top-down BGRA）
 // ---------------------------------------------------------------------------
 
 fn read_image(data: &IDataObject) -> Option<DropContent> {
@@ -700,7 +736,7 @@ fn read_image(data: &IDataObject) -> Option<DropContent> {
             }
         }
     }
-    read_dib(data)
+    read_dib(data).or_else(|| read_bitmap(data))
 }
 
 fn decode_png(bytes: &[u8]) -> Option<DropContent> {
@@ -723,8 +759,17 @@ fn decode_png(bytes: &[u8]) -> Option<DropContent> {
 }
 
 fn read_dib(data: &IDataObject) -> Option<DropContent> {
-    let medium = get_medium(data, CF_DIB.0, TYMED_GDI)
-        .or_else(|| get_medium(data, CF_DIB.0, TYMED_HGLOBAL))?;
+    read_bitmap_medium(data, CF_DIB.0, TYMED_GDI)
+        .or_else(|| read_bitmap_medium(data, CF_DIB.0, TYMED_HGLOBAL))
+}
+
+/// `CF_BITMAP` 只有 GDI 载体（DDB）；转码与 `CF_DIB` 的 GDI 分支完全一致。
+fn read_bitmap(data: &IDataObject) -> Option<DropContent> {
+    read_bitmap_medium(data, CF_BITMAP.0, TYMED_GDI)
+}
+
+fn read_bitmap_medium(data: &IDataObject, cf: u16, tymed: TYMED) -> Option<DropContent> {
+    let medium = get_medium(data, cf, tymed)?;
 
     // SAFETY: `GetDC(None)` 返回屏幕 DC，失败时为空句柄。
     let screen = unsafe { GetDC(None) };
@@ -938,33 +983,6 @@ fn bitmap_to_bgra(screen: HDC, bitmap: HBITMAP) -> Option<DropContent> {
 // HTML → 纯文本
 // ---------------------------------------------------------------------------
 
-/// 取 `CF_HTML` 的 fragment 区间；没有 `StartFragment`/`EndFragment` 头时返回全文。
-fn html_fragment(raw: &str) -> &str {
-    let start = header_offset(raw, "StartFragment:");
-    let end = header_offset(raw, "EndFragment:");
-    match (start, end) {
-        (Some(start), Some(end)) if start < end && end <= raw.len() => {
-            // 偏移必须落在字符边界上，否则按全文处理。
-            if raw.is_char_boundary(start) && raw.is_char_boundary(end) {
-                &raw[start..end]
-            } else {
-                raw
-            }
-        }
-        _ => raw,
-    }
-}
-
-fn header_offset(raw: &str, key: &str) -> Option<usize> {
-    let index = raw.find(key)?;
-    let digits: String = raw[index + key.len()..]
-        .trim_start()
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
-    digits.parse().ok()
-}
-
 /// 简单标签剥离 + 实体反转义 + 空白折叠（design §9.2）。
 pub(crate) fn strip_html(html: &str) -> String {
     let lowered = html.to_ascii_lowercase();
@@ -1094,20 +1112,6 @@ mod tests {
         let html = "<style>p{color:red}</style><p>你好 &amp; <b>世界</b></p>\
                     <script>alert(1)</script>";
         assert_eq!(strip_html(html), "你好 & 世界");
-    }
-
-    #[test]
-    fn html_fragment_uses_declared_offsets() {
-        let body = "<html>hello</html>";
-        // CF_HTML 头里的偏移是相对整个数据块的字节位置（固定宽度数字）。
-        let header_len =
-            "Version:0.9\r\nStartFragment:0000000000\r\nEndFragment:0000000000\r\n".len();
-        let start = header_len;
-        let end = start + body.len();
-        let raw =
-            format!("Version:0.9\r\nStartFragment:{start:010}\r\nEndFragment:{end:010}\r\n{body}");
-        assert_eq!(html_fragment(&raw), body);
-        assert_eq!(html_fragment("<b>hi</b>"), "<b>hi</b>");
     }
 
     #[test]
@@ -1295,19 +1299,19 @@ mod tests {
     }
 
     fn data_object(entries: Vec<(u16, Vec<u8>)>) -> IDataObject {
-        ComObject::new(TestDataObject {
-            entries,
-            gdi: Vec::new(),
-        })
-        .into_interface::<IDataObject>()
+        data_object_with(entries, Vec::new())
     }
 
     fn gdi_data_object(cf: u16, bitmap: HBITMAP) -> IDataObject {
-        ComObject::new(TestDataObject {
-            entries: Vec::new(),
-            gdi: vec![(cf, bitmap)],
-        })
-        .into_interface::<IDataObject>()
+        data_object_with(Vec::new(), vec![(cf, bitmap)])
+    }
+
+    /// 同时提供 HGLOBAL 条目与 GDI 位图的源（浏览器「文字 + 图片」拖拽的形状）。
+    fn data_object_with(
+        entries: Vec<(u16, Vec<u8>)>,
+        gdi: Vec<(u16, HBITMAP)>,
+    ) -> IDataObject {
+        ComObject::new(TestDataObject { entries, gdi }).into_interface::<IDataObject>()
     }
 
     fn utf16_bytes(text: &str) -> Vec<u8> {
@@ -1669,6 +1673,81 @@ mod tests {
                 // 源位图没有 alpha：转出来必须是不透明的。
                 assert!(bgra.chunks_exact(4).all(|pixel| pixel[3] == 255));
             }
+            other => panic!("expected ImageDib, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 浏览器拖图片：CF_BITMAP 载体与「文字 + 图片」混选
+    // -----------------------------------------------------------------------
+
+    /// 2×1 的 32bpp DDB（左红右蓝）；所有权交给 `ReleaseStgMedium`。
+    fn test_bitmap() -> HBITMAP {
+        let bits: [u8; 8] = [0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0x00, 0x00];
+        // SAFETY: 位缓冲区在调用期间存活；失败返回空句柄。
+        let bitmap = unsafe {
+            windows::Win32::Graphics::Gdi::CreateBitmap(2, 1, 1, 32, Some(bits.as_ptr().cast()))
+        };
+        assert!(!bitmap.is_invalid(), "CreateBitmap failed");
+        bitmap
+    }
+
+    /// 浏览器拖网页图片：只给 `CF_BITMAP`。以前会被判成「存为链接」，现在必须是图片。
+    #[test]
+    fn cf_bitmap_drop_is_decoded_as_an_image() {
+        let data = gdi_data_object(CF_BITMAP.0, test_bitmap());
+
+        assert!(available_formats(&data).bitmap, "CF_BITMAP must be detected");
+        match read_content(&data).unwrap() {
+            DropContent::ImageDib { width, height, .. } => assert_eq!((width, height), (2, 1)),
+            other => panic!("expected ImageDib, got {other:?}"),
+        }
+        assert_eq!(decision_for(&data).label, "存为图片");
+    }
+
+    /// 「文字 + 图片」混选：位图与 HTML 同时存在时按片段入库，文字不能被位图吞掉。
+    #[test]
+    fn text_and_image_drop_becomes_a_snippet_with_html() {
+        let html_id = html_format_id();
+        let body = "<p>图片说明文字</p><img src=\"https://example.com/a.png\">";
+        let data = data_object_with(
+            vec![
+                (CF_UNICODETEXT.0, utf16_bytes("图片说明文字")),
+                (html_id, html_payload(body)),
+            ],
+            vec![(CF_BITMAP.0, test_bitmap())],
+        );
+
+        assert_eq!(decision_for(&data).label, "存为片段");
+        match read_content(&data).unwrap() {
+            DropContent::Text { plain, html } => {
+                assert_eq!(plain, "图片说明文字");
+                let html = html.expect("html snippet must be kept for pasting");
+                assert!(
+                    html.contains("https://example.com/a.png"),
+                    "image must stay referenced: {html}"
+                );
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    /// 网页单图：位图 + HTML，但文本就是图片地址 —— 仍然按图片入库。
+    #[test]
+    fn image_drop_with_url_text_stays_an_image() {
+        let html_id = html_format_id();
+        let url = "https://example.com/a.png";
+        let data = data_object_with(
+            vec![
+                (CF_UNICODETEXT.0, utf16_bytes(url)),
+                (html_id, html_payload(&format!("<img src=\"{url}\">"))),
+            ],
+            vec![(CF_BITMAP.0, test_bitmap())],
+        );
+
+        assert_eq!(decision_for(&data).label, "存为图片");
+        match read_content(&data).unwrap() {
+            DropContent::ImageDib { width, height, .. } => assert_eq!((width, height), (2, 1)),
             other => panic!("expected ImageDib, got {other:?}"),
         }
     }

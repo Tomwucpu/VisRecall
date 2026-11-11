@@ -22,6 +22,7 @@ pub mod purge;
 pub mod queries_log;
 pub mod relocate;
 pub mod settings_kv;
+pub mod snippets;
 pub mod storage;
 pub mod tags;
 pub mod vector_index;

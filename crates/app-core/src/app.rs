@@ -911,6 +911,7 @@ impl AppCore {
     /// 复制原始内容：图片写 `CF_DIB` + `PNG`，文本/链接写 `CF_UNICODETEXT`。
     ///
     /// 文本读的是**完整原文**（不受详情 20000 字符截断影响）；链接复制的是原始 URL。
+    /// 片段若带 HTML（富文本拖拽入库），额外写 `CF_HTML`，粘贴时图片与格式得以还原。
     pub fn copy_original(&self, item_id: &str) -> Result<(), AppError> {
         let library = self.library_required()?;
         let item = library.get_item(item_id)?.ok_or(AppError::NotFound)?;
@@ -923,7 +924,13 @@ impl AppCore {
             ItemKind::Text => {
                 let text = visrecall_library::AssetReader::new(library)
                     .read_text(item_id, crate::import_flow::MAX_TEXT_BYTES)?;
-                visrecall_shell::clipboard::copy_text(&text)
+                match library.get_snippet_html(item_id)? {
+                    // 旧素材没有 HTML 记录：保持纯文本复制。
+                    Some(html) if !html.trim().is_empty() => {
+                        visrecall_shell::clipboard::copy_html(&html, &text)
+                    }
+                    _ => visrecall_shell::clipboard::copy_text(&text),
+                }
             }
             ItemKind::Link => match item.source_url.as_deref() {
                 Some(url) if !url.is_empty() => visrecall_shell::clipboard::copy_text(url),

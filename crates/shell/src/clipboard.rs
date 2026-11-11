@@ -1,9 +1,11 @@
 //! 把原始内容写入系统剪贴板（design §6.4）。
 //!
-//! 三种素材各有目标格式：
+//! 各种素材的目标格式：
 //! - 图片：同时写 `CF_DIB`（32bpp BGRA、自底向上）与注册格式 `PNG`（完整 PNG 字节）。
 //!   两个格式都要写——Word/微信读 `CF_DIB`，Chrome 与部分应用优先读 `PNG`；
 //! - 文本：`CF_UNICODETEXT`，行尾统一 CRLF，不附加摘要/标签/来源；
+//! - 片段（带 HTML）：`CF_HTML` + `CF_UNICODETEXT`，粘贴时图片与格式由目标应用按
+//!   HTML 里的 URL 还原；
 //! - 链接：`CF_UNICODETEXT` 的原始 URL（由调用方传入）。
 //!
 //! 三条容易写错的细节：
@@ -103,15 +105,41 @@ pub fn copy_image_png(png: &[u8]) -> Result<(), AppError> {
 
 /// 写纯文本到剪贴板（`CF_UNICODETEXT`，CRLF 行尾）。
 pub fn copy_text(text: &str) -> Result<(), AppError> {
+    let bytes = utf16_bytes(text);
+
+    let _guard = open_clipboard_with_retry()?;
+    empty_clipboard()?;
+    set_global(u32::from(CF_UNICODETEXT.0), &bytes)
+}
+
+/// 写片段到剪贴板：`CF_HTML` + `CF_UNICODETEXT`。
+///
+/// 像浏览器复制选中内容那样：HTML 让 Word/WPS/网页编辑器按原样还原图片与格式
+/// （图片保留源站 URL），纯文本保证只认文本的应用也能粘。
+/// `CF_HTML` 写入失败时**降级**为纯文本并返回成功——粘贴出文字好过粘贴出空。
+pub fn copy_html(fragment: &str, plain: &str) -> Result<(), AppError> {
+    let html = crate::html_snippet::cf_html_bytes(fragment);
+    let text = utf16_bytes(plain);
+
+    let _guard = open_clipboard_with_retry()?;
+    empty_clipboard()?;
+
+    let html_result = register_format(crate::html_snippet::HTML_FORMAT_NAME)
+        .and_then(|format| set_global(format, &html));
+    if let Err(err) = &html_result {
+        tracing::warn!(error = %err, "failed to write CF_HTML; falling back to plain text");
+    }
+    set_global(u32::from(CF_UNICODETEXT.0), &text)
+}
+
+/// `CF_UNICODETEXT` 的字节序列：CRLF 行尾 + 结尾 NUL，UTF-16LE。
+fn utf16_bytes(text: &str) -> Vec<u8> {
     let utf16 = utf16_crlf(text);
     let mut bytes = Vec::with_capacity(utf16.len() * 2);
     for unit in &utf16 {
         bytes.extend_from_slice(&unit.to_le_bytes());
     }
-
-    let _guard = open_clipboard_with_retry()?;
-    empty_clipboard()?;
-    set_global(u32::from(CF_UNICODETEXT.0), &bytes)
+    bytes
 }
 
 /// 保证任何提前返回都关闭剪贴板。

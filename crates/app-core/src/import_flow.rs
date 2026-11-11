@@ -83,7 +83,9 @@ impl ImportFlow {
             DropContent::FilesWithNote { files, note } => {
                 self.import_files(&files, Some(note.as_str()), &source)
             }
-            DropContent::Text { plain, .. } => self.import_text_snippet(&plain, &source),
+            DropContent::Text { plain, html } => {
+                self.import_text_snippet(&plain, html.as_deref(), &source)
+            }
             DropContent::Url { url } => self.import_link(&url, &source),
             DropContent::ImageDib {
                 width,
@@ -175,7 +177,7 @@ impl ImportFlow {
             title: Some("新建文字".into()),
         };
         let item = self
-            .persist_text(body, title, &source)
+            .persist_text(body, title, &source, None)
             .map_err(|failure| failure.error)?;
         for tag in tags {
             if let Err(err) = self.library.tag_add(&item.id, tag) {
@@ -306,10 +308,16 @@ impl ImportFlow {
                 .map(|stem| stem.to_string_lossy().into_owned())
                 .unwrap_or_else(|| file_name(path))
         });
-        self.persist_text(&text, title, source)
+        self.persist_text(&text, title, source, None)
     }
 
-    fn import_text_snippet(&self, plain: &str, source: &Source) -> Result<Vec<Item>, AppError> {
+    /// 片段入库：正文写 `texts/<id>.txt`，富文本来源额外保存 HTML（复制时还原图片与格式）。
+    fn import_text_snippet(
+        &self,
+        plain: &str,
+        html: Option<&str>,
+        source: &Source,
+    ) -> Result<Vec<Item>, AppError> {
         let chars = plain.chars().count();
         if chars == 0 {
             return Err(self.fail(ImportFailure::invalid("empty drop text")));
@@ -320,7 +328,7 @@ impl ImportFlow {
             ))));
         }
         let title = snippet_title(plain);
-        match self.persist_text(plain, title, source) {
+        match self.persist_text(plain, title, source, html) {
             Ok(item) => Ok(vec![item]),
             Err(failure) => Err(self.fail(failure)),
         }
@@ -424,11 +432,15 @@ impl ImportFlow {
     }
 
     /// 文本落盘 + 入库（无缩略图，直接 `ready`）。
+    ///
+    /// `html` 是富文本来源的片段（复制时写回 `CF_HTML`）；保存失败只 `warn`——
+    /// 素材本身仍然可用，只是复制退化为纯文本。
     fn persist_text(
         &self,
         text: &str,
         title: String,
         source: &Source,
+        html: Option<&str>,
     ) -> Result<Item, ImportFailure> {
         let id = new_item_id();
         let root = self.library.root();
@@ -458,6 +470,12 @@ impl ImportFlow {
                 remove_orphan(&target);
                 ImportFailure::from_error(err)
             })?;
+
+        if let Some(html) = html {
+            if let Err(err) = self.library.set_snippet_html(&item.id, html) {
+                warn!(id = %item.id, error = %err, "failed to store the snippet html");
+            }
+        }
 
         self.mark_ready(&item);
         info!(id = %item.id, chars = char_count(text), "dropped text imported");
@@ -930,6 +948,45 @@ mod tests {
             text
         );
         assert!(fixture.sink.events().is_empty());
+    }
+
+    /// 富文本片段：正文照旧落 txt，HTML 单独存库供复制时写 `CF_HTML`。
+    #[test]
+    fn text_snippet_keeps_its_html_for_copy() {
+        let fixture = fixture();
+        let html = "<p>正文</p><img src=\"https://example.com/a.png\">";
+        let items = fixture
+            .flow
+            .ingest(DropContent::Text {
+                plain: "正文".into(),
+                html: Some(html.into()),
+            })
+            .unwrap();
+
+        assert_eq!(
+            fixture.library.get_snippet_html(&items[0].id).unwrap().as_deref(),
+            Some(html)
+        );
+        // 检索用的正文仍然是纯文本，HTML 不参与索引。
+        let stored = fixture.library.get_item(&items[0].id).unwrap().unwrap();
+        assert_eq!(
+            fs::read_to_string(fixture.library.root().join(&stored.original_path)).unwrap(),
+            "正文"
+        );
+    }
+
+    /// 纯文本片段没有 HTML 记录：复制必须继续走纯文本分支。
+    #[test]
+    fn plain_text_snippet_has_no_html_record() {
+        let fixture = fixture();
+        let items = fixture
+            .flow
+            .ingest(DropContent::Text {
+                plain: "没有格式".into(),
+                html: None,
+            })
+            .unwrap();
+        assert_eq!(fixture.library.get_snippet_html(&items[0].id).unwrap(), None);
     }
 
     #[test]

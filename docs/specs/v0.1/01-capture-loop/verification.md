@@ -367,6 +367,12 @@ R05 的单屏 150% 范围）、**PASS\*/REF 为主** 2 条（R07、R09）、**�
     2×1 24bpp `CF_DIB`（8 字节像素）→ 解码为 PNG 入库（`Parsing` 2×1），并补了截断 DIB
     拒绝与真实 `CreateBitmap` DDB → BGRA 两条测试；**未实测**的只是 Excel/PowerPoint 这类
     真实应用的 `CF_DIB + TYMED_GDI` 源（与 E.9 物理四来源同源）。
+    20. **`CF_BITMAP` 已补测（自动），物理拖拽仍 NOT RUN**：浏览器拖网页图片通常只提供
+     `CF_BITMAP`（DDB），而 OLE 不会为拖拽的 `IDataObject` 合成 `CF_DIB`，此前会被判成
+     「存为链接」。新增探测与解码由 `drop_target::tests::cf_bitmap_drop_is_decoded_as_an_image`
+     （真实 `CreateBitmap`）、`text_and_image_drop_becomes_a_snippet_with_html`
+     （文字 + 图片混选存为片段并保留 HTML）与 `image_drop_with_url_text_stays_an_image`
+     （单图 + 图片 URL 仍存为图片）覆盖；真实 Chrome/Edge 的物理拖拽仍需人工复核。
 
 ## F. 结论
 

@@ -4,6 +4,7 @@
 //! `clipboard::tests` 的 `#[ignore]` 用例里手工跑。
 
 use visrecall_shell::clipboard::{dib_bytes, utf16_crlf};
+use visrecall_shell::html_snippet::cf_html_bytes;
 
 fn u32_at(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
@@ -84,4 +85,33 @@ fn utf16_crlf_handles_empty_and_non_bmp_text() {
     let units = utf16_crlf("😀");
     assert_eq!(units.len(), 3);
     assert_eq!(units[2], 0);
+}
+
+/// 头里的偏移是字节偏移：取出来的区间必须正好是片段本身（含多字节字符）。
+fn header_offset(data: &str, key: &str) -> usize {
+    let index = data.find(key).unwrap();
+    data[index + key.len()..]
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .unwrap()
+}
+
+#[test]
+fn cf_html_offsets_point_at_the_fragment() {
+    let fragment = "<p>你好 &amp; world</p><img src=\"https://example.com/a.png\">";
+    let data = String::from_utf8(cf_html_bytes(fragment)).unwrap();
+
+    let start_fragment = header_offset(&data, "StartFragment:");
+    let end_fragment = header_offset(&data, "EndFragment:");
+    assert_eq!(&data[start_fragment..end_fragment], fragment);
+
+    let start_html = header_offset(&data, "StartHTML:");
+    let end_html = header_offset(&data, "EndHTML:");
+    assert_eq!(&data[start_html..start_html + 5], "<html");
+    assert!(data[start_html..end_html].ends_with("</html>"));
+    assert_eq!(end_html, data.len(), "EndHTML covers the whole payload");
+    assert!(data.starts_with("Version:0.9\r\n"), "{data}");
 }

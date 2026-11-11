@@ -7,6 +7,7 @@ pub mod ball;
 pub mod clipboard;
 pub mod drop_target;
 pub mod hotkey;
+pub mod html_snippet;
 pub mod overlay;
 pub mod selection;
 
@@ -15,7 +16,7 @@ pub use ball::{
     clamp_ball_position, spawn_ball_thread, BallConfig, BallHandle, BALL_CLASS_NAME,
     DEFAULT_BALL_SIZE, MAX_BALL_SIZE, MIN_BALL_SIZE,
 };
-pub use clipboard::{copy_image_png, copy_text, dib_bytes, utf16_crlf};
+pub use clipboard::{copy_html, copy_image_png, copy_text, dib_bytes, utf16_crlf};
 pub use drop_target::DropContent;
 pub use hotkey::{spawn_hotkey_thread, HotkeyHandle, HotkeySpec};
 pub use overlay::{

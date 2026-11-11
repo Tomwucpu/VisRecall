@@ -67,6 +67,7 @@
 
 - 图片素材：同时写入 `CF_DIB`（32bpp BGRA、bottom-up）与注册格式 `PNG`（完整 PNG 字节）；粘贴到 Word、微信输入框、Chrome 地址栏侧均能识别。
 - 文本素材：写入 `CF_UNICODETEXT`，换行统一为 CRLF，不附加摘要/标签/来源。
+- 文本素材若来自富文本拖拽（浏览器「文字 + 图片」），额外写 `CF_HTML`（片段 HTML，图片保留源站 URL），粘贴到 Word/WPS/网页编辑器时可还原图片与基本格式；`CF_HTML` 写入失败时降级为纯文本，不报错。
 - 链接素材：写入 `CF_UNICODETEXT` 的原始 URL。
 - 剪贴板被其他进程占用时重试 5 次 × 20ms，仍失败返回 `CLIPBOARD_BUSY`；写剪贴板失败返回 `CLIPBOARD_FAILED`；原文件不存在返回 `FILE_MISSING`。
 - 成功后前端轻提示「已复制原图 / 已复制原文 / 已复制链接」；失败提示可重试。
