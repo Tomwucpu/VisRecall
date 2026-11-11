@@ -76,6 +76,17 @@ pub struct ItemsPrunedEvent {
     pub count: u64,
 }
 
+/// `items_deleted` 载荷：批量删除的成功/失败条数。
+///
+/// 只在整批结束时发一次：逐条发 `item_deleted` 会让前端做 N 次列表重置，
+/// 大选择集下既卡顿又容易把滚动位置打回顶部。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemsDeletedEvent {
+    pub deleted: u64,
+    pub failed: u64,
+}
+
 /// `pipeline_status` 载荷：索引队列水位（0/0 时前端隐藏提示）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -141,6 +152,10 @@ pub enum AppEvent {
     TagsChanged,
     /// 单条彻底删除。
     ItemDeleted(ItemEvent),
+    /// 用户标题改名；前端失效该条详情、列表与检索缓存。
+    ItemRenamed(ItemEvent),
+    /// 批量删除结束（无论成功失败都发一次，失败数如实汇报）。
+    ItemsDeleted(ItemsDeletedEvent),
     /// 全库清空。
     ItemsReset,
     /// 保留策略清理完成。
@@ -176,6 +191,8 @@ impl AppEvent {
             AppEvent::ItemTagsUpdated(_) => "item_tags_updated",
             AppEvent::TagsChanged => "tags_changed",
             AppEvent::ItemDeleted(_) => "item_deleted",
+            AppEvent::ItemRenamed(_) => "item_renamed",
+            AppEvent::ItemsDeleted(_) => "items_deleted",
             AppEvent::ItemsReset => "items_reset",
             AppEvent::ItemsPruned(_) => "items_pruned",
             AppEvent::StorageMigrationProgress(_) => "storage_migration_progress",
@@ -202,6 +219,8 @@ impl AppEvent {
             AppEvent::ItemTagsUpdated(payload) => json(payload),
             AppEvent::TagsChanged => json(&serde_json::json!({})),
             AppEvent::ItemDeleted(payload) => json(payload),
+            AppEvent::ItemRenamed(payload) => json(payload),
+            AppEvent::ItemsDeleted(payload) => json(payload),
             AppEvent::ItemsReset => json(&serde_json::json!({})),
             AppEvent::ItemsPruned(payload) => json(payload),
             AppEvent::StorageMigrationProgress(payload) => json(payload),
@@ -303,6 +322,18 @@ mod tests {
         let event = AppEvent::ItemsPruned(ItemsPrunedEvent { count: 3 });
         assert_eq!(event.name(), "items_pruned");
         assert_eq!(event.payload()["count"], 3);
+
+        let event = AppEvent::ItemRenamed(ItemEvent { id: "abc".into() });
+        assert_eq!(event.name(), "item_renamed");
+        assert_eq!(event.payload()["id"], "abc");
+
+        let event = AppEvent::ItemsDeleted(ItemsDeletedEvent {
+            deleted: 4,
+            failed: 1,
+        });
+        assert_eq!(event.name(), "items_deleted");
+        assert_eq!(event.payload()["deleted"], 4);
+        assert_eq!(event.payload()["failed"], 1);
 
         let event = AppEvent::StorageMigrationProgress(MigrationProgressEvent::new("copy", 5, 9));
         assert_eq!(event.name(), "storage_migration_progress");

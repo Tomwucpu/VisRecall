@@ -1,9 +1,7 @@
 import { ItemCard, type ItemCardData } from "../library/ItemCard";
 import type { SearchHit } from "../../lib/searchTypes";
-import { hitSource, hitSourceLabel } from "../../lib/searchTypes";
 import { ExplainBar } from "./ExplainBar";
-import { toThumbSrc } from "../../lib/format";
-import { hueForColor } from "../../lib/hue";
+import { hitToCardData } from "./hitToCard";
 
 type Props = {
   hits: SearchHit[];
@@ -15,29 +13,11 @@ type Props = {
   onOpen: (item: ItemCardData) => void;
   onNotThis: (hit: SearchHit) => void;
   selectedId: string | null;
+  /** 多选模式：卡片点击切换选中，列表与检索结果共用同一套交互。 */
+  selectionMode?: boolean;
+  selectedIds?: ReadonlySet<string>;
+  onToggleSelect?: (item: ItemCardData, shift: boolean) => void;
 };
-
-/** 命中 → 卡片数据（`hue` 来自 `primaryColor`，`hit` 用于徽标）。 */
-function toCardData(hit: SearchHit): ItemCardData & { hit: string; summary: string | null } {
-  const item = hit.item;
-  return {
-    id: item.id,
-    kind: item.kind,
-    status: item.status,
-    capturedAt: item.capturedAt,
-    // DTO 的可选字段在这里统一成 `null`，避免卡片里出现 `undefined` 分支
-    sourceApp: item.sourceApp ?? null,
-    sourceTitle: item.sourceTitle ?? null,
-    // 检索命中的 item 是原始 ItemDto：和 useItems 一样必须转成可加载的协议地址。
-    thumbUrl: toThumbSrc(item.thumbUrl ?? null),
-    hue: hueForColor(item.primaryColor),
-    preview: item.preview ?? null,
-    hit: hitSourceLabel(hitSource(hit.explanation)),
-    // 摘要首行：解释里没有摘要字段，详情面板才展示完整摘要；
-    // 列表只显示「命中词」，避免把 200 字摘要塞进卡片。
-    summary: hit.explanation.terms.length > 0 ? hit.explanation.terms.join(" · ") : null,
-  };
-}
 
 /** 检索结果网格：空结果/失败/降级各有一句明确的说明，不留白屏。 */
 export function ResultGrid({
@@ -49,6 +29,9 @@ export function ResultGrid({
   onOpen,
   onNotThis,
   selectedId,
+  selectionMode = false,
+  selectedIds,
+  onToggleSelect,
 }: Props) {
   if (status === "error") {
     return (
@@ -79,10 +62,20 @@ export function ResultGrid({
       )}
       <div className="grid" aria-label="检索结果">
         {hits.map((hit) => {
-          const card = toCardData(hit);
+          const card = hitToCardData(hit);
           return (
             <div key={hit.item.id} className="search-result">
-              <ItemCard item={card} onOpen={onOpen} selected={hit.item.id === selectedId} />
+              <ItemCard
+                item={card}
+                onOpen={onOpen}
+                selected={
+                  selectionMode
+                    ? (selectedIds?.has(hit.item.id) ?? false)
+                    : hit.item.id === selectedId
+                }
+                selectionMode={selectionMode}
+                onToggleSelect={onToggleSelect}
+              />
               <ExplainBar explanation={hit.explanation} semanticReady={semanticReady} />
               <button
                 type="button"

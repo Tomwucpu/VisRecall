@@ -13,6 +13,7 @@ import {
   commands,
   type ApiError,
   type AppStatus,
+  type BatchDeleteReportDto,
   type EmbeddingRebuildDto,
   type DirectoryScanOptionsDto,
   type DirectorySelectionDto,
@@ -24,6 +25,7 @@ import {
   type ImportTaskEntryDto,
   type ItemDetailDto,
   type ItemDto,
+  type ItemFiltersDto_Deserialize,
   type ModelConfigDto,
   type ModelConfigPatchDto,
   type ModelEntryDto,
@@ -44,6 +46,7 @@ import type { SearchResponse } from "./searchTypes";
 export type {
   ApiError,
   AppStatus,
+  BatchDeleteReportDto,
   EmbeddingRebuildDto,
   DirectoryScanOptionsDto,
   DirectorySelectionDto,
@@ -74,6 +77,12 @@ export type {
 
 /** 标签 chip：`auto` 为自动标注（左侧「·」与淡色底），`hue` 为色令牌名。 */
 export type TagChip = TagChipDto;
+
+/** 界面筛选条件；组内 OR、组间 AND，空数组表示该维度不限制。 */
+export type ItemFilters = ItemFiltersDto_Deserialize;
+
+/** 批量删除结果：成功/失败条数。 */
+export type BatchDeleteReport = BatchDeleteReportDto;
 
 /** 详情增强字段（契约 §2）；缺能力时整块为空，界面据此显示占位而不是空白。 */
 export type DetailExtras = ItemDetailDto["extras"];
@@ -178,6 +187,17 @@ export const api = {
   listItems: (cursor: number | null, limit: number): Promise<ItemDto[]> =>
     commands.listItems(cursor, limit),
 
+  /** 带结构化筛选的列表分页；无关键词时用它替代检索链路。 */
+  listItemsFiltered: (
+    filters: ItemFilters,
+    cursor: number | null,
+    limit: number,
+  ): Promise<ItemDto[]> => commands.listItemsFiltered(filters, cursor, limit),
+
+  /** 当前筛选下的全部 id（后端上限 2000），供「全选当前筛选」。 */
+  listItemIdsFiltered: (filters: ItemFilters, limit: number | null = null): Promise<string[]> =>
+    commands.listItemIdsFiltered(filters, limit),
+
   openLibraryFolder: (): Promise<null> => commands.openLibraryFolder(),
 
   getSettings: (): Promise<SettingsDto> => commands.getSettings(),
@@ -229,6 +249,13 @@ export const api = {
     await commands.itemDelete(id);
   },
 
+  /** 批量彻底删除；返回成功/失败条数（`NOT_FOUND` 计入成功，重试幂等）。 */
+  deleteItems: (ids: string[]): Promise<BatchDeleteReportDto> => commands.itemDeleteMany(ids),
+
+  /** 保存用户标题；`null` / 空白 = 恢复显示来源标题。 */
+  renameItem: (id: string, title: string | null): Promise<ItemDto> =>
+    commands.itemRename(id, title),
+
   /** 重新解析：强制重跑该素材的完整解析链（当前选用模型）。 */
   reparseItem: async (id: string): Promise<void> => {
     await commands.itemReparse(id);
@@ -273,8 +300,11 @@ export const api = {
     commands.storageRelocate(path),
 
   /** 检索：解析 → 三路召回 → RRF。`limit` 由后端 clamp 到 1..=200。 */
-  search: (raw: string, limit: number = 50): Promise<SearchResponse> =>
-    commands.searchItems(raw, limit),
+  search: (
+    raw: string,
+    limit: number = 50,
+    filters: ItemFilters | null = null,
+  ): Promise<SearchResponse> => commands.searchItems(raw, limit, filters),
 
   /** 「不是这个」反馈：写入 `queries.feedback`（V0.1 无历史 UI）。 */
   searchFeedback: (queryId: string, itemId: string, signal: string): Promise<null> =>

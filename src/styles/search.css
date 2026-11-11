@@ -244,3 +244,270 @@
   font-size: 10px;
 }
 
+/* ============ 结构化筛选栏 ============ */
+.filter-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+
+.filter-bar-label {
+  margin-right: 2px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.filter-pill-wrap {
+  position: relative;
+}
+
+.filter-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink-2);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition:
+    background 0.16s var(--ease),
+    border-color 0.16s var(--ease),
+    color 0.16s var(--ease);
+}
+
+.filter-pill:hover {
+  border-color: var(--ink-3);
+  color: var(--ink);
+}
+
+.filter-pill[aria-expanded="true"] {
+  border-color: var(--hue-ochre);
+  color: var(--ink);
+}
+
+.filter-pill.is-active {
+  background: var(--inv-bg);
+  border-color: var(--inv-bg);
+  color: var(--inv-ink);
+}
+
+.filter-pill:focus-visible {
+  outline: 2px solid var(--hue-ochre);
+  outline-offset: 2px;
+}
+
+.filter-pill-count {
+  padding: 0 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 16%, transparent);
+  font-family: var(--mono);
+  font-size: 9.5px;
+}
+
+.filter-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 30;
+  min-width: 220px;
+  max-width: 300px;
+  padding: 10px;
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  background: var(--elevated);
+  box-shadow: var(--shadow-md);
+  animation: filter-in 0.18s var(--ease);
+}
+
+@keyframes filter-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.filter-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.filter-option:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.filter-option input {
+  accent-color: var(--hue-ochre);
+  cursor: pointer;
+}
+
+.filter-tag-list {
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.filter-empty {
+  margin: 6px;
+  color: var(--ink-3);
+  font-size: 11.5px;
+}
+
+.filter-panel-foot {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+
+.filter-panel-foot button {
+  border: 0;
+  background: transparent;
+  color: var(--ink-3);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.filter-panel-foot button:hover {
+  color: var(--seal);
+}
+
+.filter-preset-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.filter-preset {
+  height: 26px;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition:
+    background 0.16s var(--ease),
+    color 0.16s var(--ease);
+}
+
+.filter-preset:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.filter-preset.is-active {
+  background: var(--inv-bg);
+  border-color: var(--inv-bg);
+  color: var(--inv-ink);
+}
+
+.filter-custom {
+  margin-top: 10px;
+}
+
+.filter-sub {
+  display: block;
+  margin-bottom: 4px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+}
+
+.filter-date-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.filter-date-row input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  font: 10.5px var(--mono);
+}
+
+.filter-dash {
+  color: var(--ink-3);
+}
+
+/* 生效条件 chip 行：条件多时横向滚动，不换行挤压网格。 */
+.active-filters {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+  padding-bottom: 2px;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 8px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font-size: 11px;
+}
+
+.filter-chip-remove {
+  border: 0;
+  background: transparent;
+  padding: 0 2px;
+  color: var(--ink-3);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.filter-chip-remove:hover {
+  color: var(--seal);
+}
+
+.filter-clear-all {
+  border: 0;
+  background: transparent;
+  color: var(--ink-3);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.filter-clear-all:hover {
+  color: var(--ink);
+}
+
+.selection-toggle.is-active {
+  background: var(--inv-bg);
+  border-color: var(--inv-bg);
+  color: var(--inv-ink);
+}
+

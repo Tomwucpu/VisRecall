@@ -10,10 +10,10 @@ import { ConfirmDialog } from "../common/ConfirmDialog";
 type Props = {
   collapsed: boolean;
   onToggle: () => void;
-  /** 点标签 → 以 `#标签` 作为检索条件（再点一次取消，恢复原查询）。 */
+  /** 点标签 → 切换该标签的筛选（再点一次取消）。 */
   onTagFilter?: (name: string) => void;
-  /** 当前生效的标签筛选（用于高亮与取消）。 */
-  activeTag?: string | null;
+  /** 当前生效的标签筛选（可多选，用于高亮与取消）。 */
+  activeTags?: string[];
   /** 已加载素材数；`null` 表示列表还没就绪。 */
   itemCount: number | null;
 };
@@ -29,7 +29,7 @@ type Props = {
  * `storage_usage_get`。读不到时显示「—」而不是 0 —— 「读不到」与「真的是 0」必须区分。
  * 折叠是纯前端状态（B 键），不落盘。
  */
-export function Sidebar({ collapsed, onToggle, itemCount, onTagFilter, activeTag = null }: Props) {
+export function Sidebar({ collapsed, onToggle, itemCount, onTagFilter, activeTags = [] }: Props) {
   const tags = useQuery({ queryKey: queryKeys.tags, queryFn: () => api.listTags() });
   const usage = useQuery({
     queryKey: queryKeys.usage,
@@ -175,15 +175,17 @@ export function Sidebar({ collapsed, onToggle, itemCount, onTagFilter, activeTag
                 ) : (
                   <span
                     key={tag.id}
-                    className={`tag-pill${activeTag === tag.name ? " is-active" : ""}`}
+                    className={`tag-pill${activeTags.includes(tag.name) ? " is-active" : ""}`}
                     title={
-                      activeTag === tag.name
+                      activeTags.includes(tag.name)
                         ? `取消「${tag.name}」筛选`
                         : `按标签「${tag.name}」筛选`
                     }
                     role={onTagFilter !== undefined ? "button" : undefined}
                     tabIndex={onTagFilter !== undefined ? 0 : undefined}
-                    aria-pressed={onTagFilter !== undefined ? activeTag === tag.name : undefined}
+                    aria-pressed={
+                      onTagFilter !== undefined ? activeTags.includes(tag.name) : undefined
+                    }
                     onClick={
                       onTagFilter !== undefined ? () => onTagFilter(tag.name) : undefined
                     }

@@ -87,6 +87,7 @@ impl SearchFlow {
         vectors: &dyn visrecall_domain::providers::VectorIndex,
         raw: &str,
         limit: u32,
+        filters: &visrecall_domain::ItemFilters,
     ) -> Result<visrecall_search::SearchOutcome, visrecall_domain::AppError> {
         visrecall_search::execute::search(
             visrecall_search::SearchDeps {
@@ -96,7 +97,7 @@ impl SearchFlow {
                 runtime: self.runtime.as_ref(),
                 rrf: visrecall_search::RrfConfig::from_settings(library),
             },
-            visrecall_search::SearchRequest::new(raw, limit),
+            visrecall_search::SearchRequest::new(raw, limit).with_filters(filters.clone()),
         )
     }
 

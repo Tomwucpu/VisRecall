@@ -50,6 +50,8 @@ test("subscribes to every cache-affecting event", async () => {
     "item_created",
     "item_updated",
     "item_deleted",
+    "item_renamed",
+    "items_deleted",
     "items_reset",
     "items_pruned",
     "item_note_updated",
@@ -66,7 +68,7 @@ test("subscribes to every cache-affecting event", async () => {
   ]);
 
   cleanup();
-  expect(mocks.unlisten).toHaveBeenCalledTimes(16);
+  expect(mocks.unlisten).toHaveBeenCalledTimes(18);
 });
 
 test("import events refresh authoritative task and source queries", async () => {
@@ -133,6 +135,40 @@ test("list events reset the items query and refresh usage", async () => {
   invalidate.mockClear();
   emit("item_deleted", { id: "abc" });
   expect(invalidate).toHaveBeenCalledWith({ queryKey: ["orphans"] });
+
+  cleanup();
+});
+
+test("rename invalidates lists without resetting paging", async () => {
+  const { client, reset, invalidate } = makeClient();
+  const cleanup = subscribeAppEvents(client);
+  await flush();
+
+  emit("item_renamed", { id: "abc" });
+
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["items"] });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["items-filtered"] });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["detail", "abc"] });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["search"] });
+  // 改名不改变排序：重置会丢分页位置，必须保留。
+  expect(reset).not.toHaveBeenCalled();
+
+  cleanup();
+});
+
+test("batch delete resets lists once and refreshes counts", async () => {
+  const { client, reset, invalidate } = makeClient();
+  const cleanup = subscribeAppEvents(client);
+  await flush();
+
+  emit("items_deleted", { deleted: 2, failed: 1 });
+
+  expect(reset).toHaveBeenCalledWith({ queryKey: ["items"] });
+  expect(reset).toHaveBeenCalledWith({ queryKey: ["items-filtered"] });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["usage"] });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["orphans"] });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["purge-preview"] });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["tags"] });
 
   cleanup();
 });

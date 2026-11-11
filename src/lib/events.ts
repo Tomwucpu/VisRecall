@@ -13,6 +13,8 @@ type EventName =
   | "item_created"
   | "item_updated"
   | "item_deleted"
+  | "item_renamed"
+  | "items_deleted"
   | "items_reset"
   | "items_pruned"
   | "item_note_updated"
@@ -47,6 +49,8 @@ const ALL_EVENTS: EventName[] = [
   "item_created",
   "item_updated",
   "item_deleted",
+  "item_renamed",
+  "items_deleted",
   "items_reset",
   "items_pruned",
   "item_note_updated",
@@ -158,6 +162,30 @@ function subscribe(names: readonly EventName[], client: QueryClient): () => void
       }
       void client.invalidateQueries({ queryKey: queryKeys.importTasks });
       void client.invalidateQueries({ queryKey: queryKeys.importSources });
+      return;
+    }
+
+    if (name === "item_renamed") {
+      // 重命名不改变排序：用 invalidate 保留已加载分页，避免列表跳回顶部。
+      void client.invalidateQueries({ queryKey: queryKeys.items });
+      void client.invalidateQueries({ queryKey: ["items-filtered"] });
+      void client.invalidateQueries({ queryKey: queryKeys.search });
+      const id = itemIdOf(payload);
+      if (id !== null) {
+        void client.invalidateQueries({ queryKey: queryKeys.detail(id) });
+      }
+      return;
+    }
+
+    if (name === "items_deleted") {
+      // 批量删除：整批只重置一次列表，并刷新所有与「还有多少素材」相关的查询。
+      void client.resetQueries({ queryKey: queryKeys.items });
+      void client.resetQueries({ queryKey: ["items-filtered"] });
+      void client.invalidateQueries({ queryKey: queryKeys.usage });
+      void client.invalidateQueries({ queryKey: queryKeys.orphans });
+      void client.invalidateQueries({ queryKey: queryKeys.purgePreview });
+      void client.invalidateQueries({ queryKey: queryKeys.tags });
+      void client.invalidateQueries({ queryKey: queryKeys.search });
       return;
     }
 

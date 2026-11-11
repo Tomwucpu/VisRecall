@@ -157,7 +157,7 @@ test("clicking a tag pill applies the filter and can be cancelled", async () => 
         onToggle={() => {}}
         itemCount={7}
         onTagFilter={onTagFilter}
-        activeTag="work"
+        activeTags={["work"]}
       />
     </QueryClientProvider>,
   );

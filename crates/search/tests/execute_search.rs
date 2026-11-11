@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use visrecall_domain::insight::{ChartType, Insight, PrimaryColor, SummarySource};
 use visrecall_domain::providers::{EmbeddingProvider, VectorIndex};
 use visrecall_domain::vector_math::quantize_i8;
-use visrecall_domain::{new_item_id, AppError, ItemKind, NewItem};
+use visrecall_domain::{new_item_id, AppError, ItemFilters, ItemKind, ItemStatus, NewItem};
 use visrecall_library::{BruteForceInt8, FtsColumns, Library};
 use visrecall_search::build_search_document;
 use visrecall_search::document::DocumentFields;
@@ -240,6 +240,20 @@ impl Fixture {
         .unwrap()
     }
 
+    fn run_filtered(&self, raw: &str, filters: ItemFilters) -> SearchOutcome {
+        search(
+            SearchDeps {
+                library: &self.library,
+                vectors: &self.vectors,
+                embed: Some(&self.embed),
+                runtime: Some(self.runtime.handle()),
+                rrf: RrfConfig::default(),
+            },
+            SearchRequest::new(raw, 10).with_filters(filters),
+        )
+        .unwrap()
+    }
+
     fn keys(&self, outcome: &SearchOutcome) -> Vec<&'static str> {
         outcome
             .hits
@@ -411,6 +425,63 @@ fn empty_query_returns_recent_items_without_embedding() {
         .query_log_get(&outcome.query_id)
         .unwrap()
         .is_some());
+}
+
+#[test]
+fn ui_filters_intersect_literal_and_semantic_channels() {
+    let fixture = Fixture::new();
+    // 「发票」字面命中 invoice（图片），限定类型为文本后该命中被筛掉。
+    let only_text = ItemFilters {
+        kinds: vec![ItemKind::Text],
+        ..ItemFilters::default()
+    };
+    let filtered = fixture.run_filtered("发票", only_text);
+    assert!(
+        !fixture.keys(&filtered).contains(&"invoice"),
+        "类型筛选后不应再返回图片素材：{:?}",
+        fixture.keys(&filtered)
+    );
+
+    // 「报错」只能靠语义命中 crash（图片）；限定类型为文本后语义命中也失效。
+    let semantic_text = ItemFilters {
+        kinds: vec![ItemKind::Text],
+        ..ItemFilters::default()
+    };
+    let semantic_filtered = fixture.run_filtered("报错", semantic_text);
+    assert!(!fixture.keys(&semantic_filtered).contains(&"crash"));
+    if let Some(hit) = semantic_filtered.hits.first() {
+        assert!(!hit.explanation.semantic, "有筛选时不算纯语义命中");
+    }
+
+    // 不限制类型时，语义通道仍能召回。
+    assert_eq!(fixture.run("报错", 10).hits.len(), 1);
+}
+
+#[test]
+fn ui_filters_only_query_returns_candidates_without_embedding() {
+    let fixture = Fixture::new();
+    let filters = ItemFilters {
+        kinds: vec![ItemKind::Text],
+        tags: vec![],
+        statuses: vec![ItemStatus::Parsing],
+        time_from: None,
+        time_to: None,
+    };
+    let outcome = fixture.run_filtered("", filters);
+    assert!(!outcome.semantic_used, "纯筛选查询不应调用嵌入");
+    assert_eq!(fixture.keys(&outcome), vec!["meeting"]);
+    let hit = &outcome.hits[0];
+    assert_eq!(hit.score, 0.0);
+    assert!(
+        hit.explanation.filters.iter().any(|label| label == "文本"),
+        "解释里要出现命中的类型条件：{:?}",
+        hit.explanation.filters
+    );
+    assert!(
+        hit.explanation.filters.iter().any(|label| label == "解析中"),
+        "解释里要出现命中的状态条件：{:?}",
+        hit.explanation.filters
+    );
 }
 
 #[test]

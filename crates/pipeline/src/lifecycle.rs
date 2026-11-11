@@ -168,7 +168,7 @@ pub fn rebuild_fts_row(library: &Library, item_id: &str) -> Result<(), AppError>
     let tags = joined_tag_names(library, item_id)?;
     let entities = joined_entities(&insight);
     let cols = FtsColumns {
-        title: &tokenize_for_fts(item.source_title.as_deref().unwrap_or("")),
+        title: &tokenize_for_fts(item.display_title().unwrap_or("")),
         summary: &tokenize_for_fts(insight.summary.as_deref().unwrap_or("")),
         ocr_text: &tokenize_for_fts(insight.ocr_text.as_deref().unwrap_or("")),
         note: &tokenize_for_fts(&item.note),

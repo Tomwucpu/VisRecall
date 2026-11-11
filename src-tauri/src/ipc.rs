@@ -65,6 +65,8 @@ pub struct ItemDto {
     pub captured_at: i64,
     pub source_app: Option<String>,
     pub source_title: Option<String>,
+    /// 用户可编辑标题；`null` 表示未改名，界面回落到 `source_title`。
+    pub title: Option<String>,
     pub source_url: Option<String>,
     pub width: Option<u32>,
     pub height: Option<u32>,
@@ -90,6 +92,7 @@ impl From<visrecall_domain::Item> for ItemDto {
             captured_at: item.captured_at,
             source_app: item.source_app,
             source_title: item.source_title,
+            title: item.title,
             source_url: item.source_url,
             width: item.width,
             height: item.height,
@@ -177,6 +180,48 @@ impl From<visrecall_domain::search::ParsedQuery> for ParsedQueryDto {
             tags: parsed.tags,
             semantic_text: parsed.semantic_text,
             chips,
+        }
+    }
+}
+
+/// 界面筛选条的结构化条件；组内 OR、组间 AND，空数组表示该维度不限制。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemFiltersDto {
+    #[serde(default)]
+    pub kinds: Vec<String>,
+    #[serde(default)]
+    pub statuses: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub time_from: Option<i64>,
+    #[serde(default)]
+    pub time_to: Option<i64>,
+}
+
+impl ItemFiltersDto {
+    /// 转成领域类型：未知枚举值直接忽略，不让一个脏值把整次检索打成错误。
+    fn to_domain(&self) -> visrecall_domain::ItemFilters {
+        visrecall_domain::ItemFilters {
+            kinds: self
+                .kinds
+                .iter()
+                .filter_map(|raw| visrecall_domain::ItemKind::parse(raw))
+                .collect(),
+            statuses: self
+                .statuses
+                .iter()
+                .filter_map(|raw| visrecall_domain::ItemStatus::parse(raw))
+                .collect(),
+            tags: self
+                .tags
+                .iter()
+                .map(|tag| tag.trim().to_string())
+                .filter(|tag| !tag.is_empty())
+                .collect(),
+            time_from: self.time_from,
+            time_to: self.time_to,
         }
     }
 }
@@ -699,6 +744,47 @@ pub async fn item_delete(app: tauri::AppHandle, id: String) -> Result<(), ApiErr
     .await
 }
 
+/// 批量删除结果：成功/失败条数（`NotFound` 计入成功，保证重试幂等）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchDeleteReportDto {
+    pub deleted: u64,
+    pub failed: u64,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn item_rename(
+    app: tauri::AppHandle,
+    id: String,
+    title: Option<String>,
+) -> Result<ItemDto, ApiError> {
+    run_blocking(app, move |core| {
+        let library = core.library().map_err(ApiError::from)?;
+        let item = core
+            .rename_item(&id, title.as_deref())
+            .map_err(|err| ApiError::from(&err))?;
+        Ok(dto_with_preview(library, item))
+    })
+    .await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn item_delete_many(
+    app: tauri::AppHandle,
+    ids: Vec<String>,
+) -> Result<BatchDeleteReportDto, ApiError> {
+    run_blocking(app, move |core| {
+        let report = core.delete_items(&ids).map_err(|err| ApiError::from(&err))?;
+        Ok(BatchDeleteReportDto {
+            deleted: report.deleted,
+            failed: report.failed,
+        })
+    })
+    .await
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn item_reparse(app: tauri::AppHandle, id: String) -> Result<(), ApiError> {
@@ -881,12 +967,14 @@ pub async fn search_items(
     app: tauri::AppHandle,
     raw: String,
     limit: Option<u32>,
+    filters: Option<ItemFiltersDto>,
 ) -> Result<SearchResponseDto, ApiError> {
     let limit = limit.unwrap_or(50);
+    let filters = filters.unwrap_or_default().to_domain();
     run_blocking(app, move |core| {
         let library = core.library().map_err(ApiError::from)?;
         let outcome = core
-            .search(&raw, limit)
+            .search(&raw, limit, &filters)
             .map_err(|err| ApiError::from(&err))?;
         let hits = outcome
             .hits
@@ -1101,7 +1189,11 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tag_delete,
             copy_item_original,
             item_delete,
+            item_delete_many,
+            item_rename,
             item_reparse,
+            list_items_filtered,
+            list_item_ids_filtered,
             library_purge_preview,
             library_purge,
             storage_usage_get,
@@ -1239,6 +1331,51 @@ pub async fn list_items(
     .await
 }
 
+/// 带结构化筛选的列表分页；无关键词时直接用它替代检索链路。
+#[tauri::command]
+#[specta::specta]
+pub async fn list_items_filtered(
+    app: tauri::AppHandle,
+    filters: ItemFiltersDto,
+    cursor: Option<i64>,
+    limit: u32,
+) -> Result<Vec<ItemDto>, ApiError> {
+    let limit = limit.clamp(1, 100);
+    let filters = filters.to_domain();
+
+    run_blocking(app, move |core| {
+        let library = core.library().map_err(ApiError::from)?;
+        let items = library
+            .list_items_filtered(&filters, cursor, limit)
+            .map_err(|err| ApiError::from(&err))?;
+        Ok(items
+            .into_iter()
+            .map(|item| dto_with_preview(library, item))
+            .collect())
+    })
+    .await
+}
+
+/// 当前筛选下的全部 id（上限 2000），供「全选当前筛选」。
+#[tauri::command]
+#[specta::specta]
+pub async fn list_item_ids_filtered(
+    app: tauri::AppHandle,
+    filters: ItemFiltersDto,
+    limit: Option<u32>,
+) -> Result<Vec<String>, ApiError> {
+    let limit = limit.unwrap_or(visrecall_library::items::MAX_FILTERED_IDS);
+    let filters = filters.to_domain();
+
+    run_blocking(app, move |core| {
+        let library = core.library().map_err(ApiError::from)?;
+        library
+            .list_item_ids_filtered(&filters, limit)
+            .map_err(|err| ApiError::from(&err))
+    })
+    .await
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn get_item(app: tauri::AppHandle, id: String) -> Result<ItemDto, ApiError> {
@@ -1359,6 +1496,7 @@ mod tests {
             captured_at: 42,
             source_app: None,
             source_title: None,
+            title: None,
             source_url: None,
             width: Some(10),
             height: Some(20),
@@ -1418,6 +1556,7 @@ mod tests {
                 captured_at: 1,
                 source_app: None,
                 source_title: None,
+                title: None,
                 source_url: None,
                 width: None,
                 height: None,

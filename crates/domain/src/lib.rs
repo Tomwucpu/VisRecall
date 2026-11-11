@@ -28,6 +28,7 @@ pub use providers::{
     EmbeddingProvider, OcrOutput, OcrProvider, TextInsight, TextProvider, VectorIndex,
     VisionInsight, VisionProvider,
 };
+pub use search::ItemFilters;
 pub use storage::{
     OrphanStats, PruneReport, RelocateReport, RetentionPolicy, RetentionPreview, StorageUsage,
     DEFAULT_CAPACITY_GB, MAX_CAPACITY_GB, MAX_RETENTION_DAYS, MIN_CAPACITY_GB, MIN_RETENTION_DAYS,

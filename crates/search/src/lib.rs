@@ -16,7 +16,10 @@ pub mod tokenizer;
 
 pub use document::{build_search_document, DocumentFields, DOC_CHAR_BUDGET};
 pub use execute::{search, SearchDeps, SearchOutcome, SearchRequest, CHANNEL_LIMIT, MAX_LIMIT};
-pub use filters::{to_sql, SqlFilter};
+pub use filters::{
+    matched_labels, matched_labels_with_filters, passes, passes_with_filters, to_sql,
+    to_sql_with_filters, SqlFilter,
+};
 pub use fts_query::{build_match_expr, escape_phrase};
 pub use parser::{parse_query, parse_query_at};
 pub use rank::{rrf, RrfConfig, DEFAULT_RRF_K, DEFAULT_WEIGHTS};

@@ -90,6 +90,7 @@ fn initial_indexing_warns_but_does_not_panic_for_missing_item() {
         captured_at: 0,
         source_app: None,
         source_title: None,
+        title: None,
         source_url: None,
         width: None,
         height: None,

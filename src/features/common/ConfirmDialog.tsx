@@ -58,7 +58,8 @@ export function ConfirmDialog({
         <p id="confirm-desc">{description}</p>
         {children}
         <div className="confirm-actions">
-          <button type="button" className="btn" onClick={onCancel}>
+          {/* 破坏性操作默认焦点落在「取消」：误按 Enter 不会直接删数据。 */}
+          <button type="button" className="btn" onClick={onCancel} autoFocus>
             {cancelLabel}
           </button>
           <button

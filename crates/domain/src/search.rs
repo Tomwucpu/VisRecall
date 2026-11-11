@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::insight::OcrBox;
-use crate::item::{Item, ItemKind};
+use crate::item::{Item, ItemKind, ItemStatus};
 
 /// 分词器版本（写入 `settings['fts.tokenizer_version']`，与依赖版本同步维护）。
 pub const TOKENIZER_VERSION: &str = "jieba-rs-0.11";
@@ -31,6 +31,35 @@ impl TimeRange {
 
     pub fn contains(&self, timestamp: i64) -> bool {
         timestamp >= self.from && timestamp < self.to
+    }
+}
+
+/// 界面筛选条的结构化条件（与自然语言解析出的 [`ParsedQuery`] 合并使用）。
+///
+/// 语义：**组内 OR、组间 AND**。例如 `kinds = [image, text]` 且 `tags = [工作]`
+/// 表示「图片或文本，且带工作标签」；空数组表示该维度不限制。
+/// 时间沿用左闭右开（`time_from` 包含、`time_to` 不包含），与 [`TimeRange`] 一致。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemFilters {
+    #[serde(default)]
+    pub kinds: Vec<ItemKind>,
+    #[serde(default)]
+    pub statuses: Vec<ItemStatus>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub time_from: Option<i64>,
+    pub time_to: Option<i64>,
+}
+
+impl ItemFilters {
+    /// 是否没有任何条件（空筛选应完全跳过 SQL 拼装）。
+    pub fn is_empty(&self) -> bool {
+        self.kinds.is_empty()
+            && self.statuses.is_empty()
+            && self.tags.is_empty()
+            && self.time_from.is_none()
+            && self.time_to.is_none()
     }
 }
 

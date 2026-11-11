@@ -1,8 +1,9 @@
 //! `items` 表的 CRUD：插入、按 `captured_at` 键集分页读取、取单条、更新状态。
 
-use rusqlite::{types::Type, OptionalExtension, Row};
+use rusqlite::types::{Type, Value};
+use rusqlite::{OptionalExtension, Row};
 use visrecall_domain::item::{Item, ItemKind, ItemStatus, NewItem};
-use visrecall_domain::{new_item_id, now_millis, AppError};
+use visrecall_domain::{new_item_id, now_millis, AppError, ItemFilters};
 
 use crate::db::{db_error, Library};
 
@@ -10,13 +11,19 @@ use crate::db::{db_error, Library};
 const COLUMNS: &str =
     "i.id, i.kind, i.status, i.captured_at, i.source_app, i.source_title, i.source_url, \
                        i.width, i.height, i.char_count, i.original_path, i.thumb_path, i.note, \
-                       i.content_hash, i.revision, ins.primary_color";
+                       i.content_hash, i.revision, ins.primary_color, i.title";
 
 /// 读取来源：素材 + 解析结果（可能没有 insights 行）。
 const FROM: &str = "items i LEFT JOIN insights ins ON ins.item_id = i.id";
 
 /// 备注长度上限（按字符计，不是字节）。
 pub const MAX_NOTE_CHARS: usize = 10_000;
+
+/// 用户标题长度上限（按字符计）；超出直接拒绝，不静默截断。
+pub const MAX_TITLE_CHARS: usize = 200;
+
+/// 「全选当前筛选」一次最多返回的 id 数：防止把超大数组塞进 UI 状态与事件载荷。
+pub const MAX_FILTERED_IDS: u32 = 2_000;
 
 impl Library {
     /// 插入新素材：生成 id 与时间戳，初始 `status = parsing`，`note` 为空。
@@ -37,6 +44,7 @@ impl Library {
             captured_at: new.captured_at,
             source_app: new.source_app,
             source_title: new.source_title,
+            title: None,
             source_url: new.source_url,
             width: new.width,
             height: new.height,
@@ -104,6 +112,70 @@ impl Library {
         Ok(items)
     }
 
+    /// 带结构化筛选的键集分页：语义与 [`ItemFilters`] 一致（组内 OR、组间 AND）。
+    ///
+    /// 与 [`Library::list_items`] 共用同一套排序与游标语义，前端可以在「无关键词」时
+    /// 直接用它替代普通列表，不必走检索链路。
+    pub fn list_items_filtered(
+        &self,
+        filters: &ItemFilters,
+        cursor: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<Item>, AppError> {
+        let limit = limit.clamp(1, 100);
+        let (where_clause, mut params) = filter_clause(filters, cursor);
+        params.push(Value::Integer(i64::from(limit)));
+        let sql = format!(
+            "SELECT {COLUMNS} FROM {FROM} {where_clause}
+             ORDER BY i.captured_at DESC, i.rowid DESC
+             LIMIT ?{}",
+            params.len()
+        );
+
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(&sql).map_err(db_error)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params), row_to_item)
+            .map_err(db_error)?;
+
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row.map_err(db_error)?);
+        }
+        Ok(items)
+    }
+
+    /// 当前筛选下的全部素材 id（默认上限 [`MAX_FILTERED_IDS`]），供「全选当前筛选」。
+    ///
+    /// 只取 id，不组装 DTO 与预览文本：大结果集下避免把正文读一遍。
+    pub fn list_item_ids_filtered(
+        &self,
+        filters: &ItemFilters,
+        limit: u32,
+    ) -> Result<Vec<String>, AppError> {
+        let limit = limit.clamp(1, MAX_FILTERED_IDS);
+        let (where_clause, mut params) = filter_clause(filters, None);
+        params.push(Value::Integer(i64::from(limit)));
+        let sql = format!(
+            "SELECT i.id FROM items i {where_clause}
+             ORDER BY i.captured_at DESC, i.rowid DESC
+             LIMIT ?{}",
+            params.len()
+        );
+
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(&sql).map_err(db_error)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params), |row| row.get(0))
+            .map_err(db_error)?;
+
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row.map_err(db_error)?);
+        }
+        Ok(ids)
+    }
+
     /// 按 id 取单条；不存在返回 `Ok(None)`。
     pub fn get_item(&self, id: &str) -> Result<Option<Item>, AppError> {
         let conn = self.conn()?;
@@ -168,6 +240,36 @@ impl Library {
             )));
         }
         self.set_item_note(id, text)
+    }
+
+    /// 保存用户标题；`None` 或空白表示恢复「未改名」（写 NULL，展示层回落到来源标题）。
+    ///
+    /// 与备注同一条路径：单次 UPDATE + 元数据钩子；钩子会 `bump_revision` 并入队 index，
+    /// 因此新标题会由索引任务写进 FTS 的 `title` 列，检索立即生效。
+    pub fn set_item_title(&self, id: &str, title: Option<&str>) -> Result<(), AppError> {
+        let normalized = title.map(str::trim).filter(|text| !text.is_empty());
+        if let Some(text) = normalized {
+            if text.chars().count() > MAX_TITLE_CHARS {
+                return Err(AppError::InvalidInput(format!(
+                    "title longer than {MAX_TITLE_CHARS} chars"
+                )));
+            }
+        }
+
+        {
+            let conn = self.conn()?;
+            let updated = conn
+                .execute(
+                    "UPDATE items SET title = ?2, updated_at = ?3 WHERE id = ?1",
+                    rusqlite::params![id, normalized, now_millis()],
+                )
+                .map_err(db_error)?;
+            if updated == 0 {
+                return Err(AppError::NotFound);
+            }
+        }
+        self.notify_metadata_changed(&[id.to_string()]);
+        Ok(())
     }
 
     /// 按状态取素材，按 `captured_at ASC, rowid ASC`（结果稳定，便于分批处理）。
@@ -355,6 +457,75 @@ impl Library {
     }
 }
 
+/// 把 [`ItemFilters`] 翻译成 `WHERE` 子句与编号参数；空条件返回空字符串（无 WHERE）。
+///
+/// 占位符编号跟着 `params.len()` 走，调用方在末尾追加自己的 `LIMIT ?n`，避免手写编号漂移。
+fn filter_clause(filters: &ItemFilters, cursor: Option<i64>) -> (String, Vec<Value>) {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
+
+    if let Some(cursor) = cursor {
+        params.push(Value::Integer(cursor));
+        clauses.push(format!("i.captured_at < ?{}", params.len()));
+    }
+
+    if !filters.kinds.is_empty() {
+        let placeholders: Vec<String> = filters
+            .kinds
+            .iter()
+            .map(|kind| {
+                params.push(Value::Text(kind.as_str().to_string()));
+                format!("?{}", params.len())
+            })
+            .collect();
+        clauses.push(format!("i.kind IN ({})", placeholders.join(", ")));
+    }
+
+    if !filters.statuses.is_empty() {
+        let placeholders: Vec<String> = filters
+            .statuses
+            .iter()
+            .map(|status| {
+                params.push(Value::Text(status_str(*status).to_string()));
+                format!("?{}", params.len())
+            })
+            .collect();
+        clauses.push(format!("i.status IN ({})", placeholders.join(", ")));
+    }
+
+    if !filters.tags.is_empty() {
+        let placeholders: Vec<String> = filters
+            .tags
+            .iter()
+            .map(|tag| {
+                params.push(Value::Text(tag.clone()));
+                format!("?{}", params.len())
+            })
+            .collect();
+        clauses.push(format!(
+            "EXISTS (SELECT 1 FROM item_tags it JOIN tags t ON t.id = it.tag_id \
+             WHERE it.item_id = i.id AND t.name COLLATE NOCASE IN ({}))",
+            placeholders.join(", ")
+        ));
+    }
+
+    if let Some(from) = filters.time_from {
+        params.push(Value::Integer(from));
+        clauses.push(format!("i.captured_at >= ?{}", params.len()));
+    }
+    if let Some(to) = filters.time_to {
+        params.push(Value::Integer(to));
+        clauses.push(format!("i.captured_at < ?{}", params.len()));
+    }
+
+    let where_clause = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", clauses.join(" AND "))
+    };
+    (where_clause, params)
+}
+
 fn row_to_item(row: &Row<'_>) -> rusqlite::Result<Item> {
     row_to_item_offset(row, 0)
 }
@@ -369,6 +540,7 @@ fn row_to_item_offset(row: &Row<'_>, offset: usize) -> rusqlite::Result<Item> {
         captured_at: row.get(at(3))?,
         source_app: row.get(at(4))?,
         source_title: row.get(at(5))?,
+        title: row.get(at(16))?,
         source_url: row.get(at(6))?,
         width: row.get::<_, Option<i64>>(at(7))?.map(|value| value as u32),
         height: row.get::<_, Option<i64>>(at(8))?.map(|value| value as u32),

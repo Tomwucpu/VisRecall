@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
 
@@ -77,6 +77,40 @@ const commands = vi.hoisted(() => ({
     tagDelete: vi.fn(async () => 0),
     copyItemOriginal: vi.fn(async () => undefined),
     itemDelete: vi.fn(async () => undefined),
+    itemDeleteMany: vi.fn(async () => ({ deleted: 1, failed: 0 })),
+    itemRename: vi.fn(async (id: string) => ({
+      id,
+      kind: "image",
+      status: "ready",
+      capturedAt: 1_700_000_000_000,
+      sourceApp: "chrome.exe",
+      sourceTitle: "第一条素材",
+      title: "新标题",
+      sourceUrl: null,
+      width: 800,
+      height: 500,
+      charCount: null,
+      note: "",
+      thumbUrl: null,
+    })),
+    listItemsFiltered: vi.fn(async () => [
+      {
+        id: "item-1",
+        kind: "image",
+        status: "ready",
+        capturedAt: 1_700_000_000_000,
+        sourceApp: "chrome.exe",
+        sourceTitle: "第一条素材",
+        title: null,
+        sourceUrl: null,
+        width: 800,
+        height: 500,
+        charCount: null,
+        note: "",
+        thumbUrl: null,
+      },
+    ]),
+    listItemIdsFiltered: vi.fn(async () => ["item-1"]),
     storageUsageGet: vi.fn(async () => ({
       usedBytes: 0,
       capacityBytes: 1,
@@ -215,4 +249,62 @@ test("hides the banner when no restart is required", async () => {
   renderApp();
   await screen.findAllByText("本地索引已就绪");
   expect(document.querySelector(".migration-banner")).toBeNull();
+});
+
+test("selection mode turns cards into checkboxes and batch delete asks for confirmation", async () => {
+  renderApp();
+
+  const toggle = await screen.findByRole("button", { name: "选择" });
+  fireEvent.click(toggle);
+  expect(toggle).toHaveTextContent("完成");
+
+  const card = await screen.findByRole("checkbox");
+  fireEvent.click(card);
+
+  expect(await screen.findByText("已选 1 项")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "删除" }));
+
+  const dialog = await screen.findByRole("dialog");
+  expect(dialog).toHaveTextContent("删除 1 项素材？");
+  fireEvent.click(within(dialog).getByRole("button", { name: "删除" }));
+
+  await waitFor(() => {
+    expect(commands.itemDeleteMany).toHaveBeenCalledWith(["item-1"]);
+  });
+});
+
+test("choosing a kind filter queries the filtered endpoint instead of the plain list", async () => {
+  renderApp();
+  await screen.findByRole("button", { name: /第一条素材/ });
+
+  fireEvent.click(screen.getByRole("button", { name: /类型/ }));
+  fireEvent.click(screen.getByLabelText("图片", { exact: false }));
+
+  await waitFor(() => {
+    expect(commands.listItemsFiltered).toHaveBeenCalledWith(
+      { kinds: ["image"], statuses: [], tags: [], timeFrom: null, timeTo: null },
+      null,
+      50,
+    );
+  });
+});
+
+test("renaming from the detail panel saves through itemRename", async () => {
+  renderApp();
+
+  const card = await screen.findByRole("button", { name: /第一条素材/ });
+  fireEvent.click(card);
+  // 卡片本身不再提供重命名入口，只有详情标题旁的铅笔按钮。
+  const rename = await screen.findByRole("button", { name: "重命名" });
+  fireEvent.click(rename);
+
+  // 详情里已有备注输入框，重命名输入框必须限定在弹窗内查找。
+  const dialog = await screen.findByRole("dialog", { name: "重命名素材" });
+  const input = within(dialog).getByRole("textbox");
+  fireEvent.change(input, { target: { value: "会议记录" } });
+  fireEvent.click(within(dialog).getByRole("button", { name: "保存" }));
+
+  await waitFor(() => {
+    expect(commands.itemRename).toHaveBeenCalledWith("item-1", "会议记录");
+  });
 });

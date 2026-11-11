@@ -58,7 +58,7 @@ pub(crate) fn run_for(ctx: &JobCtx<'_>) -> Result<(), AppError> {
     let tags = joined_tag_names(ctx.library, &item.id)?;
     let entities = joined_entities(&insight);
     let document = build_search_document(&DocumentFields {
-        title: item.source_title.as_deref().unwrap_or(""),
+        title: item.display_title().unwrap_or(""),
         summary: insight.summary.as_deref().unwrap_or(""),
         tags: &tags,
         entities: &entities,
@@ -87,7 +87,7 @@ pub(crate) fn run_for(ctx: &JobCtx<'_>) -> Result<(), AppError> {
 
     let table = ctx.library.active_vector_table();
     let cols = FtsColumns {
-        title: &tokenize_for_fts(item.source_title.as_deref().unwrap_or("")),
+        title: &tokenize_for_fts(item.display_title().unwrap_or("")),
         summary: &tokenize_for_fts(insight.summary.as_deref().unwrap_or("")),
         ocr_text: &tokenize_for_fts(insight.ocr_text.as_deref().unwrap_or("")),
         note: &tokenize_for_fts(&item.note),
@@ -128,7 +128,7 @@ pub(crate) fn document_for(library: &Library, item: &Item) -> Result<String, App
     let tags = joined_tag_names(library, &item.id)?;
     let entities = joined_entities(&insight);
     Ok(build_search_document(&DocumentFields {
-        title: item.source_title.as_deref().unwrap_or(""),
+        title: item.display_title().unwrap_or(""),
         summary: insight.summary.as_deref().unwrap_or(""),
         tags: &tags,
         entities: &entities,

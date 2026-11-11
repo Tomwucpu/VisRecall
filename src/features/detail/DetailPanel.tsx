@@ -14,11 +14,14 @@ import { queryKeys } from "../../lib/queryClient";
 import { pushToast } from "../../lib/toast";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import type { ItemCardData } from "../library/ItemCard";
+import { displayTitle } from "../../lib/itemText";
 import { ImageOverlay } from "./ImageOverlay";
 
 type Props = {
   item: ItemCardData;
   onClose: () => void;
+  /** 打开重命名弹窗；不传时标题区不显示铅笔按钮。 */
+  onRename?: (item: ItemCardData) => void;
 };/** 备注上限（契约草案：10000 字，超限阻止输入而不是截断保存）。 */
 const NOTE_LIMIT = 10_000;
 
@@ -50,7 +53,7 @@ const REFERENCE_STATUS_LABEL: Record<string, string> = {
  * 缺能力处一律显式占位（「待阶段 02 提供」），不显示任何伪造内容。
  * AI 描述区块只渲染 `SUMMARY_PLACEHOLDER`，复制按钮始终禁用（红线）。
  */
-export function DetailPanel({ item, onClose }: Props) {
+export function DetailPanel({ item, onClose, onRename }: Props) {
   const queryClient = useQueryClient();
   const detail = useQuery({
     queryKey: queryKeys.detail(item.id),
@@ -241,7 +244,8 @@ export function DetailPanel({ item, onClose }: Props) {
   // 否则覆盖层加载失败后会静默回退到 480px 缩略图（看起来「不是原图」）。
   const originalUrl = toOriginalSrc(extras?.originalUrl ?? null);
   const full = detail.data?.item;
-  const title = item.sourceTitle ?? "未命名来源";
+  const title = displayTitle(item);
+  const renamed = (item.title?.trim() ?? "").length > 0;
   const kind = kindLabel(item.kind);
   const sizeText =
     full?.width != null && full.height != null ? `${full.width} × ${full.height}` : "—";
@@ -314,7 +318,32 @@ export function DetailPanel({ item, onClose }: Props) {
             </div>
           )}
 
-          <h2 className="d-title">{title}</h2>
+          <div className="d-title-row">
+            <h2 className="d-title">{title}</h2>
+            {onRename !== undefined && (
+              <button
+                type="button"
+                className="d-rename"
+                title={`重命名 ${title}`}
+                aria-label="重命名"
+                onClick={() => onRename(item)}
+              >
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <path
+                    d="M10.4 2.6l3 3L5.6 13.4 2 14l.6-3.6 7.8-7.8z"
+                    stroke="currentColor"
+                    strokeWidth="1.4"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
+            )}
+          </div>
+          {renamed && item.sourceTitle !== null && item.sourceTitle.trim().length > 0 && (
+            <p className="d-source-title" title={item.sourceTitle}>
+              来源：{item.sourceTitle}
+            </p>
+          )}
           <div className="d-src">
             <span className="mono">{item.sourceApp ?? "未知来源"}</span>
             <span className="dot" />

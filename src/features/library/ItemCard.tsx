@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties, type MouseEvent } from "react";
 import { api } from "../../lib/api";
 import { errorCode, errorMessage } from "../../lib/errors";
 import {
@@ -10,6 +10,7 @@ import {
   statusTone,
 } from "../../lib/format";
 import { pushToast } from "../../lib/toast";
+import { displayTitle } from "../../lib/itemText";
 
 /** 卡片只需要列表展示字段；`thumbUrl` 已是可直接给 `<img>` 用的地址。 */
 export type ItemCardData = {
@@ -19,6 +20,8 @@ export type ItemCardData = {
   capturedAt: number;
   sourceApp: string | null;
   sourceTitle: string | null;
+  /** 用户可编辑标题；`null`/缺省 = 未改名，展示回落到 `sourceTitle`。 */
+  title?: string | null;
   thumbUrl: string | null;
   /**
    * hue-dot 的取色令牌（如 `var(--hue-ochre)`）。
@@ -41,6 +44,10 @@ type Props = {
   /** 有回调时卡片才可点、可聚焦；没有回调时保持纯展示（测试与列表预览）。 */
   onOpen?: (item: ItemCardData) => void;
   selected?: boolean;
+  /** 多选模式：复选框常驻、点击卡片切换选中、隐藏复制/重命名。 */
+  selectionMode?: boolean;
+  /** `shift` 用于区间连选。 */
+  onToggleSelect?: (item: ItemCardData, shift: boolean) => void;
 };
 
 /** 只有「待解析 / 失败」用印章色强调，其余状态保持中性徽标。 */
@@ -57,10 +64,16 @@ function showsBadge(status: string): boolean {
   return statusTone(status) !== "ready";
 }
 
-/** 单张素材卡：缩略图（无图时占位）、状态徽标、复制按钮、标题与来源/时间元信息。 */
-export function ItemCard({ item, onOpen, selected = false }: Props) {
+/** 单张素材卡：缩略图（无图时占位）、状态徽标、复制/重命名按钮、标题与元信息。 */
+export function ItemCard({
+  item,
+  onOpen,
+  selected = false,
+  selectionMode = false,
+  onToggleSelect,
+}: Props) {
   const kind = kindLabel(item.kind);
-  const title = item.sourceTitle ?? "未命名来源";
+  const title = displayTitle(item);
   const hasTime = Number.isFinite(item.capturedAt);
   const timeText = hasTime ? formatRelativeTime(item.capturedAt) : "未知时间";
   // 非法时间戳直接跳过 `toISOString()`，否则会抛 RangeError。
@@ -79,8 +92,16 @@ export function ItemCard({ item, onOpen, selected = false }: Props) {
   const preview = item.preview ?? "";
   const busy = item.status === "parsing" || item.status === "pending";
   const hueStyle = { "--hue": item.hue ?? "var(--hue-ash)" } as CSSProperties;
-  const interactive = onOpen !== undefined;
+  const interactive = selectionMode ? onToggleSelect !== undefined : onOpen !== undefined;
   const copyText = copyLabel(item.kind);
+
+  const activate = (event?: MouseEvent) => {
+    if (selectionMode) {
+      onToggleSelect?.(item, event?.shiftKey ?? false);
+      return;
+    }
+    onOpen?.(item);
+  };
 
   const copy = async (event: { stopPropagation: () => void }) => {
     // 卡片本身也是按钮：复制不能顺手把详情打开。
@@ -109,19 +130,22 @@ export function ItemCard({ item, onOpen, selected = false }: Props) {
 
   return (
     <article
-      className={`card${busy ? " is-pending" : ""}${selected ? " selected" : ""}`}
+      className={`card${busy ? " is-pending" : ""}${selected ? " selected" : ""}${
+        selectionMode ? " is-selecting" : ""
+      }`}
       data-item-id={item.id}
       title={item.sourceTitle ?? undefined}
-      role={interactive ? "button" : undefined}
+      role={interactive ? (selectionMode ? "checkbox" : "button") : undefined}
       tabIndex={interactive ? 0 : undefined}
-      aria-pressed={interactive ? selected : undefined}
-      onClick={interactive ? () => onOpen(item) : undefined}
+      aria-checked={selectionMode && interactive ? selected : undefined}
+      aria-pressed={!selectionMode && interactive ? selected : undefined}
+      onClick={interactive ? (event) => activate(event) : undefined}
       onKeyDown={
         interactive
           ? (event) => {
               if (event.key === "Enter" || event.key === " ") {
                 event.preventDefault();
-                onOpen(item);
+                activate();
               }
             }
           : undefined
@@ -149,35 +173,46 @@ export function ItemCard({ item, onOpen, selected = false }: Props) {
           <span className="thumb-fallback">{kind}</span>
         )}
         {busy && <span className="shimmer" />}
+        {selectionMode && (
+          <span className={`card-check${selected ? " is-checked" : ""}`} aria-hidden="true">
+            {selected && (
+              <svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+                <path d="M2.2 6.3l2.5 2.5 5-5.4" stroke="currentColor" strokeWidth="1.8" />
+              </svg>
+            )}
+          </span>
+        )}
         {showsBadge(item.status) && (
           <span className={badgeClass(item.status)}>{statusLabel(item.status)}</span>
         )}
-        <button
-          type="button"
-          className="card-copy"
-          title={copyText}
-          aria-label={copyText}
-          disabled={copying}
-          onClick={copy}
-          onKeyDown={(event) => event.stopPropagation()}
-        >
-          <svg
-            width="13"
-            height="13"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.5"
-            strokeLinejoin="round"
-            aria-hidden="true"
+        {!selectionMode && (
+          <button
+            type="button"
+            className="card-copy"
+            title={copyText}
+            aria-label={copyText}
+            disabled={copying}
+            onClick={copy}
+            onKeyDown={(event) => event.stopPropagation()}
           >
-            <rect x="8.6" y="8.6" width="11" height="11" rx="2.2" />
-            <path
-              d="M15.4 5.6A2.6 2.6 0 0012.8 3H6.6A2.6 2.6 0 004 5.6v6.2a2.6 2.6 0 002.6 2.6"
-              strokeLinecap="round"
-            />
-          </svg>
-        </button>
+            <svg
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <rect x="8.6" y="8.6" width="11" height="11" rx="2.2" />
+              <path
+                d="M15.4 5.6A2.6 2.6 0 0012.8 3H6.6A2.6 2.6 0 004 5.6v6.2a2.6 2.6 0 002.6 2.6"
+                strokeLinecap="round"
+              />
+            </svg>
+          </button>
+        )}
       </div>
 
       <div className="card-body">

@@ -7,7 +7,8 @@
 //! `params.len()`——单测强制断言，避免拼接漂移。
 
 use rusqlite::types::Value;
-use visrecall_domain::search::ParsedQuery;
+use visrecall_domain::item::ItemStatus;
+use visrecall_domain::search::{ItemFilters, ParsedQuery};
 use visrecall_domain::AppError;
 
 /// 一段可执行的候选集查询。
@@ -50,7 +51,18 @@ impl SqlFilter {
 
 /// 把解析结果翻译成候选集 SQL。无过滤器返回空 `SqlFilter`。
 pub fn to_sql(query: &ParsedQuery) -> Result<SqlFilter, AppError> {
-    if !query.has_filters() {
+    to_sql_with_filters(query, &ItemFilters::default())
+}
+
+/// 自然语言条件 + 界面筛选条条件的合并候选集。
+///
+/// 两套条件都下推到 SQL：组内 OR、组间 AND。合并成**一个**候选集后，FTS 与向量
+/// 通道才共用同一批 rowid——否则先召回再过滤会出现「解释说命中、结果却被筛掉」。
+pub fn to_sql_with_filters(
+    query: &ParsedQuery,
+    filters: &ItemFilters,
+) -> Result<SqlFilter, AppError> {
+    if !query.has_filters() && filters.is_empty() {
         return Ok(SqlFilter::default());
     }
 
@@ -116,6 +128,57 @@ pub fn to_sql(query: &ParsedQuery) -> Result<SqlFilter, AppError> {
         ));
     }
 
+    // ----- 界面筛选条：组内 OR、组间 AND -----
+    if !filters.kinds.is_empty() {
+        let placeholders: Vec<String> = filters
+            .kinds
+            .iter()
+            .map(|kind| {
+                params.push(Value::Text(kind.as_str().to_string()));
+                format!("?{}", params.len())
+            })
+            .collect();
+        clauses.push(format!("i.kind IN ({})", placeholders.join(", ")));
+    }
+
+    if !filters.statuses.is_empty() {
+        let placeholders: Vec<String> = filters
+            .statuses
+            .iter()
+            .map(|status| {
+                params.push(Value::Text(status_str(*status).to_string()));
+                format!("?{}", params.len())
+            })
+            .collect();
+        clauses.push(format!("i.status IN ({})", placeholders.join(", ")));
+    }
+
+    if !filters.tags.is_empty() {
+        let placeholders: Vec<String> = filters
+            .tags
+            .iter()
+            .map(|tag| {
+                params.push(Value::Text(tag.clone()));
+                format!("?{}", params.len())
+            })
+            .collect();
+        // 与自然语言 `#tag`（逐条 AND）不同：界面多选标签是「任一命中」。
+        clauses.push(format!(
+            "EXISTS (SELECT 1 FROM item_tags it JOIN tags t ON t.id = it.tag_id \
+             WHERE it.item_id = i.id AND t.name COLLATE NOCASE IN ({}))",
+            placeholders.join(", ")
+        ));
+    }
+
+    if let Some(from) = filters.time_from {
+        params.push(Value::Integer(from));
+        clauses.push(format!("i.captured_at >= ?{}", params.len()));
+    }
+    if let Some(to) = filters.time_to {
+        params.push(Value::Integer(to));
+        clauses.push(format!("i.captured_at < ?{}", params.len()));
+    }
+
     let where_clause = clauses.join(" AND ");
     Ok(SqlFilter {
         clause: format!(
@@ -135,6 +198,16 @@ pub fn passes(
     item: &visrecall_domain::Item,
     insight: Option<&visrecall_domain::Insight>,
     query: &ParsedQuery,
+) -> bool {
+    passes_with_filters(item, insight, query, &ItemFilters::default())
+}
+
+/// 解析条件 + 界面筛选条件的内存侧过滤（语义同 [`to_sql_with_filters`]）。
+pub fn passes_with_filters(
+    item: &visrecall_domain::Item,
+    insight: Option<&visrecall_domain::Insight>,
+    query: &ParsedQuery,
+    filters: &ItemFilters,
 ) -> bool {
     if let Some(time) = &query.time {
         if !time.contains(item.captured_at) {
@@ -179,7 +252,25 @@ pub fn passes(
             return false;
         }
     }
-    // 标签在 SQL 里已用 EXISTS 过滤；内存侧不再查库（避免 N+1），交给调用方保证。
+    // 界面筛选：类型/状态/时间可以就地判断；标签在 SQL 里已用 EXISTS 过滤，
+    // 内存侧不再查库（避免 N+1），交给调用方保证。
+    if !filters.kinds.is_empty() && !filters.kinds.contains(&item.kind) {
+        return false;
+    }
+    if !filters.statuses.is_empty() && !filters.statuses.contains(&item.status) {
+        return false;
+    }
+    if let Some(from) = filters.time_from {
+        if item.captured_at < from {
+            return false;
+        }
+    }
+    if let Some(to) = filters.time_to {
+        if item.captured_at >= to {
+            return false;
+        }
+    }
+
     true
 }
 
@@ -188,6 +279,16 @@ pub fn matched_labels(
     item: &visrecall_domain::Item,
     insight: Option<&visrecall_domain::Insight>,
     query: &ParsedQuery,
+) -> Vec<String> {
+    matched_labels_with_filters(item, insight, query, &ItemFilters::default())
+}
+
+/// 解析条件 + 界面筛选条件的命中文案（解释面板的 filters 行）。
+pub fn matched_labels_with_filters(
+    item: &visrecall_domain::Item,
+    insight: Option<&visrecall_domain::Insight>,
+    query: &ParsedQuery,
+    filters: &ItemFilters,
 ) -> Vec<String> {
     let mut labels = Vec::new();
     if query.time.is_some() && query.time.is_some_and(|t| t.contains(item.captured_at)) {
@@ -235,7 +336,32 @@ pub fn matched_labels(
     for tag in &query.tags {
         labels.push(format!("#{tag}"));
     }
+
+    // 界面筛选命中的条件（同样只在真正满足时展示）。
+    if filters.kinds.contains(&item.kind) {
+        labels.push(item.kind.label_zh().to_string());
+    }
+    if filters.statuses.contains(&item.status) {
+        labels.push(item.status.label_zh().to_string());
+    }
+    if let Some(from) = filters.time_from {
+        if item.captured_at >= from {
+            labels.push("时间".to_string());
+        }
+    }
+    for tag in &filters.tags {
+        labels.push(format!("#{tag}"));
+    }
     labels
+}
+
+fn status_str(status: ItemStatus) -> &'static str {
+    match status {
+        ItemStatus::Parsing => "parsing",
+        ItemStatus::Ready => "ready",
+        ItemStatus::Pending => "pending",
+        ItemStatus::Failed => "failed",
+    }
 }
 
 #[cfg(test)]

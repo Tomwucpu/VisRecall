@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api } from "../../lib/api";
+import { api, type ItemFilters } from "../../lib/api";
 import { describeError } from "../../lib/errors";
 import type { SearchHit, SearchResponse, SearchStatus } from "../../lib/searchTypes";
 
@@ -26,10 +26,13 @@ const IDLE: State = { response: null, status: "idle", error: null, busy: false }
  * 后端已经在算了，能做的只是别把旧结果盖到新结果上。序号在每次输入时 +1，
  * 响应回来时只有序号仍是最新的才允许写入 state。
  */
-export function useSearch(raw: string) {
+export function useSearch(raw: string, filters: ItemFilters | null = null, filterKey = "") {
   const [state, setState] = useState<State>(IDLE);
   const trimmed = raw.trim();
   const seq = useRef(0);
+  // 筛选对象每次渲染都可能换引用；effect 依赖稳定的 `filterKey`，值走 ref 取最新。
+  const filtersRef = useRef(filters);
+  filtersRef.current = filters;
 
   useEffect(() => {
     if (trimmed.length === 0) {
@@ -43,7 +46,7 @@ export function useSearch(raw: string) {
 
     const timer = window.setTimeout(() => {
       api
-        .search(trimmed, SEARCH_LIMIT)
+        .search(trimmed, SEARCH_LIMIT, filtersRef.current)
         .then((response) => {
           if (current !== seq.current) {
             return;
@@ -59,7 +62,7 @@ export function useSearch(raw: string) {
     }, SEARCH_DEBOUNCE_MS);
 
     return () => window.clearTimeout(timer);
-  }, [trimmed]);
+  }, [trimmed, filterKey]);
 
   const feedback = useCallback(
     async (hit: SearchHit) => {

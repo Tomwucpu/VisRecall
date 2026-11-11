@@ -23,7 +23,13 @@ export const commands = {
 	/**  复制原始内容：图片 `CF_DIB` + `PNG`，文本/链接 `CF_UNICODETEXT`。 */
 	copyItemOriginal: (itemId: string) => __TAURI_INVOKE<null>("copy_item_original", { itemId }),
 	itemDelete: (id: string) => __TAURI_INVOKE<null>("item_delete", { id }),
+	itemDeleteMany: (ids: string[]) => __TAURI_INVOKE<BatchDeleteReportDto>("item_delete_many", { ids }),
+	itemRename: (id: string, title: string | null) => __TAURI_INVOKE<ItemDto_Serialize>("item_rename", { id, title }),
 	itemReparse: (id: string) => __TAURI_INVOKE<null>("item_reparse", { id }),
+	/**  带结构化筛选的列表分页；无关键词时直接用它替代检索链路。 */
+	listItemsFiltered: (filters: ItemFiltersDto_Deserialize, cursor: number | null, limit: number) => __TAURI_INVOKE<ItemDto_Serialize[]>("list_items_filtered", { filters, cursor, limit }),
+	/**  当前筛选下的全部 id（上限 2000），供「全选当前筛选」。 */
+	listItemIdsFiltered: (filters: ItemFiltersDto_Deserialize, limit: number | null) => __TAURI_INVOKE<string[]>("list_item_ids_filtered", { filters, limit }),
 	libraryPurgePreview: () => __TAURI_INVOKE<PurgePreview>("library_purge_preview"),
 	libraryPurge: (confirm: string) => __TAURI_INVOKE<null>("library_purge", { confirm }),
 	storageUsageGet: () => __TAURI_INVOKE<StorageUsageDto>("storage_usage_get"),
@@ -61,7 +67,7 @@ export const commands = {
 	 *  所有阶段 01 命令的注册点；命令同时带 `#[tauri::command]` 与 `#[specta::specta]`。
 	 *  检索（三路召回 + RRF）；解析是纯规则快路径，不阻塞。
 	 */
-	searchItems: (raw: string, limit: number | null) => __TAURI_INVOKE<SearchResponseDto_Serialize>("search_items", { raw, limit }),
+	searchItems: (raw: string, limit: number | null, filters: ItemFiltersDto_Deserialize | null) => __TAURI_INVOKE<SearchResponseDto_Serialize>("search_items", { raw, limit, filters }),
 	/**  「不是这个」反馈；`queryId` 不存在返回 `NOT_FOUND`。 */
 	searchFeedback: (queryId: string, itemId: string, signal: string) => __TAURI_INVOKE<null>("search_feedback", { queryId, itemId, signal }),
 	/**  探测指定模型 id：连通性 + 视觉能力 + 延迟（按该模型已保存的协议）。 */
@@ -105,6 +111,12 @@ export type AppStatus = {
 	libraryOk: boolean,
 	/**  库已迁移、需要重启才能沿用新库；为真期间捕获被 `BUSY` 拒绝。 */
 	restartRequired: boolean,
+};
+
+/**  批量删除结果：成功/失败条数（`NotFound` 计入成功，保证重试幂等）。 */
+export type BatchDeleteReportDto = {
+	deleted: number,
+	failed: number,
 };
 
 /**  详情面板的额外内容。 */
@@ -333,6 +345,8 @@ export type ItemDto_Deserialize = {
 	capturedAt: number,
 	sourceApp?: string | null,
 	sourceTitle?: string | null,
+	/**  用户可编辑标题；`null` 表示未改名，界面回落到 `source_title`。 */
+	title?: string | null,
 	sourceUrl?: string | null,
 	width?: number | null,
 	height?: number | null,
@@ -353,6 +367,8 @@ export type ItemDto_Serialize = {
 	capturedAt: number,
 	sourceApp: string | null,
 	sourceTitle: string | null,
+	/**  用户可编辑标题；`null` 表示未改名，界面回落到 `source_title`。 */
+	title: string | null,
 	sourceUrl: string | null,
 	width: number | null,
 	height: number | null,
@@ -363,6 +379,27 @@ export type ItemDto_Serialize = {
 	primaryColor: string | null,
 	/**  卡片缩略区的文本预览（文本原文 / 链接 URL 的前 160 字符）；图片或读不到为 `null`。 */
 	preview: string | null,
+};
+
+/**  界面筛选条的结构化条件；组内 OR、组间 AND，空数组表示该维度不限制。 */
+export type ItemFiltersDto = ItemFiltersDto_Serialize | ItemFiltersDto_Deserialize;
+
+/**  界面筛选条的结构化条件；组内 OR、组间 AND，空数组表示该维度不限制。 */
+export type ItemFiltersDto_Deserialize = {
+	kinds?: string[],
+	statuses?: string[],
+	tags?: string[],
+	timeFrom?: number | null,
+	timeTo?: number | null,
+};
+
+/**  界面筛选条的结构化条件；组内 OR、组间 AND，空数组表示该维度不限制。 */
+export type ItemFiltersDto_Serialize = {
+	kinds: string[],
+	statuses: string[],
+	tags: string[],
+	timeFrom: number | null,
+	timeTo: number | null,
 };
 
 /**  模型配置读取视图：列表 + 当前启用项。 */

@@ -3,6 +3,8 @@ import { QueryClient } from "@tanstack/react-query";
 /** 全应用共用的查询键；事件刷新与列表共用同一份定义，避免拼错。 */
 export const queryKeys = {
   items: ["items"] as const,
+  /** 带筛选的列表分页；`key` 是筛选条件的稳定序列化串。 */
+  itemsFiltered: (key: string) => ["items-filtered", key] as const,
   detail: (id: string) => ["detail", id] as const,
   settings: ["settings"] as const,
   tags: ["tags"] as const,

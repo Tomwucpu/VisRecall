@@ -12,11 +12,11 @@ use std::time::Instant;
 
 use visrecall_domain::insight::OcrBox;
 use visrecall_domain::providers::{EmbeddingProvider, VectorIndex};
-use visrecall_domain::search::{Explanation, ParsedQuery, ScoredItem};
+use visrecall_domain::search::{Explanation, ItemFilters, ParsedQuery, ScoredItem};
 use visrecall_domain::{now_millis, AppError, Insight, Item};
 use visrecall_library::{FtsHit, Library, QueryLog};
 
-use crate::filters::{self, to_sql};
+use crate::filters::{self, to_sql_with_filters};
 use crate::fts_query::build_match_expr;
 use crate::parser::parse_query_at;
 use crate::rank::{self, RrfConfig};
@@ -40,6 +40,8 @@ pub const SEMANTIC_RELATIVE_FLOOR: f32 = 0.5;
 pub struct SearchRequest {
     pub raw: String,
     pub limit: u32,
+    /// 界面筛选条的结构化条件；与自然语言解析结果取交集。
+    pub filters: ItemFilters,
 }
 
 impl SearchRequest {
@@ -47,7 +49,14 @@ impl SearchRequest {
         Self {
             raw: raw.into(),
             limit,
+            filters: ItemFilters::default(),
         }
+    }
+
+    /// 附加界面筛选条件（默认空，便于既有调用点不改）。
+    pub fn with_filters(mut self, filters: ItemFilters) -> Self {
+        self.filters = filters;
+        self
     }
 }
 
@@ -84,8 +93,8 @@ pub fn search(deps: SearchDeps<'_>, request: SearchRequest) -> Result<SearchOutc
     let query_vector = query_embedding(&deps, &parsed);
     let semantic_used = query_vector.is_some();
 
-    // 2) 候选集（无过滤器 = 全集，`None`）
-    let candidates = candidate_rowids(deps.library, &parsed)?;
+    // 2) 候选集（无过滤器 = 全集，`None`）：自然语言条件与界面筛选合并成同一批 rowid
+    let candidates = candidate_rowids(deps.library, &parsed, &request.filters)?;
 
     // 3) FTS 路
     let expr = build_match_expr(&parsed.lexical_terms, &parsed.quoted_terms);
@@ -156,14 +165,16 @@ pub fn search(deps: SearchDeps<'_>, request: SearchRequest) -> Result<SearchOutc
             continue;
         };
         let insight = insights.get(&item.id);
-        if !filters::passes(item, insight, &parsed) {
+        if !filters::passes_with_filters(item, insight, &parsed, &request.filters) {
             continue;
         }
         let terms = matched_terms(item, insight, &parsed, snippet_map.get(&rowid));
         let explanation = Explanation {
-            filters: filters::matched_labels(item, insight, &parsed),
+            filters: filters::matched_labels_with_filters(item, insight, &parsed, &request.filters),
             terms: terms.clone(),
-            semantic: !fts_rowids.contains(&rowid) && !parsed.has_filters(),
+            semantic: !fts_rowids.contains(&rowid)
+                && !parsed.has_filters()
+                && request.filters.is_empty(),
             highlight_boxes: highlight_boxes(insight, &terms),
         };
         hits.push(ScoredItem {
@@ -233,8 +244,12 @@ fn query_embedding(deps: &SearchDeps<'_>, parsed: &ParsedQuery) -> Option<Vec<f3
     }
 }
 
-fn candidate_rowids(library: &Library, parsed: &ParsedQuery) -> Result<Option<Vec<i64>>, AppError> {
-    let filter = to_sql(parsed)?;
+fn candidate_rowids(
+    library: &Library,
+    parsed: &ParsedQuery,
+    extra: &ItemFilters,
+) -> Result<Option<Vec<i64>>, AppError> {
+    let filter = to_sql_with_filters(parsed, extra)?;
     if filter.is_empty() {
         return Ok(None);
     }
@@ -277,7 +292,7 @@ fn matched_terms(
     }
     let haystack = format!(
         "{} {} {} {}",
-        item.source_title.as_deref().unwrap_or(""),
+        item.display_title().unwrap_or(""),
         item.note,
         insight
             .and_then(|value| value.summary.as_deref())

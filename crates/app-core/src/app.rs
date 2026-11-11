@@ -33,7 +33,7 @@ use crate::capture_flow::{
 use crate::detail::{load_detail, ItemDetail};
 use crate::events::{
     AppEvent, AppRecoveredEvent, CaptureFailedEvent, EventSink, HotkeyConflictEvent, ItemEvent,
-    ItemUpdatedEvent,
+    ItemUpdatedEvent, ItemsDeletedEvent,
 };
 use crate::import_flow::ImportFlow;
 
@@ -716,6 +716,61 @@ impl AppCore {
         Ok(())
     }
 
+    /// 保存用户标题（`None` / 空白 = 恢复显示来源标题），发 `item_renamed`。
+    ///
+    /// 返回更新后的素材，IPC 层据此回填卡片与详情，不必再等一次列表刷新。
+    pub fn rename_item(
+        &self,
+        id: &str,
+        title: Option<&str>,
+    ) -> Result<visrecall_domain::Item, AppError> {
+        let library = self.library_required()?;
+        library.set_item_title(id, title)?;
+        let item = library.get_item(id)?.ok_or(AppError::NotFound)?;
+        self.sink
+            .emit(AppEvent::ItemRenamed(ItemEvent { id: id.to_string() }));
+        Ok(item)
+    }
+
+    /// 批量彻底删除；返回成功/失败条数，并只发一次 `items_deleted`。
+    ///
+    /// 语义：
+    /// - 去重后逐条执行，单条失败不影响其余条目（不回滚整批）；
+    /// - `NotFound` 计入「已删除」——用户看到的结果是它没了，重复提交也应幂等；
+    /// - 引用素材同样清掉路径排除记录，保证下次扫描还能重新导入。
+    pub fn delete_items(&self, ids: &[String]) -> Result<ItemsDeletedEvent, AppError> {
+        let library = self.library_required()?;
+        let mut seen = std::collections::HashSet::new();
+        let mut deleted = 0u64;
+        let mut failed = 0u64;
+
+        for id in ids {
+            let id = id.trim();
+            if id.is_empty() || !seen.insert(id.to_string()) {
+                continue;
+            }
+
+            let result = (|| -> Result<(), AppError> {
+                if let Some(asset) = library.external_asset_for_item(id)? {
+                    library.clear_source_path_exclusion(&asset.source_id, &asset.relative_path)?;
+                }
+                library.delete_item(id).map(|_| ())
+            })();
+
+            match result {
+                Ok(()) | Err(AppError::NotFound) => deleted += 1,
+                Err(err) => {
+                    failed += 1;
+                    tracing::warn!(item_id = id, %err, "batch delete failed");
+                }
+            }
+        }
+
+        let report = ItemsDeletedEvent { deleted, failed };
+        self.sink.emit(AppEvent::ItemsDeleted(report));
+        Ok(report)
+    }
+
     /// 重新解析：对该素材强制重跑完整解析链（当前选用模型），成功后发 `item_updated`。
     ///
     /// `bump_revision` 让进行中的旧任务作废（worker 的 stale 检查），点击立即生效；
@@ -1167,6 +1222,7 @@ impl AppCore {
         &self,
         raw: &str,
         limit: u32,
+        filters: &visrecall_domain::ItemFilters,
     ) -> Result<visrecall_search::SearchOutcome, AppError> {
         let library = match &self.library {
             Ok(library) => library.as_ref(),
@@ -1176,7 +1232,8 @@ impl AppCore {
             .vectors
             .as_ref()
             .ok_or_else(|| AppError::Internal("vector index unavailable".to_string()))?;
-        self.search.run(library, vectors.as_ref(), raw, limit)
+        self.search
+            .run(library, vectors.as_ref(), raw, limit, filters)
     }
 
     /// 「不是这个」反馈：写入 `queries.feedback`。

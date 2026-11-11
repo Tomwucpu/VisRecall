@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { commands, type AppStatus } from "../lib/bindings";
 import { api, type MigrationProgress } from "../lib/api";
@@ -12,19 +12,27 @@ import { ToastViewport } from "../features/shell/ToastViewport";
 import { DetailEmpty, DetailPanel } from "../features/detail/DetailPanel";
 import { EmptyState } from "../features/library/EmptyState";
 import { ItemGrid } from "../features/library/ItemGrid";
+import { SelectionBar } from "../features/library/SelectionBar";
+import { RenameItemDialog } from "../features/library/RenameItemDialog";
+import { useSelection } from "../features/library/useSelection";
 import { SettingsDialog } from "../features/settings/SettingsDialog";
 import type { ItemCardData } from "../features/library/ItemCard";
-import { useItems } from "../features/library/useItems";
+import { flattenItemPages, useFilteredItems, useItems } from "../features/library/useItems";
 import { Sidebar } from "../features/shell/Sidebar";
 import { StatusBar } from "../features/shell/StatusBar";
 import { TitleBar } from "../features/shell/TitleBar";
 import { usePipelineState } from "../features/shell/usePipelineState";
 import { SearchBar } from "../features/search/SearchBar";
 import { QueryChips } from "../features/search/QueryChips";
+import { FilterBar } from "../features/search/FilterBar";
+import { ActiveFilterChips } from "../features/search/ActiveFilterChips";
+import { useItemFilters } from "../features/search/useItemFilters";
 import { stripChip } from "../lib/searchTypes";
 import { ResultGrid } from "../features/search/ResultGrid";
+import { hitToCardData } from "../features/search/hitToCard";
 import { useSearch } from "../features/search/useSearch";
 import { ImportDialog } from "../features/import/ImportDialog";
+import { ConfirmDialog } from "../features/common/ConfirmDialog";
 
 type LoadState =
   | { status: "loading" }
@@ -38,6 +46,9 @@ const MIGRATION_PHASE: Record<string, string> = {
   verify: "校验",
   done: "完成",
 };
+
+/** 单次批量删除上限：与后端建议的分批粒度一致，超过时循环分批。 */
+const DELETE_BATCH_SIZE = 500;
 
 /** 库状态文案：标题栏与状态栏共用，保证两处不会说两套话。 */
 function statusText(state: LoadState): string {
@@ -61,27 +72,48 @@ export default function App() {
   const [migration, setMigration] = useState<MigrationProgress | null>(null);
   // 阶段 03：搜索模式。空查询 = 普通列表，非空 = 检索结果（两套数据源不混用）。
   const [query, setQuery] = useState("");
-  // 标签筛选是「查询的一种」，但要能一键取消并回到点击前的查询（不污染普通搜索）
-  const [activeTag, setActiveTag] = useState<string | null>(null);
-  const queryBeforeTag = useRef("");
+  const [renameTarget, setRenameTarget] = useState<ItemCardData | null>(null);
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  const filters = useItemFilters();
   const items = useItems();
-  const search = useSearch(query);
+  const filtered = useFilteredItems(
+    filters.apiFilters,
+    filters.key,
+    filters.active && query.trim().length === 0,
+  );
+  const search = useSearch(query, filters.apiFilters, filters.key);
   const pipeline = usePipelineState();
   const searching = query.trim().length > 0;
 
-  const toggleTagFilter = useCallback(
-    (name: string) => {
-      if (activeTag === name) {
-        setActiveTag(null);
-        setQuery(queryBeforeTag.current);
-        return;
-      }
-      queryBeforeTag.current = query;
-      setActiveTag(name);
-      setQuery(`#${name}`);
-    },
-    [activeTag, query],
+  const listQuery = filters.active && !searching ? filtered : items;
+  const list = useMemo(() => flattenItemPages(listQuery.data?.pages), [listQuery.data]);
+
+  // 检索结果也要能打开详情与多选：统一成卡片数据，避免两套查找逻辑。
+  const searchCards = useMemo(() => search.hits.map(hitToCardData), [search.hits]);
+  const visibleCards = searching ? searchCards : list;
+  const orderedIds = useMemo(() => visibleCards.map((item) => item.id), [visibleCards]);
+  const selection = useSelection(orderedIds);
+  const {
+    selectionMode,
+    selectedIds,
+    selectMany,
+    selectAllLoaded,
+    clear: clearSelection,
+    exit: exitSelection,
+  } = selection;
+
+  const tagsQuery = useQuery({ queryKey: queryKeys.tags, queryFn: () => api.listTags() });
+  const tagOptions = useMemo(
+    () => (tagsQuery.data ?? []).map((tag) => tag.name),
+    [tagsQuery.data],
   );
+
+  // 筛选变化等同于「重新开始一轮选择」：已选 id 可能已不在结果集里。
+  useEffect(() => {
+    clearSelection();
+  }, [filters.key, clearSelection]);
 
   // 库总量只在用量查询里（`itemCount` 来自 count_items），列表只统计已加载页。
   const usageQuery = useQuery({
@@ -99,6 +131,16 @@ export default function App() {
     setSelectedId(next.id);
     setDetailHidden(false);
   }, []);
+
+  const toggleSelectionMode = useCallback(() => {
+    if (selection.selectionMode) {
+      selection.exit();
+      return;
+    }
+    selection.enter();
+    // 多选与详情互斥：避免「点卡片以为在勾选，结果打开了详情」。
+    closeDetail();
+  }, [selection, closeDetail]);
 
   // 应用状态走查询缓存：迁移后「待重启」横幅要能在刷新界面后仍然出现，
   // 因此它必须来自可重取的查询，而不是一次性的组件内 state。
@@ -134,44 +176,59 @@ export default function App() {
     });
   }, []);
 
-  // 事件失效会整段重取；按 id 去重，避免重复键。memo 化避免每次渲染都换数组引用。
-  const list = useMemo(() => {
-    const loaded = new Map<string, ItemCardData>();
-    for (const page of items.data?.pages ?? []) {
-      for (const item of page) {
-        loaded.set(item.id, item);
-      }
-    }
-    return [...loaded.values()];
-  }, [items.data]);
-
   // 列表被事件重置后选中项可能已不存在：自动收起，避免详情停在幽灵数据上。
   useEffect(() => {
-    if (selectedId !== null && list.length > 0 && !list.some((item) => item.id === selectedId)) {
+    if (
+      selectedId !== null &&
+      visibleCards.length > 0 &&
+      !visibleCards.some((item) => item.id === selectedId)
+    ) {
       setSelectedId(null);
+      setDetailHidden(true);
     }
-  }, [list, selectedId]);
+  }, [visibleCards, selectedId]);
 
-
-  // 全局键盘（T7）：Esc 收起详情、T 切主题、B 折叠侧栏。输入框内不抢按键，
-  // Ctrl K 属阶段 03 的搜索，这里不绑定，也不在状态栏提示。
+  // 全局键盘：Esc 退出选择/收起详情、T 切主题、B 折叠侧栏；Ctrl+A 仅在多选模式下全选。
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) {
-        return;
-      }
       const target = event.target as HTMLElement | null;
       const typing =
         target !== null &&
         (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
+
+      if ((event.ctrlKey || event.metaKey) && (event.key === "a" || event.key === "A")) {
+        // 只在多选模式下接管，避免抢走输入框/系统级的「全选」。
+        if (typing || !selectionMode) {
+          return;
+        }
+        event.preventDefault();
+        selectAllLoaded();
+        return;
+      }
+
+      if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) {
+        return;
+      }
 
       if (event.key === "Escape") {
         // 输入态由组件自己处理 Esc（备注 flush、标签取消），这里不动。
         if (typing) {
           return;
         }
+        if (renameTarget !== null) {
+          setRenameTarget(null);
+          return;
+        }
+        if (confirmDeleteOpen) {
+          setConfirmDeleteOpen(false);
+          return;
+        }
         if (settingsOpen) {
           setSettingsOpen(false);
+          return;
+        }
+        if (selectionMode) {
+          exitSelection();
           return;
         }
         closeDetail();
@@ -192,7 +249,15 @@ export default function App() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [settingsOpen, closeDetail]);
+  }, [
+    settingsOpen,
+    renameTarget,
+    confirmDeleteOpen,
+    closeDetail,
+    selectionMode,
+    selectAllLoaded,
+    exitSelection,
+  ]);
 
   // 库已迁移、待重启：横幅常驻，直到用户重启进程（闸门不持久化，重启后自动消失）。
   const restartRequired = statusQuery.data?.restartRequired === true;
@@ -210,15 +275,76 @@ export default function App() {
   }, [restarting]);
 
   const status = statusText(state);
-  // 总数优先用后端 count（覆盖全部页），用量还没回来时退回已加载条数。
-  const totalCount = usageQuery.data?.itemCount ?? null;
-  const shownCount = totalCount ?? (items.isPending ? null : list.length);
-  const countText = shownCount === null ? "读取中…" : `找到 ${shownCount} 项`;
-  const selected = list.find((item) => item.id === selectedId) ?? null;
+  // 总数优先用后端 count（覆盖全部页）；筛选态没有 count 接口，如实标注「已加载」。
+  const shownCount = searching
+    ? search.status === "ready"
+      ? (search.response?.total ?? 0)
+      : null
+    : filters.active
+      ? listQuery.isPending
+        ? null
+        : list.length
+      : (usageQuery.data?.itemCount ?? (listQuery.isPending ? null : list.length));
+  const countText =
+    shownCount === null
+      ? "读取中…"
+      : filters.active && !searching
+        ? `已加载 ${shownCount} 项`
+        : `找到 ${shownCount} 项`;
+  const selected = visibleCards.find((item) => item.id === selectedId) ?? null;
   const migrationPercent =
     migration !== null && migration.total > 0
       ? Math.min(100, Math.round((migration.done / migration.total) * 100))
       : null;
+
+  /** 「全选」优先按当前筛选取全部 id；纯检索态只能全选已加载的命中。 */
+  const selectAll = useCallback(async () => {
+    if (searching) {
+      selectAllLoaded();
+      return;
+    }
+    if (!filters.active) {
+      selectAllLoaded();
+      return;
+    }
+    try {
+      const ids = await api.listItemIdsFiltered(filters.apiFilters);
+      selectMany(ids);
+    } catch (error) {
+      pushToast(describeError(error), "error");
+    }
+  }, [searching, filters.active, filters.apiFilters, selectAllLoaded, selectMany]);
+
+  const deleteSelected = useCallback(async () => {
+    const ids = selection.ids;
+    if (ids.length === 0 || deleting) {
+      return;
+    }
+    setDeleting(true);
+    let deleted = 0;
+    let failed = 0;
+    try {
+      for (let offset = 0; offset < ids.length; offset += DELETE_BATCH_SIZE) {
+        const report = await api.deleteItems(ids.slice(offset, offset + DELETE_BATCH_SIZE));
+        deleted += report.deleted;
+        failed += report.failed;
+      }
+      selection.remove(ids);
+      if (selectedId !== null && ids.includes(selectedId)) {
+        closeDetail();
+      }
+      setConfirmDeleteOpen(false);
+      if (failed > 0) {
+        pushToast(`已删除 ${deleted} 项，${failed} 项删除失败`, "error");
+      } else {
+        pushToast(`已删除 ${deleted} 项素材`);
+      }
+    } catch (error) {
+      pushToast(describeError(error), "error");
+    } finally {
+      setDeleting(false);
+    }
+  }, [selection, selectedId, deleting, closeDetail]);
 
   return (
     <div className="app">
@@ -261,8 +387,8 @@ export default function App() {
           collapsed={sidebarCollapsed}
           onToggle={() => setSidebarCollapsed((value) => !value)}
           itemCount={shownCount}
-          onTagFilter={toggleTagFilter}
-          activeTag={activeTag}
+          onTagFilter={filters.toggleTag}
+          activeTags={filters.state.tags}
         />
 
         <main className="main">
@@ -270,7 +396,9 @@ export default function App() {
             <div className="crumbs">
               <span>素材库</span>
               <span className="sep">/</span>
-              <span className="here">{searching ? "检索" : "全部素材"}</span>
+              <span className="here">
+                {searching ? "检索" : filters.active ? "筛选" : "全部素材"}
+              </span>
             </div>
             <div className="search-actions">
               <SearchBar
@@ -284,9 +412,12 @@ export default function App() {
                 <span>添加</span>
               </button>
             </div>
+
+            <FilterBar controller={filters} tagOptions={tagOptions} />
+
             <div className="result-bar">
               <div className="result-title">
-                <h1>{searching ? "检索结果" : "全部素材"}</h1>
+                <h1>{searching ? "检索结果" : filters.active ? "筛选结果" : "全部素材"}</h1>
                 <span className="n">
                   {searching
                     ? search.status === "ready"
@@ -295,7 +426,33 @@ export default function App() {
                     : countText}
                 </span>
               </div>
+              <button
+                type="button"
+                className={`mini-btn selection-toggle${selectionMode ? " is-active" : ""}`}
+                aria-pressed={selectionMode}
+                onClick={toggleSelectionMode}
+              >
+                {selectionMode ? "完成" : "选择"}
+              </button>
             </div>
+
+            {selectionMode && selection.count > 0 && (
+              <SelectionBar
+                count={selection.count}
+                totalCount={searching ? shownCount : list.length}
+                busy={deleting}
+                onSelectAll={() => void selectAll()}
+                onClear={selection.clear}
+                onDelete={() => setConfirmDeleteOpen(true)}
+              />
+            )}
+
+            <ActiveFilterChips
+              chips={filters.chips}
+              onRemove={filters.removeChip}
+              onClear={filters.clear}
+            />
+
             {searching && search.response !== null && (
               <QueryChips
                 parsed={search.response.parsed}
@@ -324,21 +481,30 @@ export default function App() {
                 onOpen={openDetail}
                 onNotThis={(hit) => void search.feedback(hit)}
                 selectedId={selectedId}
+                selectionMode={selectionMode}
+                selectedIds={selectedIds}
+                onToggleSelect={(item, shift) => selection.toggle(item.id, shift)}
               />
-            ) : !items.isPending && !items.isError && list.length === 0 ? (
+            ) : !listQuery.isPending && !listQuery.isError && list.length === 0 && !filters.active ? (
               <EmptyState onAdd={() => setImportOpen(true)} />
             ) : (
               <ItemGrid
                 items={list}
-                isPending={items.isPending}
-                isError={items.isError}
-                errorMessage={items.error ? describeError(items.error) : null}
-                hasNextPage={items.hasNextPage}
-                isFetchingNextPage={items.isFetchingNextPage}
-                onLoadMore={() => void items.fetchNextPage()}
-                onRetry={() => void items.refetch()}
+                isPending={listQuery.isPending}
+                isError={listQuery.isError}
+                errorMessage={listQuery.error ? describeError(listQuery.error) : null}
+                hasNextPage={listQuery.hasNextPage}
+                isFetchingNextPage={listQuery.isFetchingNextPage}
+                onLoadMore={() => void listQuery.fetchNextPage()}
+                onRetry={() => void listQuery.refetch()}
                 onOpen={openDetail}
                 selectedId={selectedId}
+                selectionMode={selectionMode}
+                selectedIds={selectedIds}
+                onToggleSelect={(item, shift) => selection.toggle(item.id, shift)}
+                emptyText={
+                  filters.active ? "没有符合当前筛选条件的素材。" : "还没有素材。"
+                }
               />
             )}
           </div>
@@ -350,7 +516,7 @@ export default function App() {
           inert={detailHidden}
         >
           {selected !== null ? (
-            <DetailPanel item={selected} onClose={closeDetail} />
+            <DetailPanel item={selected} onClose={closeDetail} onRename={setRenameTarget} />
           ) : (
             <DetailEmpty />
           )}
@@ -368,11 +534,31 @@ export default function App() {
         <ImportDialog
           searching={searching}
           onShowAll={() => {
-            setActiveTag(null);
+            filters.clear();
             setQuery("");
             setImportOpen(false);
           }}
           onClose={() => setImportOpen(false)}
+        />
+      )}
+      {renameTarget !== null && (
+        <RenameItemDialog
+          item={{
+            id: renameTarget.id,
+            title: renameTarget.title,
+            sourceTitle: renameTarget.sourceTitle,
+          }}
+          onClose={() => setRenameTarget(null)}
+        />
+      )}
+      {confirmDeleteOpen && (
+        <ConfirmDialog
+          title={`删除 ${selection.count} 项素材？`}
+          description="将删除这些素材及其原图、缩略图与标签关联，操作不可恢复。"
+          confirmLabel="删除"
+          danger
+          onConfirm={() => void deleteSelected()}
+          onCancel={() => setConfirmDeleteOpen(false)}
         />
       )}
       <ToastViewport />
