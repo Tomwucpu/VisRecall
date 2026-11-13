@@ -6,7 +6,7 @@
 
 use std::sync::OnceLock;
 
-use jieba_rs::Jieba;
+use jieba_rs::{Jieba, TokenizeMode};
 
 pub use visrecall_domain::search::TOKENIZER_VERSION;
 
@@ -73,6 +73,7 @@ const STOPWORDS: &[&str] = &[
     "或",
     "是",
     "在",
+    "来自",
     "有",
     "我",
     "你",
@@ -226,7 +227,7 @@ pub fn terms_for_query(text: &str) -> Vec<String> {
     out
 }
 
-/// 不做停用词过滤的切分（解析器需要看原文片段，例如「来自 X」）。
+/// 不做停用词过滤的切分（解析器需要看原文片段）。
 pub fn words(text: &str) -> Vec<String> {
     jieba()
         .cut(text, false)
@@ -234,6 +235,23 @@ pub fn words(text: &str) -> Vec<String> {
         .map(|token| token.word)
         .filter(|word| is_word(word))
         .map(str::to_string)
+        .collect()
+}
+
+/// 带字符区间的切分：`(词, 起始字符下标, 结束字符下标)`。
+///
+/// 与 [`words`] 的区别：**不过滤标点与空白**，区间首尾相接覆盖全文——解析器据此
+/// 判定「结构化词是不是一个独立 token」，以及它的后邻是标点/空白还是另一个字
+/// （`红 楼` 与 `红玫瑰` 必须区分开）。
+///
+/// 返回的是**字符**索引（jieba 的 `Token.start/end` 口径，不是字节下标）；需要
+/// 按字节切片时用 `text.chars().take(n).map(char::len_utf8).sum()` 换算，
+/// 与 `parser::take_quoted` 的手法是同一个。
+pub fn segments(text: &str) -> Vec<(String, usize, usize)> {
+    jieba()
+        .tokenize(text, TokenizeMode::Default, false)
+        .into_iter()
+        .map(|token| (token.word.to_string(), token.start, token.end))
         .collect()
 }
 
@@ -328,5 +346,40 @@ mod tests {
         // 索引侧细化：既有长词也有子词，任一切分粒度都能命中
         assert!(indexed.contains("漏斗"), "indexed={indexed}");
         assert!(indexed.contains('图'), "indexed={indexed}");
+    }
+
+    #[test]
+    fn segments_report_character_ranges() {
+        assert_eq!(segments("红楼"), vec![("红楼".to_string(), 0, 2)]);
+        let red = segments("红色预警");
+        assert_eq!(
+            red.iter().take(2).cloned().collect::<Vec<_>>(),
+            vec![("红色".to_string(), 0, 2), ("预警".to_string(), 2, 4)]
+        );
+        // 单字与多字颜色词的切分差异（单字守卫的依据）
+        assert_eq!(words("酒红色"), vec!["酒".to_string(), "红色".to_string()]);
+        assert_eq!(words("红"), vec!["红".to_string()]);
+    }
+
+    #[test]
+    fn segments_cover_the_whole_text_without_gaps() {
+        for text in [
+            "红色预警",
+            "红 楼",
+            "app:chrome 报错",
+            "导出，\n  PDF！",
+            "上个月的橙色漏斗图",
+        ] {
+            let segments = segments(text);
+            let mut cursor = 0;
+            for (word, start, end) in &segments {
+                assert_eq!(*start, cursor, "区间必须首尾相接：{text} / {word}");
+                assert!(end > start, "空 token：{text}");
+                cursor = *end;
+            }
+            assert_eq!(cursor, text.chars().count(), "必须覆盖全文：{text}");
+            let rebuilt: String = segments.into_iter().map(|(word, _, _)| word).collect();
+            assert_eq!(rebuilt, text);
+        }
     }
 }

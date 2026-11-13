@@ -1,19 +1,28 @@
 import { render, screen } from "@testing-library/react";
 
 import { ExplainBar } from "./ExplainBar";
-import { hitSource, hitSourceLabel, hitSourceSentence } from "../../lib/searchTypes";
+import {
+  hitSource,
+  hitSourceLabel,
+  hitSourceSentence,
+  literalizeChip,
+  isSoftChip,
+  softWordOf,
+  stripChip,
+  type SearchHit,
+} from "../../lib/searchTypes";
 import { QueryChips } from "./QueryChips";
 import { ResultGrid } from "./ResultGrid";
-import { stripChip, type SearchHit } from "../../lib/searchTypes";
 
 const baseExplanation = {
   filters: [],
+  facets: [],
   terms: [],
   semantic: false,
   highlightBoxes: [],
 };
 
-test("explains the three hit sources", () => {
+test("explains hard filters, soft facets and literal hits separately", () => {
   const { rerender } = render(<ExplainBar explanation={baseExplanation} />);
   expect(screen.getByText("仅满足筛选条件")).toBeInTheDocument();
 
@@ -27,21 +36,32 @@ test("explains the three hit sources", () => {
   expect(screen.getByText("命中文字：发票")).toBeInTheDocument();
   expect(screen.getByText("1 处文字高亮")).toBeInTheDocument();
 
+  // 软命中单独一行，且不混进 filters
+  rerender(
+    <ExplainBar explanation={{ ...baseExplanation, facets: ["主色 红"] }} />,
+  );
+  expect(screen.getByText("参考条件命中：主色 红")).toBeInTheDocument();
+  expect(screen.getByText("主色 红")).toBeInTheDocument();
+  expect(screen.getByRole("note")).toHaveClass("is-facet");
+
   rerender(
     <ExplainBar
-      explanation={{ ...baseExplanation, semantic: true, filters: ["橙色"] }}
+      explanation={{ ...baseExplanation, semantic: true, filters: ["#工作"] }}
     />,
   );
   expect(screen.getByText("按语义相关性匹配")).toBeInTheDocument();
-  expect(screen.getByText("橙色")).toBeInTheDocument();
+  expect(screen.getByText("#工作")).toBeInTheDocument();
 });
 
 test("source helpers stay consistent", () => {
   expect(hitSource(baseExplanation)).toBe("filter");
   expect(hitSource({ ...baseExplanation, terms: ["a"] })).toBe("fts");
+  expect(hitSource({ ...baseExplanation, facets: ["主色 红"] })).toBe("facet");
   expect(hitSource({ ...baseExplanation, semantic: true, terms: ["a"] })).toBe("semantic");
   expect(hitSourceLabel("semantic")).toBe("语义命中");
+  expect(hitSourceLabel("facet")).toBe("软命中");
   expect(hitSourceSentence("fts", ["发票", "金额"])).toContain("发票、金额");
+  expect(hitSourceSentence("facet", [], ["类型 图片"])).toContain("类型 图片");
 });
 
 test("renders chips and removes the chosen condition from the raw query", () => {
@@ -56,15 +76,45 @@ test("renders chips and removes the chosen condition from the raw query", () => 
         contentKind: null,
         hasFormula: null,
         tags: ["工作"],
-        semanticText: "发票",
-        chips: ["橙色", "来自 chrome", "#工作"],
+        semanticText: "橙色 发票",
+        chips: ["橙色(参考)", "来自 chrome", "#工作"],
+        hardChips: ["来自 chrome", "#工作"],
+        softChips: ["橙色(参考)"],
+        facetWords: ["橙色"],
       }}
       onRemove={(chip) => removed.push(chip)}
     />,
   );
-  expect(screen.getByText("橙色")).toBeInTheDocument();
-  fireEventClick(screen.getByLabelText("移除条件 橙色"));
-  expect(removed).toEqual(["橙色"]);
+  expect(screen.getByText("橙色(参考)")).toBeInTheDocument();
+  fireEventClick(screen.getByLabelText("移除条件 橙色(参考)"));
+  expect(removed).toEqual(["橙色(参考)"]);
+});
+
+test("soft chips offer a literal-only toggle and stay visually distinct", () => {
+  const literal: string[] = [];
+  render(
+    <QueryChips
+      parsed={{
+        time: null,
+        app: null,
+        color: ["red"],
+        chart: null,
+        contentKind: null,
+        hasFormula: null,
+        tags: [],
+        semanticText: "红色预警",
+        chips: ["红色(参考)"],
+        hardChips: [],
+        softChips: ["红色(参考)"],
+        facetWords: ["红色"],
+      }}
+      onRemove={() => {}}
+      onToLiteral={(chip) => literal.push(chip)}
+    />,
+  );
+  expect(screen.getByText("红色(参考)").closest("li")).toHaveClass("is-soft");
+  fireEventClick(screen.getByText("仅文字"));
+  expect(literal).toEqual(["红色(参考)"]);
 });
 
 function fireEventClick(element: HTMLElement) {
@@ -73,10 +123,22 @@ function fireEventClick(element: HTMLElement) {
 
 test("stripChip removes the matching fragment and keeps the rest", () => {
   expect(stripChip("橙色 发票", "橙色")).toBe("发票");
+  expect(stripChip("橙色 发票", "橙色(参考)")).toBe("发票");
   expect(stripChip("来自 chrome 报错", "来自 chrome")).toBe("报错");
   expect(stripChip("发票 #工作", "#工作")).toBe("发票");
   // 删不掉时原样返回（避免把查询误清空）
   expect(stripChip("发票", "时间")).toBe("发票");
+});
+
+test("literalizeChip turns a soft word into a quoted phrase", () => {
+  expect(isSoftChip("红色(参考)")).toBe(true);
+  expect(isSoftChip("#工作")).toBe(false);
+  expect(softWordOf("红色(参考)")).toBe("红色");
+  expect(literalizeChip("红色预警", "红色(参考)")).toBe('"红色"预警');
+  // 已经在引号里就不重复包
+  expect(literalizeChip('"红色"预警', "红色(参考)")).toBe('"红色"预警');
+  // 词不在原文里（旧记录/兜底 chip）：原样返回
+  expect(literalizeChip("发票", "橙色(参考)")).toBe("发票");
 });
 
 const hit = (overrides: Partial<SearchHit> = {}): SearchHit => ({

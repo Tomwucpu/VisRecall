@@ -160,13 +160,21 @@ pub struct ParsedQueryDto {
     pub has_formula: Option<bool>,
     pub tags: Vec<String>,
     pub semantic_text: String,
-    /// 人类可读的条件标签（后端 `ParsedQuery::chips`）。
+    /// 人类可读的条件标签（硬条件在前、软命中在后）。
     pub chips: Vec<String>,
+    /// 硬条件 chips（进候选集 WHERE，如 `#工作` / `来自 chrome`）。
+    pub hard_chips: Vec<String>,
+    /// 软命中 chips（只加分不排除，带「(参考)」后缀）。
+    pub soft_chips: Vec<String>,
+    /// 软命中的原词（`红色预警` → `红色`）。
+    pub facet_words: Vec<String>,
 }
 
 impl From<visrecall_domain::search::ParsedQuery> for ParsedQueryDto {
     fn from(parsed: visrecall_domain::search::ParsedQuery) -> Self {
         let chips = parsed.chips();
+        let hard_chips = parsed.hard_chips();
+        let soft_chips = parsed.soft_chips();
         Self {
             time: parsed.time.map(|time| TimeRangeDto {
                 from: time.from,
@@ -180,6 +188,9 @@ impl From<visrecall_domain::search::ParsedQuery> for ParsedQueryDto {
             tags: parsed.tags,
             semantic_text: parsed.semantic_text,
             chips,
+            hard_chips,
+            soft_chips,
+            facet_words: parsed.facet_words,
         }
     }
 }
@@ -230,7 +241,10 @@ impl ItemFiltersDto {
 #[derive(Debug, Clone, PartialEq, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ExplanationDto {
+    /// 命中的硬条件（`#tag` / `来自 app` / 界面筛选）。
     pub filters: Vec<String>,
+    /// 命中的软条件（`主色 红` / `图表 漏斗图` / `类型 图片` / `公式`）。
+    pub facets: Vec<String>,
     pub terms: Vec<String>,
     pub semantic: bool,
     pub highlight_boxes: Vec<OcrBoxDto>,
@@ -1000,6 +1014,7 @@ pub async fn search_items(
                 score: hit.score,
                 explanation: ExplanationDto {
                     filters: hit.explanation.filters,
+                    facets: hit.explanation.facets,
                     terms: hit.explanation.terms,
                     semantic: hit.explanation.semantic,
                     highlight_boxes: hit

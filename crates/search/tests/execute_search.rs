@@ -80,6 +80,17 @@ impl EmbeddingProvider for MapEmbed {
     }
 }
 
+/// 造一条素材的全部输入（参数太多，收成一个结构体便于读）。
+struct SeedItem<'a> {
+    key: &'static str,
+    kind: ItemKind,
+    title: &'a str,
+    body: &'a str,
+    color: Option<PrimaryColor>,
+    chart: Option<ChartType>,
+    app: &'a str,
+}
+
 struct Fixture {
     _dir: tempfile::TempDir,
     library: Arc<Library>,
@@ -111,6 +122,96 @@ impl Fixture {
         };
         fixture.seed();
         fixture
+    }
+
+    /// R2 验收库（A–F）：软命中、孤词降级与 `来自X` 的回归场景。
+    fn facet_case() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let library = Arc::new(Library::open(dir.path().to_path_buf()).unwrap());
+        library.init_embedding_space(MODEL_ID, DIM as u32).unwrap();
+        let vectors = BruteForceInt8::new(Arc::clone(&library));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut fixture = Self {
+            _dir: dir,
+            library,
+            vectors,
+            embed: MapEmbed::new(),
+            runtime,
+            ids: BTreeMap::new(),
+        };
+        fixture.seed_facet_case();
+        fixture
+    }
+
+    /// A–F：主色与正文故意错位（正文写「红色预警」但主色为蓝），以及 chrome/vscode 两条同类报错。
+    fn seed_facet_case(&mut self) {
+        self.add(SeedItem {
+            key: "warning_blue",
+            kind: ItemKind::Image,
+            title: "监控预警面板",
+            body: "红色预警：温度超限",
+            color: Some(PrimaryColor::Blue),
+            chart: None,
+            app: "chrome",
+        });
+        self.add(SeedItem {
+            key: "report_red",
+            kind: ItemKind::Image,
+            title: "季度报表",
+            body: "季度报表 汇总",
+            color: Some(PrimaryColor::Red),
+            chart: None,
+            app: "chrome",
+        });
+        self.add(SeedItem {
+            key: "unrelated_blue",
+            kind: ItemKind::Text,
+            title: "随手笔记",
+            body: "今天天气不错",
+            color: Some(PrimaryColor::Blue),
+            chart: None,
+            app: "chrome",
+        });
+        self.add(SeedItem {
+            key: "lou_blue",
+            kind: ItemKind::Image,
+            title: "红楼人物关系",
+            body: "贾宝玉 林黛玉",
+            color: Some(PrimaryColor::Blue),
+            chart: None,
+            app: "chrome",
+        });
+        self.add(SeedItem {
+            key: "err_chrome",
+            kind: ItemKind::Image,
+            title: "浏览器报错日志",
+            body: "报错日志 502",
+            color: Some(PrimaryColor::Gray),
+            chart: None,
+            app: "chrome",
+        });
+        self.add(SeedItem {
+            key: "err_vscode",
+            kind: ItemKind::Image,
+            title: "编辑器报错日志",
+            body: "报错日志 断点",
+            color: Some(PrimaryColor::Gray),
+            chart: None,
+            app: "vscode",
+        });
+        // G：正文写「表格」，但洞察里没有图表类型 —— 孤词 `表格` 硬过滤 0 命中后应放宽重跑
+        self.add(SeedItem {
+            key: "table_text",
+            kind: ItemKind::Text,
+            title: "导出表格说明",
+            body: "如何把表格导出成 CSV",
+            color: Some(PrimaryColor::Gray),
+            chart: None,
+            app: "chrome",
+        });
     }
 
     fn seed(&mut self) {
@@ -150,6 +251,27 @@ impl Fixture {
         color: Option<PrimaryColor>,
         chart: Option<ChartType>,
     ) {
+        self.add(SeedItem {
+            key,
+            kind,
+            title,
+            body,
+            color,
+            chart,
+            app: "chrome",
+        });
+    }
+
+    fn add(&mut self, seed: SeedItem<'_>) {
+        let SeedItem {
+            key,
+            kind,
+            title,
+            body,
+            color,
+            chart,
+            app,
+        } = seed;
         let id = new_item_id();
         let original = if kind == ItemKind::Image {
             format!("originals/images/{id}.png")
@@ -166,7 +288,7 @@ impl Fixture {
                 NewItem {
                     kind,
                     captured_at: 1_700_000_000_000,
-                    source_app: Some("chrome".into()),
+                    source_app: Some(app.into()),
                     source_title: Some(title.into()),
                     source_url: None,
                     width: None,
@@ -254,6 +376,21 @@ impl Fixture {
         .unwrap()
     }
 
+    /// 语义未就绪（P3-R09 降级）：不注入嵌入也不注入运行时。
+    fn run_without_embed(&self, raw: &str) -> SearchOutcome {
+        search(
+            SearchDeps {
+                library: &self.library,
+                vectors: &self.vectors,
+                embed: None,
+                runtime: None,
+                rrf: RrfConfig::default(),
+            },
+            SearchRequest::new(raw, 10),
+        )
+        .unwrap()
+    }
+
     fn keys(&self, outcome: &SearchOutcome) -> Vec<&'static str> {
         outcome
             .hits
@@ -305,18 +442,23 @@ fn pure_semantic_query_hits_without_any_literal_match() {
 }
 
 #[test]
-fn mixed_query_combines_filter_and_literal() {
+fn mixed_query_combines_soft_facet_and_literal() {
     let fixture = Fixture::new();
-    // 橙色（过滤）+ 发票（字面）
+    // 橙色（软命中）+ 发票（字面）
     let outcome = fixture.run("橙色 发票", 10);
     assert_eq!(fixture.keys(&outcome), vec!["invoice"]);
     let hit = &outcome.hits[0];
     assert!(
         hit.explanation
-            .filters
+            .facets
             .iter()
             .any(|label| label.contains("橙")),
-        "解释里要出现命中的颜色条件：{:?}",
+        "解释里要出现命中的软条件：{:?}",
+        hit.explanation.facets
+    );
+    assert!(
+        hit.explanation.filters.is_empty(),
+        "软条件不该写进硬过滤行：{:?}",
         hit.explanation.filters
     );
     assert!(hit
@@ -329,11 +471,13 @@ fn mixed_query_combines_filter_and_literal() {
 #[test]
 fn filters_only_query_returns_candidates_with_zero_score() {
     let fixture = Fixture::new();
+    // 孤词：软条件退回硬过滤，行为与改造前一致
     let outcome = fixture.run("橙色", 10);
     assert_eq!(fixture.keys(&outcome), vec!["invoice"]);
     assert_eq!(outcome.hits[0].score, 0.0, "纯过滤命中分数为 0");
-    assert!(!outcome.semantic_used, "无语义文本时不应调用嵌入");
-    assert!(!outcome.hits[0].explanation.filters.is_empty());
+    // 软词**不剥离**：`橙色` 仍在语义文本里，因此语义通道照常参与
+    assert!(outcome.semantic_used, "软词仍参与查询嵌入（D3-Q03）");
+    assert!(!outcome.hits[0].explanation.facets.is_empty());
 }
 
 #[test]
@@ -478,7 +622,10 @@ fn ui_filters_only_query_returns_candidates_without_embedding() {
         hit.explanation.filters
     );
     assert!(
-        hit.explanation.filters.iter().any(|label| label == "解析中"),
+        hit.explanation
+            .filters
+            .iter()
+            .any(|label| label == "解析中"),
         "解释里要出现命中的状态条件：{:?}",
         hit.explanation.filters
     );
@@ -497,4 +644,131 @@ fn explanation_boxes_only_match_terms() {
             "框必须由命中词触发"
         );
     }
+}
+
+// --- 迭代 R2：软命中 / 孤词降级 / 应用名不解析（§6 的 G5–G12） ---
+
+/// G5：正文写「红色预警」但主色为蓝的素材不能被主色排除。
+#[test]
+fn soft_color_facet_does_not_exclude_a_blue_item_whose_text_matches() {
+    let fixture = Fixture::facet_case();
+    let outcome = fixture.run("红色预警", 10);
+    let keys = fixture.keys(&outcome);
+    let top3 = &keys[..keys.len().min(3)];
+    assert!(
+        top3.contains(&"warning_blue"),
+        "主色不符但正文命中的素材必须进 Top-3：{keys:?}"
+    );
+    // 软条件只加分不排除：结果集不该被「红色」筛成只有红图
+    assert!(keys.len() > 1, "候选集不应收缩成纯红素材：{keys:?}");
+    let hit = outcome
+        .hits
+        .iter()
+        .find(|hit| hit.item.id == fixture.ids["warning_blue"])
+        .expect("warning_blue 应在结果里");
+    assert!(
+        !hit.explanation
+            .facets
+            .iter()
+            .any(|label| label.contains("主色")),
+        "它并不命中主色条件：{:?}",
+        hit.explanation.facets
+    );
+}
+
+/// G6：孤词「红色」仍是硬过滤（列出红色素材）。
+#[test]
+fn solo_color_word_falls_back_to_a_hard_filter() {
+    let fixture = Fixture::facet_case();
+    let outcome = fixture.run("红色", 10);
+    assert_eq!(fixture.keys(&outcome), vec!["report_red"]);
+    assert!(
+        outcome.hits[0]
+            .explanation
+            .facets
+            .iter()
+            .any(|label| label.contains("主色")),
+        "孤词路径也要能解释命中：{:?}",
+        outcome.hits[0].explanation.facets
+    );
+}
+
+/// G6 另一面 + D3-Q07：孤词硬过滤 0 命中时清空软条件重跑，并标注「条件已放宽」。
+#[test]
+fn solo_facet_with_no_hit_relaxes_and_reruns() {
+    let fixture = Fixture::facet_case();
+    // 「表格」是图表词，但库里没有 chart_type=table 的素材；正文里有「表格」
+    let outcome = fixture.run("表格", 10);
+    let keys = fixture.keys(&outcome);
+    assert_eq!(
+        keys.first().copied(),
+        Some("table_text"),
+        "放宽后必须靠字面通道找回：{keys:?}"
+    );
+    let hit = outcome
+        .hits
+        .iter()
+        .find(|hit| hit.item.id == fixture.ids["table_text"])
+        .expect("table_text 应在结果里");
+    assert!(
+        hit.explanation
+            .facets
+            .iter()
+            .any(|label| label == "条件已放宽"),
+        "放宽重跑必须标注：{:?}",
+        hit.explanation.facets
+    );
+    // 放宽后软条件被清空（chips 不再显示「参考」条件）
+    assert!(outcome.parsed.facet_words.is_empty());
+    assert!(outcome.parsed.chart.is_none());
+}
+
+/// G7：语义未就绪（`embed: None`）时软命中与孤词降级仍成立。
+#[test]
+fn soft_facets_work_without_the_semantic_channel() {
+    let fixture = Fixture::facet_case();
+    let outcome = fixture.run_without_embed("红色预警");
+    assert!(!outcome.semantic_used, "未注入嵌入 → 语义通道跳过");
+    assert!(
+        fixture.keys(&outcome).contains(&"warning_blue"),
+        "字面通道仍应召回：{:?}",
+        fixture.keys(&outcome)
+    );
+
+    let solo = fixture.run_without_embed("红色");
+    assert_eq!(fixture.keys(&solo), vec!["report_red"]);
+}
+
+/// G11：`来自Chrome的报错` 不再按应用过滤，chrome 与 vscode 两条都被召回。
+#[test]
+fn app_phrase_is_plain_text_and_does_not_exclude_other_apps() {
+    let fixture = Fixture::facet_case();
+    let outcome = fixture.run("来自Chrome的报错", 10);
+    let keys = fixture.keys(&outcome);
+    assert!(keys.contains(&"err_chrome"), "{keys:?}");
+    assert!(keys.contains(&"err_vscode"), "{keys:?}");
+    assert!(
+        outcome.parsed.app.is_none(),
+        "自然语言形式不该产生 app 条件"
+    );
+}
+
+/// G12：`app:X` 仍是硬过滤（vscode 那条排除）。
+#[test]
+fn explicit_app_prefix_is_still_a_hard_filter() {
+    let fixture = Fixture::facet_case();
+    let outcome = fixture.run("app:chrome 报错", 10);
+    let keys = fixture.keys(&outcome);
+    assert_eq!(keys.first().copied(), Some("err_chrome"), "{keys:?}");
+    assert!(!keys.contains(&"err_vscode"), "{keys:?}");
+    assert_eq!(outcome.parsed.app.as_deref(), Some("chrome"));
+}
+
+/// `存在文件里` 不再误判成 `app=文件`：候选集是全集，能正常召回。
+#[test]
+fn existential_phrase_is_not_an_app_filter() {
+    let fixture = Fixture::facet_case();
+    let outcome = fixture.run("存在文件里", 10);
+    assert!(outcome.parsed.app.is_none());
+    assert!(!outcome.hits.is_empty(), "不该因为误判而 0 结果");
 }

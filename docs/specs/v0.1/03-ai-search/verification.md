@@ -288,3 +288,57 @@ cargo run -p visrecall-eval -- --db <验收库根目录> --queries my-queries.js
   4. **P3-R04 的「提交→可检索 ≤3s」与 P3-R07 的「≤800ms P95」**：需要 GUI 采样（§3.2-C）。
 - **阶段 03 完成判定**（`requirements.md` §5）**暂不满足**：前端与两项人工门禁未完成。
   已完成的实现与全部残余工作都列在 §3.2，可直接按清单执行。
+
+## 6. 迭代 R2 验收（结构化词的词边界与软命中）
+
+> 计划：`03-ai-search/query-facets.md`。范围：颜色 / 图表 / 素材类型 / 公式四类词从「无条件硬过滤」
+> 改为「token 边界识别 + 软命中（只加分不排除）」；`来自X` / `在X里` 不再解析。**时间条件一行未改**。
+> 执行日期：2026-11-13。索引格式、`TOKENIZER_VERSION`、`pipeline` / `library` 均未改动，**无需重建索引**。
+
+### 6.1 门禁表
+
+| ID | 门禁 | 结论 | 证据 |
+|---|---|---|---|
+| G1 | `parse("红楼")`：`color.is_none()`、`semantic_text == "红楼"`、`lexical_terms` 含 `红楼` | **通过** | `tokenizer.rs::segments_report_character_ranges`（`红楼` → 单 token）；`parser.rs::color_synonyms_map_to_enums`（`红楼`/`红旗`/`红烧肉` 均不产生颜色条件与软命中词）；`tests/parser.rs::color_words_map_to_enums_and_negative_cases_do_not` |
+| G2 | `parse("红色预警")`：`color == Some(["red"])` 且 `semantic_text == "红色预警"` | **通过** | `parser.rs::color_synonyms_map_to_enums`（原词不剥离）；`plain_text_goes_to_semantic_text`（软词保留） |
+| G3 | `to_sql(parse("红色预警")).is_empty()`（软条件不进 WHERE） | **通过** | `filters.rs::soft_facets_do_not_reach_the_where_clause`、`facet_mode_follows_solo_facet_queries`；`tests/parser.rs` 的 proptest `placeholder_count_matches_params` |
+| G4 | `!to_sql(parse("红色")).is_empty()`（孤词仍硬过滤） | **通过** | 同上（`深色` 孤词走 `FacetMode::Hard`，`ins.primary_color IN (?1, ?2)`）；`tests/parser.rs::color_filter_selects_only_matching_items` |
+| G5 | 集成：搜 `红色预警` 时，主色 blue 但 OCR 含「红色预警」的素材进 Top-3 | **通过** | `tests/execute_search.rs::soft_color_facet_does_not_exclude_a_blue_item_whose_text_matches` |
+| G6 | 集成：搜 `红色` 只返回主色 red 的素材（孤词降级） | **通过** | `tests/execute_search.rs::solo_color_word_falls_back_to_a_hard_filter`；放宽路径 `solo_facet_with_no_hit_relaxes_and_reruns`（0 命中 → 清空软条件重跑 + 「条件已放宽」） |
+| G7 | `embed: None`（语义未就绪）时 G5/G6 仍成立（P3-R09 不回归） | **通过** | `tests/execute_search.rs::soft_facets_work_without_the_semantic_channel`（`semantic_used=false` 仍召回 blue 素材与孤词硬过滤） |
+| G8 | 既有用例全绿（Rust + 前端）且 eval Top-3 不劣于基线（阶段 03 门禁 ≥80%） | **部分通过**：用例全绿；eval 对比**未验证（环境限制）** | 见 §6.2；eval 缺 20 条带标注验收库且基线须在改动前采集，见 §6.3 |
+| G9 | `parse("来自Chrome的报错")`：`app.is_none()`、`facet_words` 空、`semantic_text` 完整、`has_filters()` 为 false | **通过** | `parser.rs::app_phrases_are_not_parsed`；`tests/parser.rs::app_phrases_are_not_structured_conditions` |
+| G10 | `to_sql` 对 `来自Chrome的报错` / `在微信里的聊天记录` / `存在文件里` 均为空 | **通过** | `filters.rs::app_phrases_produce_no_where_clause` |
+| G11 | 集成：搜 `来自Chrome的报错` 时 chrome 与 vscode 两条都被召回 | **通过** | `tests/execute_search.rs::app_phrase_is_plain_text_and_does_not_exclude_other_apps`（`err_chrome` + `err_vscode` 同时命中） |
+| G12 | 集成：`app:chrome 报错` 只返回 chrome 那条（`app:X` 硬过滤不回归） | **通过** | `tests/execute_search.rs::explicit_app_prefix_is_still_a_hard_filter`（`err_vscode` 被排除） |
+
+### 6.2 门禁输出（2026-11-13，Windows x86_64）
+
+```text
+cargo test -p visrecall-search                     55 (lib) + 19 (execute_search) + 24 (parser) + 7 (tokenizer_fts) = 105 passed / 0 failed
+cargo test -p visrecall-domain                     39 (lib) + 7 (geometry) = 46 passed / 0 failed
+cargo test --workspace                             845 passed / 0 failed（66 个测试目标）
+cargo clippy --workspace --all-targets -D warnings 通过（0 warning）
+cargo fmt --all --check                            本次改动的文件均通过（其余差异为改动前既有，见 §6.4）
+NODE_ENV=test pnpm test                            167 passed / 0 failed（24 文件）
+pnpm typecheck / pnpm lint                         通过（0 error / 0 warning）
+npx vite build --emptyOutDir false                 通过（130 modules，dist 生成成功）
+cargo test -p visrecall --bin visrecall -- --ignored refresh_committed_bindings
+                                                  通过；src/lib/bindings.ts +17/-2（facetWords / softChips / explanations.facets）
+```
+
+### 6.3 未验证项与收口方案
+
+| 项 | 状态 | 原因 | 收口 |
+|---|---|---|---|
+| eval Top-3 前后对比（G8 后半） | **未验证（环境限制）** | 需要 20 条验收库 + 真实嵌入模型；且「改动前基线」必须在本次改动之前采集，现已错过 | 在带标注的验收库上跑 `cargo run -p visrecall-eval -- --db <库根> --queries docs/eval/queries.template.jsonl --report docs/eval/report-r2.md`；需要对照时用 `git stash` 回到 R1 代码再跑一次 |
+| `pnpm build`（整条脚本） | **未验证（环境限制）** | 本机 IDE 的 fs shim 拦截 `dist/` 清理（`vite:prepare-out-dir` 报 `--file parameter is required`），与代码无关 | 在普通终端/CI 上执行 `pnpm build`；本次已用 `vite build --outDir dist-build-check` 证明打包本身通过（产物已删除） |
+| GUI 手工确认（软 chip 虚线 / 「仅文字」按钮 / 解释条软命中行） | **待人工** | 需要 GUI 操作 | 见 §3.2-C 清单补充：输入 `红色预警` 应出现虚线 chip「红色(参考)」，点「仅文字」后原文变成 `"红色" 预警` 并重搜 |
+
+### 6.4 已知遗留（对应计划 §7）
+
+- **R1 时间词仍是子串匹配 + 硬过滤**（本期按要求不动）：`关于上个月的费用` 仍会被当时间条件。
+- **R3 FTS 普通词是 OR**：软词留在 `lexical_terms` 后，`红色预警` 也会召回只含「红色」的素材（软命中即召回优先，接受）。
+- **R5 `only_filters` 尾部补位无上限**：`app:chrome 报错` 的结果尾部仍会列出其它 chrome 候选（score=0），G12 只断言「不出现 vscode 那条」。
+- **R7 `settings['search.rrf']` 存量是 2 元素数组**：`from_settings` 显式补 `0.6`，不依赖 `unwrap_or`；已由 `rank.rs::facet_channel_uses_the_third_weight` 覆盖权重通道行为。
+- **`cargo fmt --all -- --check`** 在改动前就有 20+ 处差异（`crates/ai`、`crates/app-core` 等本次未触碰的文件，属 rustfmt 版本差异）；本次只格式化了自己改过的文件，未批量重排其它文件。

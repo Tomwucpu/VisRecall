@@ -6,10 +6,10 @@ use proptest::prelude::*;
 
 use visrecall_domain::insight::{ChartType, PrimaryColor};
 use visrecall_domain::item::ItemKind;
-use visrecall_domain::search::ParsedQuery;
+use visrecall_domain::search::{ItemFilters, ParsedQuery};
 use visrecall_domain::{Insight, ItemKind as Kind, NewItem};
 use visrecall_library::Library;
-use visrecall_search::filters::to_sql;
+use visrecall_search::filters::{to_sql, to_sql_with_filters, FacetMode};
 use visrecall_search::parser::{parse_query, parse_query_at};
 
 /// 固定时间点：2026-11-09 12:00（本地时区，周一）。
@@ -59,11 +59,21 @@ fn color_words_map_to_enums_and_negative_cases_do_not() {
         assert_eq!(
             parse(word).color,
             Some(vec![color.as_str().to_string()]),
-            "{word}"
+            "孤词 {word} 应识别为颜色"
         );
     }
     assert!(parse("这个季度").color.is_none());
-    assert!(parse("白板上的笔记").color.is_some()); // 「白」仍是颜色词（规则表口径）
+    // 词边界：`白板` 是单 token，不该被读成「白」
+    let query = parse("白板上的笔记");
+    assert!(query.color.is_none(), "{:?}", query.color);
+    assert_eq!(query.semantic_text, "白板上的笔记");
+    // 单字词只有后邻是标点/空白/句末时才生效
+    for raw in ["红楼", "红旗", "红烧肉", "红利", "红线"] {
+        assert!(parse(raw).color.is_none(), "{raw}");
+    }
+    for raw in ["红", "红 楼", "红色的图示"] {
+        assert!(parse(raw).color.is_some(), "{raw}");
+    }
 }
 
 #[test]
@@ -104,7 +114,7 @@ fn time_word_boundaries_are_stable() {
 
 #[test]
 fn mixed_query_parses_every_rule_at_once() {
-    let query = parse("上个月来自 chrome 的橙色漏斗图 \"季度营收\" #工作");
+    let query = parse("上个月 app:chrome 的橙色漏斗图 \"季度营收\" #工作");
     assert!(query.time.is_some());
     assert_eq!(query.app.as_deref(), Some("chrome"));
     assert_eq!(query.color, Some(vec!["orange".to_string()]));
@@ -112,7 +122,36 @@ fn mixed_query_parses_every_rule_at_once() {
     assert_eq!(query.tags, vec!["工作".to_string()]);
     assert!(query.quoted_terms.contains(&"季度".to_string()));
     assert!(query.quoted_terms.contains(&"营收".to_string()));
-    assert!(!query.semantic_text.contains("橙色"));
+    // 硬条件剥离，软命中保留（仍参与 FTS 与查询嵌入）
+    assert!(!query.semantic_text.contains("上个月"));
+    assert!(!query.semantic_text.contains("chrome"));
+    assert!(query.semantic_text.contains("橙色"));
+    assert!(query.semantic_text.contains("漏斗图"));
+    assert_eq!(
+        query.facet_words,
+        vec!["橙色".to_string(), "漏斗图".to_string()]
+    );
+}
+
+#[test]
+fn app_phrases_are_not_structured_conditions() {
+    // `来自X` / `在X里` 不再解析：既不硬过滤也不软命中
+    for raw in [
+        "来自Chrome的报错",
+        "在微信里的聊天记录",
+        "存在文件里",
+        "来自Chrome",
+    ] {
+        let query = parse(raw);
+        assert!(query.app.is_none(), "{raw}");
+        assert!(query.facet_words.is_empty(), "{raw}");
+        assert_eq!(query.semantic_text, raw, "{raw}");
+        assert!(!query.has_filters(), "{raw}");
+    }
+    // 显式前缀仍是硬过滤
+    let query = parse("app:chrome 报错");
+    assert_eq!(query.app.as_deref(), Some("chrome"));
+    assert_eq!(query.semantic_text, "报错");
 }
 
 // --- proptest ---
@@ -171,12 +210,11 @@ proptest! {
     }
 
     #[test]
-    fn consumed_fragments_do_not_leak_into_semantic_text(raw in rule_word_strategy()) {
+    fn hard_fragments_are_stripped_but_soft_words_stay(raw in rule_word_strategy()) {
         let query = parse(&raw);
-        for color in query.color.clone().unwrap_or_default() {
-            // 语义文本里不该残留被当作过滤条件的颜色中文词
-            let word = PrimaryColor::parse(&color).map(|c| c.label_zh()).unwrap_or("");
-            prop_assert!(!query.semantic_text.contains(word));
+        // 软命中词必须留在语义文本里（这是软命中层的显式豁免）
+        for word in &query.facet_words {
+            prop_assert!(query.semantic_text.contains(word.as_str()) || query.semantic_text.is_empty());
         }
         // 标签与引号的**标记形式**必须整体剥离（同样的字可能合法地出现在别处）
         for tag in &query.tags {
@@ -192,6 +230,11 @@ proptest! {
             let leaked =
                 query.semantic_text.contains(ascii_quote) || query.semantic_text.contains(cjk_quote);
             prop_assert!(!leaked);
+        }
+        // 应用名只会由 `app:X` 产生：一旦出现，原文里就必须有该前缀
+        if let Some(app) = &query.app {
+            prop_assert!(raw.to_ascii_lowercase().contains("app:"));
+            prop_assert!(!app.is_empty());
         }
     }
 
@@ -213,7 +256,13 @@ proptest! {
         let query = parse(&raw);
         let filter = to_sql(&query).expect("to_sql 不应失败");
         prop_assert_eq!(filter.placeholder_count(), filter.params.len());
-        prop_assert_eq!(filter.is_empty(), !query.has_filters());
+        // 硬条件一定产生 WHERE；只有软条件时，孤词才会退回 WHERE
+        if query.has_hard_filters() {
+            prop_assert!(!filter.is_empty());
+        }
+        if !query.has_hard_filters() && !query.facets_only() {
+            prop_assert!(filter.is_empty());
+        }
     }
 }
 
@@ -319,8 +368,13 @@ fn fixture() -> Fixture {
 }
 
 fn candidates(fixture: &Fixture, raw: &str) -> Vec<String> {
+    candidates_with_mode(fixture, raw, FacetMode::for_query(&parse(raw)))
+}
+
+/// 指定软条件处理方式的候选集（孤词自动用 Hard，这里可显式覆盖）。
+fn candidates_with_mode(fixture: &Fixture, raw: &str, mode: FacetMode) -> Vec<String> {
     let query = parse(raw);
-    let filter = to_sql(&query).unwrap();
+    let filter = to_sql_with_filters(&query, &ItemFilters::default(), mode).unwrap();
     if filter.is_empty() {
         return fixture.ids.clone();
     }
@@ -386,11 +440,20 @@ fn formula_and_kind_filters_compose() {
 }
 
 #[test]
-fn combined_filters_intersect() {
+fn combined_filters_intersect_in_hard_mode() {
     let fixture = fixture();
     // chrome + 截图：第 1 条（第 3 条是 text）
-    let hits = candidates(&fixture, "app:chrome 截图");
+    let hits = candidates_with_mode(&fixture, "app:chrome 截图", FacetMode::Hard);
     assert_eq!(hits, vec![fixture.ids[0].clone()]);
+}
+
+#[test]
+fn app_hard_filter_composes_with_a_soft_facet() {
+    let fixture = fixture();
+    // `app:X` 是硬条件 → 仍在候选集里；「截图」只是软命中，不再收缩候选集
+    let hits = candidates(&fixture, "app:chrome 截图");
+    assert_eq!(hits.len(), 2, "chrome 两条都应保留：{hits:?}");
+    assert!(!hits.contains(&fixture.ids[1]));
 }
 
 #[test]
@@ -405,6 +468,39 @@ fn chart_filter_matches_enum_value() {
     let fixture = fixture();
     let hits = candidates(&fixture, "漏斗图");
     assert_eq!(hits, vec![fixture.ids[0].clone()]);
+}
+
+#[test]
+fn facet_rowids_orders_by_hit_count_then_recency() {
+    let fixture = fixture();
+    // 「橙色 截图 发票」：橙色只中第 1 条，截图（image）中第 1、2 条；
+    // 「发票」不是软词，所以不是孤词（孤词会退回硬过滤，不进 facet 通道）
+    let query = parse("橙色 截图 发票");
+    assert!(!query.facets_only());
+    let rowids = visrecall_search::filters::facet_rowids(&fixture.library, &query, 10).unwrap();
+    let ids: Vec<String> = rowids
+        .into_iter()
+        .filter_map(|rowid| {
+            fixture
+                .ids
+                .iter()
+                .find(|id| fixture.library.item_rowid(id).unwrap() == Some(rowid))
+                .cloned()
+        })
+        .collect();
+    // 两条都命中的第 1 条在前，只命中类型的那条在后
+    assert_eq!(ids, vec![fixture.ids[0].clone(), fixture.ids[1].clone()]);
+}
+
+#[test]
+fn facet_rowids_is_empty_without_facets() {
+    let fixture = fixture();
+    let query = parse("营收");
+    assert!(
+        visrecall_search::filters::facet_rowids(&fixture.library, &query, 10)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]

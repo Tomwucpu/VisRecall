@@ -185,7 +185,10 @@ export type EmbeddingRebuildDto = {
 
 /**  命中解释（ExplainBar 用）。 */
 export type ExplanationDto = {
+	/**  命中的硬条件（`#tag` / `来自 app` / 界面筛选）。 */
 	filters: string[],
+	/**  命中的软条件（`主色 红` / `图表 漏斗图` / `类型 图片` / `公式`）。 */
+	facets: string[],
 	terms: string[],
 	semantic: boolean,
 	highlightBoxes: OcrBoxDto[],
@@ -499,8 +502,14 @@ export type ParsedQueryDto_Deserialize = {
 	hasFormula?: boolean | null,
 	tags: string[],
 	semanticText: string,
-	/**  人类可读的条件标签（后端 `ParsedQuery::chips`）。 */
+	/**  人类可读的条件标签（硬条件在前、软命中在后）。 */
 	chips: string[],
+	/**  硬条件 chips（进候选集 WHERE，如 `#工作` / `来自 chrome`）。 */
+	hardChips: string[],
+	/**  软命中 chips（只加分不排除，带「(参考)」后缀）。 */
+	softChips: string[],
+	/**  软命中的原词（`红色预警` → `红色`）。 */
+	facetWords: string[],
 };
 
 /**  解析后的查询（前端 chips 与降级标注用）。 */
@@ -513,8 +522,14 @@ export type ParsedQueryDto_Serialize = {
 	hasFormula: boolean | null,
 	tags: string[],
 	semanticText: string,
-	/**  人类可读的条件标签（后端 `ParsedQuery::chips`）。 */
+	/**  人类可读的条件标签（硬条件在前、软命中在后）。 */
 	chips: string[],
+	/**  硬条件 chips（进候选集 WHERE，如 `#工作` / `来自 chrome`）。 */
+	hardChips: string[],
+	/**  软命中 chips（只加分不排除，带「(参考)」后缀）。 */
+	softChips: string[],
+	/**  软命中的原词（`红色预警` → `红色`）。 */
+	facetWords: string[],
 };
 
 /**  模型探测结果。 */

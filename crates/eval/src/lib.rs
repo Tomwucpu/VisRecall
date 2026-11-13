@@ -114,7 +114,7 @@ pub fn evaluate(
                 vectors,
                 embed: Some(embed),
                 runtime: Some(runtime),
-                rrf,
+                rrf: rrf.clone(),
             },
             SearchRequest::new(query.query.clone(), limit),
         )?;

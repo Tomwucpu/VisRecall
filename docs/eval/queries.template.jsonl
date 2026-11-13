@@ -22,3 +22,15 @@
 {"query": "上个月的橙色漏斗图", "relevant": [], "bucket": "screenshot"}
 {"query": "报错弹窗 501", "relevant": [], "bucket": "literal"}
 {"query": "和客户对需求时的白板照片", "relevant": [], "bucket": "scene"}
+
+# 迭代 R2 追加（词边界 / 软命中 / 应用名不解析）：这 5 条在旧实现下会被当成硬过滤而丢素材
+#   红楼        —— 旧实现把 `红` 吃成主色，语义只剩「楼」（正向：红楼题材素材应可召回）
+#   红色预警    —— 旧实现把 `红色` 吃成主色，正文写「红色预警」的蓝图被排除
+#   深色主题    —— 旧实现把 `深色` 当主色过滤，非深色图里的「主题」相关内容被排除
+#   柱状图      —— 孤词仍走硬过滤（反向对照：图表类型缺失时应放宽而不是 0 结果）
+#   来自Chrome的报错 —— 旧实现把 `来自` 解析成 app=chrome，vscode 的同类报错被排除
+{"query": "红楼", "relevant": [], "bucket": "scene"}
+{"query": "红色预警", "relevant": [], "bucket": "screenshot"}
+{"query": "深色主题", "relevant": [], "bucket": "screenshot"}
+{"query": "柱状图", "relevant": [], "bucket": "screenshot"}
+{"query": "来自Chrome的报错", "relevant": [], "bucket": "literal"}

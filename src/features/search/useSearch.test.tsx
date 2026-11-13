@@ -18,6 +18,9 @@ function response(raw: string, ids: string[]): SearchResponse {
       tags: [],
       semanticText: raw,
       chips: [],
+      hardChips: [],
+      softChips: [],
+      facetWords: [],
     },
     semanticUsed: true,
     tookMs: 3,
@@ -39,7 +42,13 @@ function response(raw: string, ids: string[]): SearchResponse {
         primaryColor: null,
       },
       score: 1,
-      explanation: { filters: [], terms: [raw], semantic: false, highlightBoxes: [] },
+      explanation: {
+        filters: [],
+        facets: [],
+        terms: [raw],
+        semantic: false,
+        highlightBoxes: [],
+      },
     })),
   };
 }

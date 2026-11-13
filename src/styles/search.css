@@ -107,6 +107,29 @@
   font-size: 11px;
 }
 
+/* 软命中 chip：虚线边框 + 无底色，明确「只加分不排除」 */
+.query-chip.is-soft {
+  border-style: dashed;
+  border-color: var(--line-2);
+  background: transparent;
+  color: var(--ink-3);
+}
+
+.query-chip-literal {
+  border: 0;
+  border-left: 1px solid var(--line-2);
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+  padding: 0 2px 0 6px;
+}
+
+.query-chip-literal:hover {
+  color: var(--hue-jade);
+}
+
 .query-chip-remove {
   border: 0;
   background: transparent;
@@ -179,12 +202,21 @@
 
 .explain-bar.is-semantic { border-left-color: var(--hue-plum); }
 .explain-bar.is-fts { border-left-color: var(--hue-jade); }
+.explain-bar.is-facet { border-left-color: var(--hue-jade); }
 .explain-bar.is-filter { border-left-color: var(--hue-ochre); }
 
 .explain-filter {
   padding: 1px 5px;
   border-radius: 3px;
   background: var(--surface-3);
+}
+
+/* 软命中：虚线，与硬条件的实心 chip 区分 */
+.explain-facet {
+  padding: 1px 5px;
+  border: 1px dashed var(--line-2);
+  border-radius: 3px;
+  color: var(--ink-3);
 }
 
 .explain-warn {

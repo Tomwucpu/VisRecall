@@ -1,8 +1,15 @@
 //! 规则表驱动的查询解析（design §6.6）。
 //!
-//! 核心纪律：**一个词只消费一次**。每条规则从 `remaining` 里「剥离」已识别的片段，
-//! 剩下的原文才是 `semantic_text`——否则「上个月」会既当时间过滤又当语义查询词，
-//! 「橙色」会既过滤又参与 BM25。
+//! 核心纪律：**一个词只消费一次**，但硬条件与软条件分层处理：
+//! - **硬条件**（时间 / `app:X` / `#tag` / 引号）从 `remaining` 里「剥离」，剩下的原文才是
+//!   `semantic_text`——否则「上个月」会既当时间过滤又当语义查询词；
+//! - **软条件**（颜色 / 图表 / 素材类型 / 公式）**不剥离**：用 jieba 的 token 边界识别，
+//!   原词继续参与 FTS 与查询嵌入，只在召回阶段多加一路「软命中」通道。这是对上面那条
+//!   纪律的**显式豁免**，只适用于软命中层——`红楼` 若被读成「红」+「楼」，主色非红的
+//!   素材就会被候选集整条排除（假阴性），比「少一个过滤」代价大得多。
+//!
+//! 应用名的自然语言形式（`来自X` / `在X里`）**不解析**：`来自` / `在` 是高频汉字组合
+//! （存在 / 现在 / 正在），误判会把素材整条排除且无法靠词表规避；这类短语交给字面与语义通道。
 //!
 //! 纯函数、无 IO、无锁：随机输入不 panic（proptest 覆盖），`now` 可注入（测试可控）。
 
@@ -12,7 +19,7 @@ use visrecall_domain::item::ItemKind;
 use visrecall_domain::now_millis;
 use visrecall_domain::search::{ParsedQuery, TimeRange};
 
-use crate::tokenizer::terms_for_query;
+use crate::tokenizer::{segments, terms_for_query};
 
 /// 「最近 N 天」的 N 上限（超出不当作时间表达式）。
 pub const MAX_RECENT_DAYS: u32 = 365;
@@ -125,7 +132,7 @@ pub fn parse_query(raw: &str) -> ParsedQuery {
 pub fn parse_query_at(raw: &str, now_ms: i64) -> ParsedQuery {
     let mut remaining = raw.to_string();
 
-    // 顺序即优先级：引号 → 标签 → 应用 → 时间 → 颜色 → 图表 → 类型 → 公式
+    // 顺序即优先级：引号 → 标签 → 应用 → 时间（以上均为硬条件，逐段剥离）
     let mut quoted_raw = Vec::new();
     while let Some(fragment) = take_quoted(&mut remaining) {
         if !fragment.trim().is_empty() {
@@ -135,10 +142,15 @@ pub fn parse_query_at(raw: &str, now_ms: i64) -> ParsedQuery {
     let tags = take_tags(&mut remaining);
     let app = take_app(&mut remaining);
     let time = take_time(&mut remaining, now_ms);
-    let color = take_color(&mut remaining);
-    let chart = take_chart(&mut remaining);
-    let content_kind = take_kind(&mut remaining);
-    let has_formula = take_formula(&mut remaining);
+
+    // 软命中：只识别不剥离，原词继续参与 FTS 与查询嵌入。
+    // 四个 take_* 共用同一份切分结果（软词不改变 remaining，区间与原文一致）。
+    let segments = segments(&remaining);
+    let mut facet_words: Vec<String> = Vec::new();
+    let color = take_color(&segments, &remaining, &mut facet_words);
+    let chart = take_chart(&segments, &remaining, &mut facet_words);
+    let content_kind = take_kind(&segments, &remaining, &mut facet_words);
+    let has_formula = take_formula(&segments, &remaining, &mut facet_words);
 
     // 引号内容再分词（design §4.3「引号内分词，AND 语义」）：
     // 一次 jieba 切分后每个词都是必命中项，交给 MATCH 构造器用 AND 连接。
@@ -165,6 +177,7 @@ pub fn parse_query_at(raw: &str, now_ms: i64) -> ParsedQuery {
         semantic_text,
         lexical_terms,
         quoted_terms,
+        facet_words,
     }
 }
 
@@ -187,16 +200,73 @@ fn strip_once(remaining: &mut String, needle: &str) -> bool {
     }
 }
 
-/// 按「长词优先」剥离第一个命中的表达式，返回其右值。
-fn strip_first_of<T: Clone>(remaining: &mut String, table: &[(&str, T)]) -> Option<T> {
+/// 一个分词片段：`(词, 起始字符下标, 结束字符下标)`。
+type Segment = (String, usize, usize);
+
+/// 软命中的一次命中：`(枚举值, 命中的原词)`。
+type FacetHit<T> = (T, String);
+
+/// 单个 token 是否命中词表（长词优先）。
+///
+/// 单字颜色词的启用条件（D3-Q02，偏保守）：孤词、后邻是标点/空白/句末，或以「色」
+/// 结尾的复合词（`酒红色`）。理由是中文单字颜色词歧义极高（红楼 / 红旗 / 红烧肉 /
+/// 红利 / 红线），误判代价是**彻底丢素材**，漏判代价只是少一个过滤——两者不对称。
+fn token_match<T: Clone>(
+    token: &str,
+    text: &str,
+    end: usize,
+    table: &[(&str, T)],
+    isolated: bool,
+) -> Option<T> {
     let mut sorted: Vec<&(&str, T)> = table.iter().collect();
     sorted.sort_by_key(|(word, _)| std::cmp::Reverse(word.chars().count()));
-    for (word, value) in sorted {
-        if strip_once(remaining, word) {
+
+    // ① 整 token 命中：多字词只要 token 相等即可；单字词必须有边界或处于孤词场景
+    for (word, value) in &sorted {
+        if !token_matches(token, word) {
+            continue;
+        }
+        let single = word.chars().count() == 1;
+        if !single || isolated || is_boundary_after(text, end) {
             return Some(value.clone());
         }
     }
+
+    // ② 单字词作为复合词的词头（`酒红色` → 红）：以该字开头、以「色」结尾且长度 > 1
+    for (word, value) in &sorted {
+        if word.chars().count() != 1 {
+            continue;
+        }
+        let Some(head) = word.chars().next() else {
+            continue;
+        };
+        let count = token.chars().count();
+        if count > 1 && token.starts_with(head) && token.ends_with('色') {
+            return Some(value.clone());
+        }
+    }
+
     None
+}
+
+/// `token == entry`（拉丁字母按大小写不敏感比较，中文等价于相等）。
+fn token_matches(token: &str, entry: &str) -> bool {
+    token.len() == entry.len() && token.eq_ignore_ascii_case(entry)
+}
+
+/// `end` 之后是标点、空白还是句末（用于单字词的后邻判定）。
+fn is_boundary_after(text: &str, end: usize) -> bool {
+    match text.chars().nth(end) {
+        None => true,
+        Some(ch) => ch.is_whitespace() || is_punct(ch),
+    }
+}
+
+/// 把命中的原词追加进 `facet_words`（去重，保持首次出现顺序）。
+fn push_facet_word(facet_words: &mut Vec<String>, word: &str) {
+    if !facet_words.iter().any(|existing| existing == word) {
+        facet_words.push(word.to_string());
+    }
 }
 
 /// 提取成对引号内的文本（`"…"` / `「…」` / `"…"` …），并剥离。
@@ -266,92 +336,24 @@ fn take_tags(remaining: &mut String) -> Vec<String> {
     tags
 }
 
-/// `app:X`、`来自X`、`在X里/中`。
-fn take_app(remaining: &mut String) -> Option<String> {
-    // app:X
-    let lower = remaining.to_ascii_lowercase();
-    if let Some(pos) = lower.find("app:") {
-        let rest: String = remaining[pos + 4..].to_string();
-        let value: String = rest
-            .chars()
-            .take_while(|c| !c.is_whitespace() && !is_punct(*c))
-            .collect();
-        if !value.is_empty() {
-            let consumed = 4 + value.len();
-            remaining.replace_range(pos..pos + consumed, " ");
-            return Some(value.to_ascii_lowercase());
-        }
-    }
-
-    // 来自X / 在X里 / 在X中
-    for marker in ["来自", "在"] {
-        let Some(pos) = remaining.find(marker) else {
-            continue;
-        };
-        let after_marker = &remaining[pos + marker.len()..];
-        // 允许「来自 chrome」这种带空格的写法；跳过的空白也要算进消费长度
-        let trimmed = after_marker.trim_start();
-        let skipped = after_marker.len() - trimmed.len();
-        let rest: String = trimmed.to_string();
-
-        let mut value = String::new();
-        for ch in rest.chars() {
-            if is_value_terminator(ch) {
-                break;
-            }
-            value.push(ch);
-        }
-        if value.is_empty() {
-            continue;
-        }
-        let consumed_value = marker.len() + skipped + value.len();
-
-        if marker == "在" {
-            // 「在X里/中」必须真的带方位词，否则「在」只是普通虚词（「我在整理文档」）
-            let after: String = rest.chars().skip(value.chars().count()).collect();
-            let Some(suffix) = after.chars().next().filter(|ch| is_locative_suffix(*ch)) else {
-                continue;
-            };
-            let consumed = consumed_value + suffix.len_utf8();
-            remaining.replace_range(pos..pos + consumed, " ");
-            return Some(value.to_ascii_lowercase());
-        }
-
-        remaining.replace_range(pos..pos + consumed_value, " ");
-        return Some(value.to_ascii_lowercase());
-    }
-    None
-}
-
-fn is_locative_suffix(ch: char) -> bool {
-    matches!(ch, '里' | '中')
-}
-
-/// 应用名取值的终止字符：空白、标点、方位词与常见助词。
+/// `app:X` 显式语法（**唯一**产生 `app` 的规则，仍走硬过滤）。
 ///
-/// 中文没有词间空格，只靠「连续非空白」会得到 `chrome的报错` 这种结果；这里补一层
-/// 助词/方位词终止（design §6.6 的「X 为连续非空白词」在中文语境下的必要细化）。
-fn is_value_terminator(ch: char) -> bool {
-    ch.is_whitespace()
-        || is_punct(ch)
-        || matches!(
-            ch,
-            '里' | '中'
-                | '的'
-                | '上'
-                | '下'
-                | '内'
-                | '外'
-                | '和'
-                | '与'
-                | '是'
-                | '有'
-                | '我'
-                | '了'
-                | '吗'
-                | '呢'
-                | '吧'
-        )
+/// `来自X` / `在X里` 不再解析：`来自` / `在` 是高频汉字组合（存在 / 现在 / 正在 /
+/// 来自哪里），子串匹配必然误判，且这类短语本来就该由字面与语义通道处理。
+fn take_app(remaining: &mut String) -> Option<String> {
+    let lower = remaining.to_ascii_lowercase();
+    let pos = lower.find("app:")?;
+    let rest: String = remaining[pos + 4..].to_string();
+    let value: String = rest
+        .chars()
+        .take_while(|c| !c.is_whitespace() && !is_punct(*c))
+        .collect();
+    if value.is_empty() {
+        return None;
+    }
+    let consumed = 4 + value.len();
+    remaining.replace_range(pos..pos + consumed, " ");
+    Some(value.to_ascii_lowercase())
 }
 
 /// 时间词 → `TimeRange`（本地时区，周一起始）。
@@ -417,16 +419,21 @@ fn take_recent_days(remaining: &mut String, now_ms: i64) -> Option<TimeRange> {
     ))
 }
 
-fn take_color(remaining: &mut String) -> Option<Vec<String>> {
+/// 主色词（软命中，不剥离）。同一次查询里可以命中多个颜色词（`红色和蓝色`）。
+fn take_color(
+    segments: &[Segment],
+    text: &str,
+    facet_words: &mut Vec<String>,
+) -> Option<Vec<String>> {
     let mut colors: Vec<String> = Vec::new();
-    // 同一次查询里可以同时点多个颜色词（「红色和蓝色」）
-    while let Some(hit) = strip_first_of(remaining, COLOR_WORDS) {
-        for color in hit {
+    for (words, word) in match_facet(segments, text, COLOR_WORDS) {
+        for color in words {
             let value = color.as_str().to_string();
             if !colors.iter().any(|existing| existing == &value) {
                 colors.push(value);
             }
         }
+        push_facet_word(facet_words, &word);
     }
     if colors.is_empty() {
         None
@@ -435,22 +442,66 @@ fn take_color(remaining: &mut String) -> Option<Vec<String>> {
     }
 }
 
-fn take_chart(remaining: &mut String) -> Option<String> {
-    strip_first_of(remaining, CHART_WORDS).map(|chart| chart.as_str().to_string())
+/// 图表类型词（软命中，不剥离；多条命中取第一处）。
+fn take_chart(segments: &[Segment], text: &str, facet_words: &mut Vec<String>) -> Option<String> {
+    match_facet(segments, text, CHART_WORDS)
+        .into_iter()
+        .next()
+        .map(|(chart, word)| {
+            push_facet_word(facet_words, &word);
+            chart.as_str().to_string()
+        })
 }
 
-fn take_kind(remaining: &mut String) -> Option<ItemKind> {
-    strip_first_of(remaining, KIND_WORDS)
+/// 素材类型词（软命中，不剥离；多条命中取第一处）。
+fn take_kind(segments: &[Segment], text: &str, facet_words: &mut Vec<String>) -> Option<ItemKind> {
+    match_facet(segments, text, KIND_WORDS)
+        .into_iter()
+        .next()
+        .map(|(kind, word)| {
+            push_facet_word(facet_words, &word);
+            kind
+        })
 }
 
-fn take_formula(remaining: &mut String) -> Option<bool> {
-    let mut found = false;
-    for word in FORMULA_WORDS {
-        if strip_once(remaining, word) {
-            found = true;
+/// 公式词（软命中，不剥离）。
+fn take_formula(segments: &[Segment], text: &str, facet_words: &mut Vec<String>) -> Option<bool> {
+    let table: Vec<(&str, bool)> = FORMULA_WORDS.iter().map(|word| (*word, true)).collect();
+    let hits = match_facet(segments, text, &table);
+    if hits.is_empty() {
+        return None;
+    }
+    for (_, word) in hits {
+        push_facet_word(facet_words, &word);
+    }
+    Some(true)
+}
+
+/// [`match_facet`] 的「复用切分结果」版本：解析器一次切分、四个词表共用。
+fn match_facet<T: Clone>(
+    segments: &[Segment],
+    text: &str,
+    table: &[(&str, T)],
+) -> Vec<FacetHit<T>> {
+    let isolated = segments
+        .iter()
+        .filter(|(word, _, _)| word.chars().any(char::is_alphanumeric))
+        .count()
+        <= 1;
+
+    let mut out: Vec<FacetHit<T>> = Vec::new();
+    for (token, _start, end) in segments {
+        if !token.chars().any(char::is_alphanumeric) {
+            continue;
+        }
+        let Some(value) = token_match(token, text, *end, table, isolated) else {
+            continue;
+        };
+        if !out.iter().any(|(_, word)| word == token) {
+            out.push((value, token.clone()));
         }
     }
-    found.then_some(true)
+    out
 }
 
 fn is_punct(ch: char) -> bool {
@@ -593,10 +644,12 @@ mod tests {
         assert!(!query.lexical_terms.is_empty());
         assert!(query.time.is_none());
 
-        // 「漏斗图」按规则表被消费成图表过滤，语义文本只剩前面的词
+        // 「漏斗图」是软命中：识别成图表条件，但**不从语义文本里剥离**
         let query = parse("季度营收漏斗图");
-        assert_eq!(query.semantic_text, "季度营收");
+        assert_eq!(query.semantic_text, "季度营收漏斗图");
         assert_eq!(query.chart.as_deref(), Some("funnel"));
+        assert_eq!(query.facet_words, vec!["漏斗图".to_string()]);
+        assert!(!query.has_hard_filters(), "软条件不进候选集 WHERE");
     }
 
     #[test]
@@ -672,6 +725,31 @@ mod tests {
         );
         // 反例：不含颜色词
         assert!(parse("漏斗图").color.is_none());
+
+        // 词边界：`红楼` / `红旗` 是单 token，切不出「红」
+        for raw in ["红楼", "红旗", "红烧肉的配方"] {
+            let query = parse(raw);
+            assert!(query.color.is_none(), "{raw} 不该被当成颜色条件");
+            assert!(
+                query.facet_words.is_empty(),
+                "{raw} 不该产生软命中词：{:?}",
+                query.facet_words
+            );
+            assert_eq!(query.semantic_text, raw, "整句必须留在语义文本里");
+        }
+
+        // 软词不剥离：正文写「红色预警」但主色不是红的素材仍要能被字面/语义召回
+        let query = parse("红色预警");
+        assert_eq!(query.color, Some(vec!["red".into()]));
+        assert_eq!(query.semantic_text, "红色预警");
+        assert!(query.lexical_terms.contains(&"红色".to_string()));
+
+        // 单字颜色词只在孤词 / 后邻边界 / 「X色」复合词时生效
+        assert_eq!(parse("红").color, Some(vec!["red".into()]));
+        assert_eq!(parse("红 楼").color, Some(vec!["red".into()]));
+        assert_eq!(parse("酒红色").color, Some(vec!["red".into()]));
+        // 后邻不是边界：「他买了红玫瑰」里的「红」不消费
+        assert!(parse("买了红玫瑰").color.is_none());
     }
 
     #[test]
@@ -687,21 +765,32 @@ mod tests {
     }
 
     #[test]
-    fn app_patterns_are_recognized() {
-        assert_eq!(parse("app:chrome 报错").app.as_deref(), Some("chrome"));
-        assert_eq!(parse("来自Chrome的报错").app.as_deref(), Some("chrome"));
-        // 「在X里」必须带方位词
-        let query = parse("在微信里的聊天记录");
-        assert_eq!(query.app.as_deref(), Some("微信"));
-        // 「的」会留在语义文本里（分词阶段当停用词丢掉），但应用名不能残留
-        assert!(
-            !query.semantic_text.contains("微信"),
-            "{:?}",
-            query.semantic_text
-        );
-        // 反例：孤立的「在」不消费
-        let query = parse("我在整理文档");
-        assert!(query.app.is_none());
+    fn app_prefix_is_hard() {
+        let query = parse("app:chrome 报错");
+        assert_eq!(query.app.as_deref(), Some("chrome"));
+        assert_eq!(query.semantic_text, "报错");
+        assert!(query.has_hard_filters());
+        assert!(query
+            .hard_chips()
+            .iter()
+            .any(|chip| chip.contains("chrome")));
+    }
+
+    #[test]
+    fn app_phrases_are_not_parsed() {
+        // `来自X` / `在X里` 不再产生任何结构化字段：整句按普通文本进字面与语义通道
+        for raw in [
+            "来自Chrome的报错",
+            "在微信里的聊天记录",
+            "存在文件里",
+            "来自Chrome",
+        ] {
+            let query = parse(raw);
+            assert!(query.app.is_none(), "{raw} 不该解析出应用名");
+            assert!(query.facet_words.is_empty(), "{raw} 不该产生软命中词");
+            assert_eq!(query.semantic_text, raw, "{raw} 必须整句保留");
+            assert!(!query.has_filters(), "{raw} 不该产生 WHERE 条件");
+        }
     }
 
     #[test]
@@ -730,7 +819,7 @@ mod tests {
     #[test]
     fn mixed_query_is_fully_parsed() {
         let now = monday_noon();
-        let query = parse_query_at("上个月来自 chrome 的橙色漏斗图 \"季度营收\"", now);
+        let query = parse_query_at("上个月 app:chrome 的橙色漏斗图 \"季度营收\"", now);
         assert!(query.time.is_some());
         assert_eq!(query.app.as_deref(), Some("chrome"));
         assert_eq!(query.color, Some(vec!["orange".to_string()]));
@@ -741,11 +830,17 @@ mod tests {
             query.quoted_terms
         );
         assert!(query.quoted_terms.contains(&"营收".to_string()));
-        // 语义文本只剩没有结构含义的部分
+        // 硬条件（时间 / app:X / 引号）被剥离
         assert!(!query.semantic_text.contains("上个月"));
         assert!(!query.semantic_text.contains("chrome"));
-        assert!(!query.semantic_text.contains("橙色"));
-        assert!(!query.semantic_text.contains("漏斗图"));
+        assert!(!query.semantic_text.contains("季度营收"));
+        // 软条件（颜色 / 图表）**不剥离**：仍参与 FTS 与查询嵌入
+        assert!(query.semantic_text.contains("橙色"));
+        assert!(query.semantic_text.contains("漏斗图"));
+        assert_eq!(
+            query.facet_words,
+            vec!["橙色".to_string(), "漏斗图".to_string()]
+        );
     }
 
     #[test]
@@ -755,14 +850,29 @@ mod tests {
         ] {
             let query = parse(raw);
             assert!(query.tags.is_empty() || !query.tags.iter().any(|t| t.is_empty()));
+            // 不变量：软命中词一定来自原文，不会凭空出现
+            for word in &query.facet_words {
+                assert!(raw.contains(word.as_str()), "{raw} → {word}");
+            }
         }
     }
 
     #[test]
-    fn a_word_is_consumed_only_once() {
-        // 颜色词不会被重复消费成两种颜色
+    fn facet_words_do_not_erase_semantics() {
+        // 颜色条件只记一次（同义重复不会产生两种颜色），且原词留在语义文本里
         let query = parse("橙色");
         assert_eq!(query.color, Some(vec!["orange".to_string()]));
-        assert!(query.semantic_text.trim().is_empty());
+        assert_eq!(query.semantic_text, "橙色");
+        assert_eq!(query.facet_words, vec!["橙色".to_string()]);
+        // 孤词判定：整条查询只剩软命中词 → 软条件退回硬过滤
+        assert!(query.facets_only());
+
+        // 带其它语义词时不是孤词（软条件只加分）
+        let query = parse("橙色 发票");
+        assert!(!query.facets_only());
+        assert_eq!(
+            query.lexical_terms,
+            vec!["橙色".to_string(), "发票".to_string()]
+        );
     }
 }

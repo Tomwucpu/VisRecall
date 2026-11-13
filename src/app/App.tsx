@@ -27,7 +27,7 @@ import { QueryChips } from "../features/search/QueryChips";
 import { FilterBar } from "../features/search/FilterBar";
 import { ActiveFilterChips } from "../features/search/ActiveFilterChips";
 import { useItemFilters } from "../features/search/useItemFilters";
-import { stripChip } from "../lib/searchTypes";
+import { literalizeChip, stripChip } from "../lib/searchTypes";
 import { ResultGrid } from "../features/search/ResultGrid";
 import { hitToCardData } from "../features/search/hitToCard";
 import { useSearch } from "../features/search/useSearch";
@@ -457,6 +457,13 @@ export default function App() {
               <QueryChips
                 parsed={search.response.parsed}
                 onRemove={(chip) => setQuery(stripChip(query, chip))}
+                onToLiteral={(chip) => {
+                  // 软条件：改写成 `"词"` 的引号字面量，仍搜这两个字但不再当参考条件
+                  const next = literalizeChip(query, chip);
+                  if (next !== query) {
+                    setQuery(next);
+                  }
+                }}
               />
             )}
           </div>

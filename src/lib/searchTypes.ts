@@ -23,15 +23,19 @@ export type SearchResponse = SearchResponseDto;
 export type SearchStatus = "idle" | "ready" | "error";
 
 /** 命中来源（ExplainBar 文案与卡片徽标共用）。 */
-export type HitSource = "fts" | "semantic" | "filter";
+export type HitSource = "fts" | "semantic" | "facet" | "filter";
 
-/** 命中来源：语义 > 字面 > 仅过滤。 */
+/** 命中来源：语义 > 字面 > 软命中 > 仅硬条件。 */
 export function hitSource(explanation: ExplanationDto): HitSource {
   if (explanation.semantic) {
     return "semantic";
   }
   if (explanation.terms.length > 0) {
     return "fts";
+  }
+  if ((explanation.facets?.length ?? 0) > 0) {
+    // 软命中（颜色/图表/类型/公式）：只加分不排除，所以文案不能写「仅满足筛选条件」
+    return "facet";
   }
   return "filter";
 }
@@ -43,24 +47,46 @@ export function hitSourceLabel(source: HitSource): string {
       return "语义命中";
     case "fts":
       return "字面命中";
+    case "facet":
+      return "软命中";
     default:
       return "条件命中";
   }
 }
 
 /** 命中来源的长文案（ExplainBar 的一句话解释）。 */
-export function hitSourceSentence(source: HitSource, terms: string[]): string {
+export function hitSourceSentence(
+  source: HitSource,
+  terms: string[],
+  facets: string[] = [],
+): string {
   switch (source) {
     case "semantic":
       return "按语义相关性匹配";
     case "fts":
       return terms.length > 0 ? `命中文字：${terms.join("、")}` : "命中文字";
+    case "facet":
+      return facets.length > 0 ? `参考条件命中：${facets.join("、")}` : "参考条件命中";
     default:
       return "仅满足筛选条件";
   }
 }
 
 export type { ItemDto };
+
+/** 软命中 chip 的后缀（后端 `soft_chips` 统一加，便于前端区分两种样式）。 */
+export const SOFT_CHIP_SUFFIX = "(参考)";
+
+/** 软 chip 是否「只加分不排除」的参考条件。 */
+export function isSoftChip(chip: string): boolean {
+  return chip.trim().endsWith(SOFT_CHIP_SUFFIX);
+}
+
+/** 去掉软 chip 的「(参考)」后缀，得到原文里的词。 */
+export function softWordOf(chip: string): string {
+  const text = chip.trim();
+  return isSoftChip(text) ? text.slice(0, -SOFT_CHIP_SUFFIX.length).trim() : text;
+}
 
 /**
  * 把 chip 对应的字样从查询串里删掉（保留其余词与空白规整）。
@@ -75,7 +101,7 @@ export function stripChip(raw: string, chip: string): string {
     return raw;
   }
 
-  // chip 是展示文案，尝试几种「原文里可能的写法」：整体、去前缀（来自/#）、带空格
+  // chip 是展示文案，尝试几种「原文里可能的写法」：整体、去前缀（来自/#）、软 chip 的原词
   const candidates = new Set<string>([text]);
   if (text.startsWith("来自 ")) {
     const app = text.slice(3).trim();
@@ -85,6 +111,9 @@ export function stripChip(raw: string, chip: string): string {
   if (text.startsWith("#")) {
     candidates.add(text.slice(1));
     candidates.add(`tag:${text.slice(1)}`);
+  }
+  if (isSoftChip(text)) {
+    candidates.add(softWordOf(text));
   }
 
   for (const candidate of candidates) {
@@ -98,4 +127,23 @@ export function stripChip(raw: string, chip: string): string {
   }
   // 一个都删不掉（例如「时间」chip 对应的词已被解析器吞掉）：保持原样
   return raw;
+}
+
+/**
+ * 把软 chip 改写成引号字面量（「仅文字」）：`红色预警` → `"红色" 预警`。
+ *
+ * 为什么需要它：软 chip 的 `×` 会把词从语义文本里一起删掉，用户若只想「不按颜色筛
+ * 但搜这两个字」就会查不到。引号通道是既有的必命中语法，后端零改动。
+ * 词不在原文里（旧记录/兜底 chip）时原样返回，由调用方决定是否重搜。
+ */
+export function literalizeChip(raw: string, chip: string): string {
+  const word = softWordOf(chip);
+  if (word.length === 0 || !raw.includes(word)) {
+    return raw;
+  }
+  const literal = `"${word}"`;
+  if (raw.includes(literal)) {
+    return raw;
+  }
+  return raw.replace(word, literal);
 }

@@ -1,4 +1,5 @@
-//! 三路召回编排（design §6.3）：parse → embed → 候选 SQL → FTS → 向量 → RRF → 装配解释。
+//! 三路召回编排（design §6.3）：parse → embed → 候选 SQL → FTS → 向量 → 软命中 → RRF
+//! → 装配解释。
 //!
 //! 与 `app-core` 的分工：本模块是**同步纯编排**，嵌入与向量索引都从外部注入
 //! （`&dyn EmbeddingProvider` + `&dyn VectorIndex`），因此 `search` 不依赖 `ai`，
@@ -6,6 +7,10 @@
 //!
 //! 降级语义：`embed` 为 `None` 或未就绪 → 跳过向量通道，`semantic_used=false`，
 //! FTS/过滤器结果照常返回（P3-R09「语义模型未就绪检索仍可用」）。
+//!
+//! 软命中（颜色 / 图表 / 素材类型 / 公式）走**第三路纯 SQL 通道**：主色与图表类型不在
+//! FTS 索引里（`document.rs` 只有 6 个文本字段），塞进索引要全库重建且污染 BM25；
+//! RRF 只用名次，因此这一路只需要有序 rowid（[`filters::facet_rowids`]）。
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -16,7 +21,7 @@ use visrecall_domain::search::{Explanation, ItemFilters, ParsedQuery, ScoredItem
 use visrecall_domain::{now_millis, AppError, Insight, Item};
 use visrecall_library::{FtsHit, Library, QueryLog};
 
-use crate::filters::{self, to_sql_with_filters};
+use crate::filters::{self, to_sql_with_filters, FacetMode};
 use crate::fts_query::build_match_expr;
 use crate::parser::parse_query_at;
 use crate::rank::{self, RrfConfig};
@@ -83,18 +88,90 @@ pub struct SearchDeps<'a> {
 }
 
 /// 执行一次检索（同步）。
+///
+/// 软条件默认是「加分项」；只有孤词（[`ParsedQuery::facets_only`]）才退回硬过滤，
+/// 且硬过滤 0 命中时自动放宽重跑一次（D3-Q07）。
 pub fn search(deps: SearchDeps<'_>, request: SearchRequest) -> Result<SearchOutcome, AppError> {
     let started = Instant::now();
     let now = now_millis();
-    let parsed = parse_query_at(&request.raw, now);
+    let mut parsed = parse_query_at(&request.raw, now);
     let limit = request.limit.clamp(1, MAX_LIMIT) as usize;
 
+    let facet_mode = FacetMode::for_query(&parsed);
+    let mut attempt = run_once(&deps, &parsed, &request.filters, facet_mode, limit, false)?;
+
+    // 孤词硬过滤 0 命中 → 清空软条件重跑（保留界面筛选与 `app:X`）
+    if facet_mode == FacetMode::Hard && attempt.hits.is_empty() && parsed.has_facets() {
+        parsed.color = None;
+        parsed.chart = None;
+        parsed.content_kind = None;
+        parsed.has_formula = None;
+        parsed.facet_words.clear();
+        attempt = run_once(
+            &deps,
+            &parsed,
+            &request.filters,
+            FacetMode::Soft,
+            limit,
+            true,
+        )?;
+    }
+
+    // 记录查询（评测与反馈闭环；放宽后的条件才是真正生效的条件）
+    let query_id = visrecall_domain::new_item_id();
+    let parsed_json = serde_json::to_string(&parsed).ok();
+    let result_ids: Vec<&str> = attempt
+        .hits
+        .iter()
+        .map(|hit| hit.item.id.as_str())
+        .collect();
+    let result_ids_json = serde_json::to_string(&result_ids).ok();
+    if let Err(err) = deps.library.query_log_insert(&QueryLog {
+        id: query_id.clone(),
+        raw: request.raw.clone(),
+        parsed_json,
+        result_ids_json,
+        feedback: None,
+        created_at: now,
+    }) {
+        // 记录失败不该让检索失败（评测数据，不是用户可见结果）
+        tracing::warn!(%err, "failed to write query log");
+    }
+
+    let took_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    Ok(SearchOutcome {
+        query_id,
+        parsed,
+        semantic_used: attempt.semantic_used,
+        took_ms,
+        total: attempt.total,
+        hits: attempt.hits,
+    })
+}
+
+/// 单次检索的内部产物（放宽重跑时会被替换）。
+struct Attempt {
+    hits: Vec<ScoredItem>,
+    /// `limit` 截断前的命中数。
+    total: usize,
+    semantic_used: bool,
+}
+
+/// 跑一遍完整的三路召回。`relaxed` 只影响解释文案（「条件已放宽」）。
+fn run_once(
+    deps: &SearchDeps<'_>,
+    parsed: &ParsedQuery,
+    filters_in: &ItemFilters,
+    facet_mode: FacetMode,
+    limit: usize,
+    relaxed: bool,
+) -> Result<Attempt, AppError> {
     // 1) 查询向量（未就绪/未注入 → None，语义通道跳过）
-    let query_vector = query_embedding(&deps, &parsed);
+    let query_vector = query_embedding(deps, parsed);
     let semantic_used = query_vector.is_some();
 
     // 2) 候选集（无过滤器 = 全集，`None`）：自然语言条件与界面筛选合并成同一批 rowid
-    let candidates = candidate_rowids(deps.library, &parsed, &request.filters)?;
+    let candidates = candidate_rowids(deps.library, parsed, filters_in, facet_mode)?;
 
     // 3) FTS 路
     let expr = build_match_expr(&parsed.lexical_terms, &parsed.quoted_terms);
@@ -118,11 +195,32 @@ pub fn search(deps: SearchDeps<'_>, request: SearchRequest) -> Result<SearchOutc
     };
     let vec_rowids: HashSet<i64> = vec_channel.iter().map(|(rowid, _)| *rowid).collect();
 
-    // 5) 取回素材（平局键、装配与过滤都要用）
-    let mut rowids: Vec<i64> = fts_rowids.union(&vec_rowids).copied().collect();
+    // 5) 软命中路（只在 Soft 模式；Hard 模式已进 WHERE，不重复计分）
+    let facet_channel: Vec<(i64, f32)> = if facet_mode == FacetMode::Soft && parsed.has_facets() {
+        filters::facet_rowids(deps.library, parsed, CHANNEL_LIMIT)?
+            .into_iter()
+            .map(|rowid| (rowid, 0.0))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let facet_rowids: HashSet<i64> = facet_channel.iter().map(|(rowid, _)| *rowid).collect();
+
+    // 6) 取回素材（平局键、装配与过滤都要用）
+    let mut rowids: Vec<i64> = Vec::new();
+    let mut seen: HashSet<i64> = HashSet::new();
+    for rowid in fts_rowids
+        .iter()
+        .chain(vec_rowids.iter())
+        .chain(facet_rowids.iter())
+    {
+        if seen.insert(*rowid) {
+            rowids.push(*rowid);
+        }
+    }
     if let Some(all) = &candidates {
         for rowid in all {
-            if !fts_rowids.contains(rowid) && !vec_rowids.contains(rowid) {
+            if seen.insert(*rowid) {
                 rowids.push(*rowid);
             }
         }
@@ -139,13 +237,21 @@ pub fn search(deps: SearchDeps<'_>, request: SearchRequest) -> Result<SearchOutc
             .unwrap_or((0, rowid))
     };
 
-    // 6) 融合 + filters-only 尾部（score = 0，按 captured_at DESC）
-    let mut fused = rank::rrf(&[&fts_channel[..], &vec_channel[..]], deps.rrf, &tie_break);
+    // 7) 融合 + filters-only 尾部（score = 0，按 captured_at DESC）
+    let mut fused = rank::rrf(
+        &[&fts_channel[..], &vec_channel[..], &facet_channel[..]],
+        deps.rrf.clone(),
+        &tie_break,
+    );
     let mut only_filters: Vec<(i64, f32)> = candidates
         .as_ref()
         .map(|all| {
             all.iter()
-                .filter(|rowid| !fts_rowids.contains(rowid) && !vec_rowids.contains(rowid))
+                .filter(|rowid| {
+                    !fts_rowids.contains(rowid)
+                        && !vec_rowids.contains(rowid)
+                        && !facet_rowids.contains(rowid)
+                })
                 .map(|rowid| (*rowid, 0.0))
                 .collect()
         })
@@ -157,7 +263,7 @@ pub fn search(deps: SearchDeps<'_>, request: SearchRequest) -> Result<SearchOutc
     });
     fused.extend(only_filters);
 
-    // 7) 装配解释 + 内存侧过滤（failed 素材不过滤，与列表口径一致）
+    // 8) 装配解释 + 内存侧过滤（failed 素材不过滤，与列表口径一致）
     let snippet_map = snippet_terms(&fts_hits);
     let mut hits: Vec<ScoredItem> = Vec::with_capacity(fused.len());
     for (rowid, score) in fused {
@@ -165,16 +271,23 @@ pub fn search(deps: SearchDeps<'_>, request: SearchRequest) -> Result<SearchOutc
             continue;
         };
         let insight = insights.get(&item.id);
-        if !filters::passes_with_filters(item, insight, &parsed, &request.filters) {
+        if !filters::passes_with_filters(item, insight, parsed, filters_in) {
             continue;
         }
-        let terms = matched_terms(item, insight, &parsed, snippet_map.get(&rowid));
+        let terms = matched_terms(item, insight, parsed, snippet_map.get(&rowid));
+        let mut facets = filters::matched_facets(item, insight, parsed);
+        if relaxed {
+            facets.push("条件已放宽".to_string());
+        }
         let explanation = Explanation {
-            filters: filters::matched_labels_with_filters(item, insight, &parsed, &request.filters),
+            filters: filters::matched_labels_with_filters(item, insight, parsed, filters_in),
+            facets,
             terms: terms.clone(),
+            // 仅语义命中：非 FTS + 无硬条件 + 无软命中 + 无界面筛选
             semantic: !fts_rowids.contains(&rowid)
-                && !parsed.has_filters()
-                && request.filters.is_empty(),
+                && !parsed.has_hard_filters()
+                && !parsed.has_facets()
+                && filters_in.is_empty(),
             highlight_boxes: highlight_boxes(insight, &terms),
         };
         hits.push(ScoredItem {
@@ -186,32 +299,10 @@ pub fn search(deps: SearchDeps<'_>, request: SearchRequest) -> Result<SearchOutc
 
     let total = hits.len();
     hits.truncate(limit);
-
-    // 8) 记录查询（评测与反馈闭环）
-    let query_id = visrecall_domain::new_item_id();
-    let parsed_json = serde_json::to_string(&parsed).ok();
-    let result_ids: Vec<&str> = hits.iter().map(|hit| hit.item.id.as_str()).collect();
-    let result_ids_json = serde_json::to_string(&result_ids).ok();
-    if let Err(err) = deps.library.query_log_insert(&QueryLog {
-        id: query_id.clone(),
-        raw: request.raw.clone(),
-        parsed_json,
-        result_ids_json,
-        feedback: None,
-        created_at: now,
-    }) {
-        // 记录失败不该让检索失败（评测数据，不是用户可见结果）
-        tracing::warn!(%err, "failed to write query log");
-    }
-
-    let took_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    Ok(SearchOutcome {
-        query_id,
-        parsed,
-        semantic_used,
-        took_ms,
+    Ok(Attempt {
         hits,
         total,
+        semantic_used,
     })
 }
 
@@ -248,8 +339,9 @@ fn candidate_rowids(
     library: &Library,
     parsed: &ParsedQuery,
     extra: &ItemFilters,
+    facet_mode: FacetMode,
 ) -> Result<Option<Vec<i64>>, AppError> {
-    let filter = to_sql_with_filters(parsed, extra)?;
+    let filter = to_sql_with_filters(parsed, extra, facet_mode)?;
     if filter.is_empty() {
         return Ok(None);
     }
