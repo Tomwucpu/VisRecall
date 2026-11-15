@@ -11,7 +11,6 @@ type Props = {
   semanticReady: boolean;
   total: number;
   onOpen: (item: ItemCardData) => void;
-  onNotThis: (hit: SearchHit) => void;
   selectedId: string | null;
   /** 多选模式：卡片点击切换选中，列表与检索结果共用同一套交互。 */
   selectionMode?: boolean;
@@ -27,7 +26,6 @@ export function ResultGrid({
   semanticReady,
   total,
   onOpen,
-  onNotThis,
   selectedId,
   selectionMode = false,
   selectedIds,
@@ -77,14 +75,6 @@ export function ResultGrid({
                 onToggleSelect={onToggleSelect}
               />
               <ExplainBar explanation={hit.explanation} semanticReady={semanticReady} />
-              <button
-                type="button"
-                className="mini-btn not-this"
-                title="标记为不相关，用于评测调参"
-                onClick={() => onNotThis(hit)}
-              >
-                不是这个
-              </button>
             </div>
           );
         })}

@@ -235,7 +235,6 @@ fn deleting_item_removes_fts_insight_and_vector_rows() {
         raw: "漏斗图".into(),
         parsed_json: None,
         result_ids_json: Some(format!(r#"["{id}"]"#)),
-        feedback: None,
         created_at: 1,
     })
     .unwrap();
@@ -265,7 +264,6 @@ fn purge_library_clears_index_and_query_log() {
         raw: "发票".into(),
         parsed_json: None,
         result_ids_json: None,
-        feedback: None,
         created_at: 1,
     })
     .unwrap();

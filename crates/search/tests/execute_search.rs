@@ -509,7 +509,7 @@ fn tie_order_is_stable_across_calls() {
 }
 
 #[test]
-fn query_log_is_written_and_feedback_roundtrips() {
+fn query_log_is_written() {
     let fixture = Fixture::new();
     let outcome = fixture.run("发票", 10);
 
@@ -517,33 +517,10 @@ fn query_log_is_written_and_feedback_roundtrips() {
     let log = log.expect("必须写入 queries 行");
     assert_eq!(log.raw, "发票");
     assert!(log.parsed_json.is_some());
-    assert!(log.feedback.is_none());
     assert!(log
         .result_ids_json
         .unwrap()
         .contains(&outcome.hits[0].item.id));
-
-    fixture
-        .library
-        .query_log_set_feedback(&outcome.query_id, "not-this")
-        .unwrap();
-    assert_eq!(
-        fixture
-            .library
-            .query_log_get(&outcome.query_id)
-            .unwrap()
-            .unwrap()
-            .feedback
-            .as_deref(),
-        Some("not-this")
-    );
-
-    assert!(matches!(
-        fixture
-            .library
-            .query_log_set_feedback("missing", "not-this"),
-        Err(AppError::NotFound)
-    ));
 }
 
 #[test]

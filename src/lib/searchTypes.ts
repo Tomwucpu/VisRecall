@@ -16,7 +16,7 @@ export type { ExplanationDto, OcrBoxDto, ParsedQueryDto, ProbeOutcomeDto };
 /** 一条命中：素材 DTO + 分数 + 解释。 */
 export type SearchHit = SearchHitDto;
 
-/** 检索响应（`queryId` 用于「不是这个」反馈）。 */
+/** 检索响应（`queryId` 对应 `queries` 表里的评测记录）。 */
 export type SearchResponse = SearchResponseDto;
 
 /** 检索状态：`idle` 空查询、`ready` 有结果、`error` 失败。 */

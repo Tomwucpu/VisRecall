@@ -152,10 +152,6 @@
   font-size: 11px;
 }
 
-.not-this {
-  align-self: flex-start;
-}
-
 .card-hit {
   display: inline-block;
   margin-bottom: 5px;

@@ -1040,24 +1040,6 @@ pub async fn search_items(
     .await
 }
 
-/// 「不是这个」反馈；`queryId` 不存在返回 `NOT_FOUND`。
-#[tauri::command]
-#[specta::specta]
-pub async fn search_feedback(
-    app: tauri::AppHandle,
-    query_id: String,
-    item_id: String,
-    signal: String,
-) -> Result<(), ApiError> {
-    run_blocking(app, move |core| {
-        // `item_id` 目前只记日志：V0.1 的反馈粒度是「整个查询」，字段留给 V0.5 的逐条反馈。
-        tracing::info!(%query_id, %item_id, %signal, "search feedback");
-        core.search_feedback(&query_id, &signal)
-            .map_err(|err| ApiError::from(&err))
-    })
-    .await
-}
-
 /// 一个自定义模型的读取视图：**永远不含密钥**，只告诉界面「是否已设置」。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
@@ -1241,7 +1223,6 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             restart_app,
             pick_directory,
             search_items,
-            search_feedback,
             model_probe,
             get_model_config,
             set_model_config,

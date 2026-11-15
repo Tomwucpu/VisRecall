@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type ItemFilters } from "../../lib/api";
 import { describeError } from "../../lib/errors";
-import type { SearchHit, SearchResponse, SearchStatus } from "../../lib/searchTypes";
+import type { SearchResponse, SearchStatus } from "../../lib/searchTypes";
 
 /** 搜索防抖（requirements P3-R09：250ms）。 */
 export const SEARCH_DEBOUNCE_MS = 250;
@@ -64,19 +64,7 @@ export function useSearch(raw: string, filters: ItemFilters | null = null, filte
     return () => window.clearTimeout(timer);
   }, [trimmed, filterKey]);
 
-  const feedback = useCallback(
-    async (hit: SearchHit) => {
-      if (state.response === null) {
-        return;
-      }
-      await api.searchFeedback(state.response.queryId, hit.item.id, "not-this").catch(() => {
-        /* 反馈失败不该打断检索；后端已有日志 */
-      });
-    },
-    [state.response],
-  );
-
   const hits = useMemo(() => state.response?.hits ?? [], [state.response]);
 
-  return { ...state, hits, feedback };
+  return { ...state, hits };
 }

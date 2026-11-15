@@ -164,8 +164,7 @@ const hit = (overrides: Partial<SearchHit> = {}): SearchHit => ({
   ...overrides,
 });
 
-test("result grid renders hits, badge, explanation and the not-this action", () => {
-  const notThis: SearchHit[] = [];
+test("result grid renders hits, badge and explanation", () => {
   render(
     <ResultGrid
       hits={[hit()]}
@@ -174,16 +173,13 @@ test("result grid renders hits, badge, explanation and the not-this action", () 
       semanticReady
       total={1}
       onOpen={() => {}}
-      onNotThis={(candidate) => notThis.push(candidate)}
       selectedId={null}
     />,
   );
   expect(screen.getByText("发票页面")).toBeInTheDocument();
   expect(screen.getByText("字面命中")).toBeInTheDocument();
   expect(screen.getByText("命中 1 项")).toBeInTheDocument();
-
-  fireEventClick(screen.getByText("不是这个"));
-  expect(notThis).toHaveLength(1);
+  expect(screen.queryByText("不是这个")).not.toBeInTheDocument();
 });
 
 test("result grid gives the card a loadable thumbnail url", () => {
@@ -198,7 +194,6 @@ test("result grid gives the card a loadable thumbnail url", () => {
       semanticReady
       total={1}
       onOpen={() => {}}
-      onNotThis={() => {}}
       selectedId={null}
     />,
   );
@@ -219,7 +214,6 @@ test("result grid explains empty and degraded states", () => {
       semanticReady={false}
       total={0}
       onOpen={() => {}}
-      onNotThis={() => {}}
       selectedId={null}
     />,
   );
@@ -234,7 +228,6 @@ test("result grid explains empty and degraded states", () => {
       semanticReady
       total={0}
       onOpen={() => {}}
-      onNotThis={() => {}}
       selectedId={null}
     />,
   );

@@ -70,8 +70,6 @@ export const commands = {
 	 *  检索（三路召回 + RRF）；解析是纯规则快路径，不阻塞。
 	 */
 	searchItems: (raw: string, limit: number | null, filters: ItemFiltersDto_Deserialize | null) => __TAURI_INVOKE<SearchResponseDto_Serialize>("search_items", { raw, limit, filters }),
-	/**  「不是这个」反馈；`queryId` 不存在返回 `NOT_FOUND`。 */
-	searchFeedback: (queryId: string, itemId: string, signal: string) => __TAURI_INVOKE<null>("search_feedback", { queryId, itemId, signal }),
 	/**  探测指定模型 id：连通性 + 视觉能力 + 延迟（按该模型已保存的协议）。 */
 	modelProbe: (id: string) => __TAURI_INVOKE<ProbeOutcomeDto_Serialize>("model_probe", { id }),
 	/**  读取模型配置（自定义模型列表 + 是否已设置密钥）。 */

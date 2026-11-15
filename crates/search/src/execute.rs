@@ -131,7 +131,6 @@ pub fn search(deps: SearchDeps<'_>, request: SearchRequest) -> Result<SearchOutc
         raw: request.raw.clone(),
         parsed_json,
         result_ids_json,
-        feedback: None,
         created_at: now,
     }) {
         // 记录失败不该让检索失败（评测数据，不是用户可见结果）

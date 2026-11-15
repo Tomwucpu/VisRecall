@@ -479,7 +479,6 @@ export default function App() {
                 semanticReady={pipeline.semanticReady}
                 total={search.response?.total ?? 0}
                 onOpen={openDetail}
-                onNotThis={(hit) => void search.feedback(hit)}
                 selectedId={selectedId}
                 selectionMode={selectionMode}
                 selectedIds={selectedIds}

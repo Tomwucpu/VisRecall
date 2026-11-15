@@ -311,10 +311,6 @@ export const api = {
     filters: ItemFilters | null = null,
   ): Promise<SearchResponse> => commands.searchItems(raw, limit, filters),
 
-  /** 「不是这个」反馈：写入 `queries.feedback`（V0.1 无历史 UI）。 */
-  searchFeedback: (queryId: string, itemId: string, signal: string): Promise<null> =>
-    commands.searchFeedback(queryId, itemId, signal),
-
   /** 按模型 id 探测：连通性 + 视觉能力 + 延迟（使用已保存配置）。 */
   probeModel: (id: string): Promise<ProbeOutcomeDto> => commands.modelProbe(id),
 

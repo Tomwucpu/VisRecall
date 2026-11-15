@@ -1256,15 +1256,6 @@ impl AppCore {
             .run(library, vectors.as_ref(), raw, limit, filters)
     }
 
-    /// 「不是这个」反馈：写入 `queries.feedback`。
-    pub fn search_feedback(&self, query_id: &str, signal: &str) -> Result<(), AppError> {
-        let library = match &self.library {
-            Ok(library) => library.as_ref(),
-            Err(err) => return Err(AppError::Internal(format!("library unavailable: {err}"))),
-        };
-        library.query_log_set_feedback(query_id, signal)
-    }
-
     /// 当前模型配置（**不含密钥明文**）。
     pub fn model_config(&self) -> ModelConfig {
         self.providers.config()
