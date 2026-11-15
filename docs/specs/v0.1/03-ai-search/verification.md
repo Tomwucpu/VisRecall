@@ -311,6 +311,7 @@ cargo run -p visrecall-eval -- --db <验收库根目录> --queries my-queries.js
 | G10 | `to_sql` 对 `来自Chrome的报错` / `在微信里的聊天记录` / `存在文件里` 均为空 | **通过** | `filters.rs::app_phrases_produce_no_where_clause` |
 | G11 | 集成：搜 `来自Chrome的报错` 时 chrome 与 vscode 两条都被召回 | **通过** | `tests/execute_search.rs::app_phrase_is_plain_text_and_does_not_exclude_other_apps`（`err_chrome` + `err_vscode` 同时命中） |
 | G12 | 集成：`app:chrome 报错` 只返回 chrome 那条（`app:X` 硬过滤不回归） | **通过** | `tests/execute_search.rs::explicit_app_prefix_is_still_a_hard_filter`（`err_vscode` 被排除） |
+| G13 | 搜索栏下只显示**可移除**的条件（`来自 app` / `#tag` / `"引号词"`）；软命中不做标签；时间 chip 无 `×` | **通过** | `domain::search::tests::chips_only_contain_removable_conditions`（`chips()` 不含时间与「(参考)」）；`ExplainBar.test.tsx` 的 `renders only removable chips…`、`time condition renders as a fixed hint without a remove button` |
 
 ### 6.2 门禁输出（2026-11-13，Windows x86_64）
 
@@ -319,7 +320,7 @@ cargo test -p visrecall-search                     55 (lib) + 19 (execute_search
 cargo test -p visrecall-domain                     39 (lib) + 7 (geometry) = 46 passed / 0 failed
 cargo test --workspace                             845 passed / 0 failed（66 个测试目标）
 cargo clippy --workspace --all-targets -D warnings 通过（0 warning）
-cargo fmt --all --check                            本次改动的文件均通过（其余差异为改动前既有，见 §6.4）
+cargo fmt --all --check                            本次改动的文件均通过（其余差异为改动前既有，见 §6.5）
 NODE_ENV=test pnpm test                            167 passed / 0 failed（24 文件）
 pnpm typecheck / pnpm lint                         通过（0 error / 0 warning）
 npx vite build --emptyOutDir false                 通过（130 modules，dist 生成成功）
@@ -335,7 +336,20 @@ cargo test -p visrecall --bin visrecall -- --ignored refresh_committed_bindings
 | `pnpm build`（整条脚本） | **未验证（环境限制）** | 本机 IDE 的 fs shim 拦截 `dist/` 清理（`vite:prepare-out-dir` 报 `--file parameter is required`），与代码无关 | 在普通终端/CI 上执行 `pnpm build`；本次已用 `vite build --outDir dist-build-check` 证明打包本身通过（产物已删除） |
 | GUI 手工确认（软 chip 虚线 / 「仅文字」按钮 / 解释条软命中行） | **待人工** | 需要 GUI 操作 | 见 §3.2-C 清单补充：输入 `红色预警` 应出现虚线 chip「红色(参考)」，点「仅文字」后原文变成 `"红色" 预警` 并重搜 |
 
-### 6.4 已知遗留（对应计划 §7）
+### 6.4 前端口径调整（2026-11-15，验收反馈）
+
+搜索栏下的 chips 原先把「硬条件 + 软命中」都渲染出来，软 chip 点了 `×` 会把词从原文删掉
+（`红色预警` → `预警`），时间 chip 的 `×` 则是空操作。调整为（G13）：
+
+- `chips()` 只返回**能从原文删掉**的条件（`来自 app` / `#tag` / `"引号词"`）；
+- 软命中不进 chips，只在每条结果的解释条里只读展示（`Explanation.facets`）；
+- 时间条件由前端用 `parsed.time` 渲染成无 `×` 的虚线提示 chip（`时间：11-01 ~ 11-03`，
+  文案由 `formatTimeRangeChip` 生成，左闭右开按 `to - 1` 归日）；
+- `ParsedQueryDto.hardChips` 删除（与 `chips` 语义重合）；`softChips` 保留但仅供解释/调试；
+- 「仅文字」按钮一并移除，`literalizeChip` 工具函数保留（带单测）等后续入口；
+- 顺带修 `stripChip`：候选片段改为**长候选优先**，避免 `tag:工作` 先删 `工作` 留下 `tag:` 残渣。
+
+### 6.5 已知遗留（对应计划 §7）
 
 - **R1 时间词仍是子串匹配 + 硬过滤**（本期按要求不动）：`关于上个月的费用` 仍会被当时间条件。
 - **R3 FTS 普通词是 OR**：软词留在 `lexical_terms` 后，`红色预警` 也会召回只含「红色」的素材（软命中即召回优先，接受）。

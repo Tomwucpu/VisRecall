@@ -64,7 +64,7 @@ test("source helpers stay consistent", () => {
   expect(hitSourceSentence("facet", [], ["类型 图片"])).toContain("类型 图片");
 });
 
-test("renders chips and removes the chosen condition from the raw query", () => {
+test("renders only removable chips and removes the chosen condition", () => {
   const removed: string[] = [];
   render(
     <QueryChips
@@ -77,44 +77,46 @@ test("renders chips and removes the chosen condition from the raw query", () => 
         hasFormula: null,
         tags: ["工作"],
         semanticText: "橙色 发票",
-        chips: ["橙色(参考)", "来自 chrome", "#工作"],
-        hardChips: ["来自 chrome", "#工作"],
+        chips: ["来自 chrome", "#工作"],
         softChips: ["橙色(参考)"],
         facetWords: ["橙色"],
       }}
       onRemove={(chip) => removed.push(chip)}
     />,
   );
-  expect(screen.getByText("橙色(参考)")).toBeInTheDocument();
-  fireEventClick(screen.getByLabelText("移除条件 橙色(参考)"));
-  expect(removed).toEqual(["橙色(参考)"]);
+  expect(screen.getByText("#工作")).toBeInTheDocument();
+  // 软命中不做成标签：只加分不排除，没有可「取消」的东西
+  expect(screen.queryByText("橙色(参考)")).not.toBeInTheDocument();
+  expect(screen.queryByText("仅文字")).not.toBeInTheDocument();
+  fireEventClick(screen.getByLabelText("移除条件 #工作"));
+  expect(removed).toEqual(["#工作"]);
 });
 
-test("soft chips offer a literal-only toggle and stay visually distinct", () => {
-  const literal: string[] = [];
+test("time condition renders as a fixed hint without a remove button", () => {
   render(
     <QueryChips
       parsed={{
-        time: null,
+        time: { from: Date.UTC(2026, 10, 15, 4), to: Date.UTC(2026, 10, 16, 4) },
         app: null,
-        color: ["red"],
+        color: [],
         chart: null,
         contentKind: null,
         hasFormula: null,
         tags: [],
-        semanticText: "红色预警",
-        chips: ["红色(参考)"],
-        hardChips: [],
-        softChips: ["红色(参考)"],
-        facetWords: ["红色"],
+        semanticText: "",
+        chips: [],
+        softChips: [],
+        facetWords: [],
       }}
-      onRemove={() => {}}
-      onToLiteral={(chip) => literal.push(chip)}
+      onRemove={() => {
+        throw new Error("时间条件不该有移除入口");
+      }}
     />,
   );
-  expect(screen.getByText("红色(参考)").closest("li")).toHaveClass("is-soft");
-  fireEventClick(screen.getByText("仅文字"));
-  expect(literal).toEqual(["红色(参考)"]);
+  const chip = screen.getByText(/^时间：/).closest("li");
+  expect(chip).toHaveClass("is-fixed");
+  // 删不掉就不给 ×：避免「点了没反应」的空操作
+  expect(screen.queryByLabelText(/移除条件 时间/)).not.toBeInTheDocument();
 });
 
 function fireEventClick(element: HTMLElement) {
@@ -123,9 +125,9 @@ function fireEventClick(element: HTMLElement) {
 
 test("stripChip removes the matching fragment and keeps the rest", () => {
   expect(stripChip("橙色 发票", "橙色")).toBe("发票");
-  expect(stripChip("橙色 发票", "橙色(参考)")).toBe("发票");
   expect(stripChip("来自 chrome 报错", "来自 chrome")).toBe("报错");
   expect(stripChip("发票 #工作", "#工作")).toBe("发票");
+  expect(stripChip("发票 tag:工作", "#工作")).toBe("发票");
   // 删不掉时原样返回（避免把查询误清空）
   expect(stripChip("发票", "时间")).toBe("发票");
 });

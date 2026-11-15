@@ -279,6 +279,14 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ### Task 4: 前端可解释性（chips / 解释条 / 绑定）
 
+> **实施偏差（2026-11-15，验收反馈）**：下面 Step 1 的「软 chip + 仅文字按钮」**没有落地**。
+> 原因：软条件只加分不排除，做成标签会让人误以为可以「取消」，而 `×` 的实现是「从原文删掉
+> 那段词」——删 `红色预警` 里的 `红色` 会让查询变成 `预警`，语义上也说不通。改为：
+> `chips` 只输出**可移除**的条件（`来自 app` / `#tag` / `"引号词"`）；软命中只出现在每条结果的
+> 解释条（`Explanation.facets`）；时间条件由前端用 `parsed.time` 渲染成**无 `×`** 的提示
+> （原词已被解析器吞掉，删除必然是空操作）。`literalizeChip` 工具函数与其单测保留，暂不接入 UI。
+> Step 2（解释条三类命中）按原样落地。
+
 **Files:**
 - Modify: `src/features/search/QueryChips.tsx`（软 chip 虚线样式 + 「仅文字」按钮）
 - Modify: `src/features/search/ExplainBar.tsx`（软命中行）
@@ -367,7 +375,7 @@ cargo run -p visrecall-eval -- --db <库根> --queries docs/eval/queries.templat
 | R3 | FTS 普通词是 OR 连接（`fts_query.rs:36`） | 软词进入 `lexical_terms` 后，`红色预警` 会召回只含「红色」的素材，精度下降 | 接受（软命中即召回优先）；靠 eval 观察，必要时给软词的 FTS 通道单独降权 |
 | R4 | 候选集为空（`None`）时向量通道是**全库 top-200** | 泛词（「图」「表格」）语义噪声大；`SEMANTIC_RELATIVE_FLOOR=0.5` 是相对阈值，短查询下不稳 | 保持现值 + 用新增 5 条用例校准；若 Top-3 下降，对 `lexical_terms.len() <= 1` 的查询加绝对下限 |
 | R5 | `only_filters` 尾部补位（`execute.rs:144`） | 只剩时间条件时候选集可能数百条，大量 0 分素材排在尾部，观感像「软条件没生效」 | 给尾部补位加 `limit` 上限；或本期先观察 |
-| R6 | 软 chip 的「×」会连语义一起删 | 用户想「不筛颜色但搜这两个字」时删了就查不到 | 由 Task 4 的「仅文字」按钮覆盖 |
+| R6 | ~~软 chip 的「×」会连语义一起删~~ | 风险路径不存在：软条件不再做成 chip（见 Task 4 实施偏差），只在解释条里只读展示 | 关闭（「想搜这两个字」直接给词加引号即可） |
 | R7 | `settings['search.rrf']` 存量是 2 元素数组 | facet 权重落到默认补齐值（0.6），不是 1.0 | `from_settings` 显式补齐，不依赖 `unwrap_or` |
 | R8 | facet SQL 全表 `LEFT JOIN insights` | 万级以上才有感 | 可选 `CREATE INDEX idx_insights_primary_color`（不进迁移，规模需要时再加） |
 | R9 | `Explanation.semantic` 语义收窄 | 结果卡片的「仅语义命中」徽标定义变化 | Task 4 Step 2 统一口径，不新增徽标 |

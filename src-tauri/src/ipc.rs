@@ -160,11 +160,13 @@ pub struct ParsedQueryDto {
     pub has_formula: Option<bool>,
     pub tags: Vec<String>,
     pub semantic_text: String,
-    /// 人类可读的条件标签（硬条件在前、软命中在后）。
+    /// 可移除的条件标签（`来自 app` / `#tag` / `"引号词"`）。
+    ///
+    /// 只有这些会渲染成带 `×` 的 chip：`×` 的实现是「把片段从原文删掉后重搜」，
+    /// 所以标签必须与原文一一对应。时间条件不在这里（原文已被解析器吞掉），
+    /// 前端用 `time` 字段渲染成不可移除的提示。
     pub chips: Vec<String>,
-    /// 硬条件 chips（进候选集 WHERE，如 `#工作` / `来自 chrome`）。
-    pub hard_chips: Vec<String>,
-    /// 软命中 chips（只加分不排除，带「(参考)」后缀）。
+    /// 软命中标签（带「(参考)」后缀），**仅供解释条与调试**，不渲染成 chips。
     pub soft_chips: Vec<String>,
     /// 软命中的原词（`红色预警` → `红色`）。
     pub facet_words: Vec<String>,
@@ -173,7 +175,6 @@ pub struct ParsedQueryDto {
 impl From<visrecall_domain::search::ParsedQuery> for ParsedQueryDto {
     fn from(parsed: visrecall_domain::search::ParsedQuery) -> Self {
         let chips = parsed.chips();
-        let hard_chips = parsed.hard_chips();
         let soft_chips = parsed.soft_chips();
         Self {
             time: parsed.time.map(|time| TimeRangeDto {
@@ -188,7 +189,6 @@ impl From<visrecall_domain::search::ParsedQuery> for ParsedQueryDto {
             tags: parsed.tags,
             semantic_text: parsed.semantic_text,
             chips,
-            hard_chips,
             soft_chips,
             facet_words: parsed.facet_words,
         }
@@ -795,7 +795,9 @@ pub async fn item_delete_many(
     ids: Vec<String>,
 ) -> Result<BatchDeleteReportDto, ApiError> {
     run_blocking(app, move |core| {
-        let report = core.delete_items(&ids).map_err(|err| ApiError::from(&err))?;
+        let report = core
+            .delete_items(&ids)
+            .map_err(|err| ApiError::from(&err))?;
         Ok(BatchDeleteReportDto {
             deleted: report.deleted,
             failed: report.failed,

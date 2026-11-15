@@ -151,12 +151,18 @@ impl ParsedQuery {
             && self.quoted_terms.is_empty()
     }
 
-    /// 硬条件 chips（会进 WHERE 的条件）。
-    pub fn hard_chips(&self) -> Vec<String> {
+    /// 可移除的条件标签：`来自 app` / `#tag` / `"引号词"`。
+    ///
+    /// 只包含**能从原文里删掉**的条件——前端的 chip `×` 是通过删除原始查询串里的
+    /// 片段实现的，所以这里必须与原文一一对应，否则点一下就会变成空操作。
+    ///
+    /// 两类条件**不在**这里：
+    /// - 时间：原词（`今天` / `最近7天`）已被解析器从语义文本里剥离，删不回来，前端
+    ///   直接用 [`Self::time`] 渲染成不可移除的提示；
+    /// - 软命中（颜色 / 图表 / 类型 / 公式）：只加分不排除，用户不需要「取消」，
+    ///   由每条结果的 [`Explanation::facets`] 说明，不做成标签。
+    pub fn chips(&self) -> Vec<String> {
         let mut chips = Vec::new();
-        if let Some(time) = &self.time {
-            chips.push(format!("时间:{}~{}", time.from, time.to));
-        }
         if let Some(app) = &self.app {
             chips.push(format!("来自 {app}"));
         }
@@ -169,7 +175,10 @@ impl ParsedQuery {
         chips
     }
 
-    /// 软命中 chips（只加分不排除，展示时加「(参考)」后缀以示区别）。
+    /// 软命中标签（带「(参考)」后缀）。
+    ///
+    /// **不再渲染成 chips**：软条件只加分不排除，做成标签会让用户以为可以「取消」。
+    /// 保留这个口径供解释条、日志与调试查看「系统实际识别到了哪些参考条件」。
     pub fn soft_chips(&self) -> Vec<String> {
         if !self.facet_words.is_empty() {
             return self
@@ -178,7 +187,7 @@ impl ParsedQuery {
                 .map(|word| format!("{word}(参考)"))
                 .collect();
         }
-        // 手工构造（或旧记录反序列化）时没有原词，退回枚举标签，避免 chip 与条件不一致
+        // 手工构造（或旧记录反序列化）时没有原词，退回枚举标签，避免与条件不一致
         let mut chips = Vec::new();
         if let Some(colors) = self.color.as_ref().filter(|colors| !colors.is_empty()) {
             chips.push(format!("{}(参考)", colors.join("/")));
@@ -192,13 +201,6 @@ impl ParsedQuery {
         if self.has_formula == Some(true) {
             chips.push("公式(参考)".to_string());
         }
-        chips
-    }
-
-    /// 前端 chips（硬条件在前、软命中在后）。
-    pub fn chips(&self) -> Vec<String> {
-        let mut chips = self.hard_chips();
-        chips.extend(self.soft_chips());
         chips
     }
 }
@@ -297,8 +299,12 @@ mod tests {
     }
 
     #[test]
-    fn chips_render_hard_and_soft_conditions() {
+    fn chips_only_contain_removable_conditions() {
         let query = ParsedQuery {
+            time: Some(TimeRange {
+                from: 1_700_000_000_000,
+                to: 1_700_086_400_000,
+            }),
             app: Some("chrome".into()),
             color: Some(vec!["orange".into()]),
             chart: Some("funnel".into()),
@@ -309,15 +315,25 @@ mod tests {
             facet_words: vec!["橙色".into(), "漏斗图".into()],
             ..Default::default()
         };
-        let chips = query.chips();
-        assert!(chips.iter().any(|chip| chip.contains("chrome")));
-        assert!(chips.iter().any(|chip| chip == "#工作"));
-        assert!(chips.iter().any(|chip| chip.contains("季度")));
-        assert!(chips.iter().any(|chip| chip == "橙色(参考)"));
-        assert!(chips.iter().any(|chip| chip == "漏斗图(参考)"));
+        // 只能放「能从原文删掉」的条件：时间与软命中都不算
+        assert_eq!(
+            query.chips(),
+            vec![
+                "来自 chrome".to_string(),
+                "#工作".to_string(),
+                "\"季度 营收\"".to_string()
+            ]
+        );
+        assert!(
+            !query.chips().iter().any(|chip| chip.contains("参考")),
+            "软命中不做成标签"
+        );
+        assert!(
+            !query.chips().iter().any(|chip| chip.contains("时间")),
+            "时间条件由前端用 time 字段渲染（不可移除）"
+        );
 
-        // 硬/软分开取：前端据此渲染两种样式
-        assert!(query.hard_chips().iter().all(|chip| !chip.contains("参考")));
+        // 软命中口径仍保留，供解释条与调试使用
         assert_eq!(
             query.soft_chips(),
             vec!["橙色(参考)".to_string(), "漏斗图(参考)".to_string()]

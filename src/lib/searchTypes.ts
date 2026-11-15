@@ -74,7 +74,7 @@ export function hitSourceSentence(
 
 export type { ItemDto };
 
-/** 软命中 chip 的后缀（后端 `soft_chips` 统一加，便于前端区分两种样式）。 */
+/** 软命中 chip 的后缀（后端 `soft_chips` 统一加，用于区分「参考条件」）。 */
 export const SOFT_CHIP_SUFFIX = "(参考)";
 
 /** 软 chip 是否「只加分不排除」的参考条件。 */
@@ -101,7 +101,7 @@ export function stripChip(raw: string, chip: string): string {
     return raw;
   }
 
-  // chip 是展示文案，尝试几种「原文里可能的写法」：整体、去前缀（来自/#）、软 chip 的原词
+  // chip 是展示文案，尝试几种「原文里可能的写法」：整体、去前缀（来自/#）
   const candidates = new Set<string>([text]);
   if (text.startsWith("来自 ")) {
     const app = text.slice(3).trim();
@@ -112,11 +112,10 @@ export function stripChip(raw: string, chip: string): string {
     candidates.add(text.slice(1));
     candidates.add(`tag:${text.slice(1)}`);
   }
-  if (isSoftChip(text)) {
-    candidates.add(softWordOf(text));
-  }
 
-  for (const candidate of candidates) {
+  // 长候选优先：`tag:工作` 必须整体删除，否则先删 `工作` 会留下 `tag:` 残渣
+  const ordered = [...candidates].sort((a, b) => b.length - a.length);
+  for (const candidate of ordered) {
     if (candidate.length === 0) {
       continue;
     }
@@ -130,11 +129,12 @@ export function stripChip(raw: string, chip: string): string {
 }
 
 /**
- * 把软 chip 改写成引号字面量（「仅文字」）：`红色预警` → `"红色" 预警`。
+ * 把软词改写成引号字面量：`红色预警` → `"红色" 预警`。
  *
- * 为什么需要它：软 chip 的 `×` 会把词从语义文本里一起删掉，用户若只想「不按颜色筛
- * 但搜这两个字」就会查不到。引号通道是既有的必命中语法，后端零改动。
- * 词不在原文里（旧记录/兜底 chip）时原样返回，由调用方决定是否重搜。
+ * **暂未接入 UI**：R2 决定不把软命中做成 chip（只加分不排除，用户不需要「取消」），
+ * 所以没有入口调用它。留在这里是因为「想搜这两个字但不想按参考条件排序」是真实需求，
+ * 将来若在结果区或搜索框旁加开关，直接复用即可（引号通道是既有语法，后端零改动）。
+ * 词不在原文里时原样返回，由调用方决定是否重搜。
  */
 export function literalizeChip(raw: string, chip: string): string {
   const word = softWordOf(chip);

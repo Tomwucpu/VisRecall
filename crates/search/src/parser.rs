@@ -770,10 +770,7 @@ mod tests {
         assert_eq!(query.app.as_deref(), Some("chrome"));
         assert_eq!(query.semantic_text, "报错");
         assert!(query.has_hard_filters());
-        assert!(query
-            .hard_chips()
-            .iter()
-            .any(|chip| chip.contains("chrome")));
+        assert!(query.chips().iter().any(|chip| chip.contains("chrome")));
     }
 
     #[test]

@@ -502,11 +502,15 @@ export type ParsedQueryDto_Deserialize = {
 	hasFormula?: boolean | null,
 	tags: string[],
 	semanticText: string,
-	/**  人类可读的条件标签（硬条件在前、软命中在后）。 */
+	/**
+	 *  可移除的条件标签（`来自 app` / `#tag` / `"引号词"`）。
+	 * 
+	 *  只有这些会渲染成带 `×` 的 chip：`×` 的实现是「把片段从原文删掉后重搜」，
+	 *  所以标签必须与原文一一对应。时间条件不在这里（原文已被解析器吞掉），
+	 *  前端用 `time` 字段渲染成不可移除的提示。
+	 */
 	chips: string[],
-	/**  硬条件 chips（进候选集 WHERE，如 `#工作` / `来自 chrome`）。 */
-	hardChips: string[],
-	/**  软命中 chips（只加分不排除，带「(参考)」后缀）。 */
+	/**  软命中标签（带「(参考)」后缀），**仅供解释条与调试**，不渲染成 chips。 */
 	softChips: string[],
 	/**  软命中的原词（`红色预警` → `红色`）。 */
 	facetWords: string[],
@@ -522,11 +526,15 @@ export type ParsedQueryDto_Serialize = {
 	hasFormula: boolean | null,
 	tags: string[],
 	semanticText: string,
-	/**  人类可读的条件标签（硬条件在前、软命中在后）。 */
+	/**
+	 *  可移除的条件标签（`来自 app` / `#tag` / `"引号词"`）。
+	 * 
+	 *  只有这些会渲染成带 `×` 的 chip：`×` 的实现是「把片段从原文删掉后重搜」，
+	 *  所以标签必须与原文一一对应。时间条件不在这里（原文已被解析器吞掉），
+	 *  前端用 `time` 字段渲染成不可移除的提示。
+	 */
 	chips: string[],
-	/**  硬条件 chips（进候选集 WHERE，如 `#工作` / `来自 chrome`）。 */
-	hardChips: string[],
-	/**  软命中 chips（只加分不排除，带「(参考)」后缀）。 */
+	/**  软命中标签（带「(参考)」后缀），**仅供解释条与调试**，不渲染成 chips。 */
 	softChips: string[],
 	/**  软命中的原词（`红色预警` → `红色`）。 */
 	facetWords: string[],

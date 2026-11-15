@@ -136,6 +136,37 @@ export function formatRelativeTime(ms: number, now: number = Date.now()): string
   return formatAbsoluteTime(ms);
 }
 
+function localDate(ms: number): string {
+  const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+/**
+ * 时间条件 chip 的短文案：`2026-11-15` / `11-01 ~ 11-03`。
+ *
+ * 后端给的是**左闭右开**区间（`to` 通常落在次日 00:00），所以结束日取 `to - 1`
+ * 的那一天，否则「今天」会被显示成「今天 ~ 明天」。
+ */
+export function formatTimeRangeChip(
+  from: number,
+  to: number,
+  now: number = Date.now(),
+): string {
+  const start = localDate(from);
+  const end = localDate(Math.max(from, to - 1));
+  if (start === "" || end === "") {
+    return "";
+  }
+  if (start === end) {
+    return start;
+  }
+  const sameYear = new Date(from).getFullYear() === new Date(now).getFullYear();
+  return sameYear ? `${start.slice(5)} ~ ${end.slice(5)}` : `${start} ~ ${end}`;
+}
+
 const BYTE_UNITS = ["B", "KB", "MB", "GB", "TB"] as const;
 
 /**

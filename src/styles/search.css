@@ -107,27 +107,13 @@
   font-size: 11px;
 }
 
-/* 软命中 chip：虚线边框 + 无底色，明确「只加分不排除」 */
-.query-chip.is-soft {
+/* 不可移除的条件（时间）：无 ×、不可点，仅作为提示 */
+.query-chip.is-fixed {
   border-style: dashed;
-  border-color: var(--line-2);
   background: transparent;
   color: var(--ink-3);
-}
-
-.query-chip-literal {
-  border: 0;
-  border-left: 1px solid var(--line-2);
-  background: transparent;
-  color: var(--ink-3);
-  cursor: pointer;
-  font-size: 10px;
-  line-height: 1;
-  padding: 0 2px 0 6px;
-}
-
-.query-chip-literal:hover {
-  color: var(--hue-jade);
+  cursor: default;
+  padding-right: 8px;
 }
 
 .query-chip-remove {

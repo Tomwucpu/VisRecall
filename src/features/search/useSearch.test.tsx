@@ -18,7 +18,6 @@ function response(raw: string, ids: string[]): SearchResponse {
       tags: [],
       semanticText: raw,
       chips: [],
-      hardChips: [],
       softChips: [],
       facetWords: [],
     },
