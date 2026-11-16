@@ -324,6 +324,8 @@ pub struct Insight {
     pub confidence: Option<f32>,
     pub summary_user_edited: bool,
     pub tags_user_edited: bool,
+    /// 用户手工改过 OCR 文本：重新识别不得覆盖 `ocr_text` / `ocr_boxes`。
+    pub ocr_user_edited: bool,
     pub updated_at: i64,
 }
 
@@ -350,6 +352,7 @@ impl Insight {
             confidence: None,
             summary_user_edited: false,
             tags_user_edited: false,
+            ocr_user_edited: false,
             updated_at,
         }
     }

@@ -15,6 +15,16 @@ pub struct ItemEvent {
     pub id: String,
 }
 
+/// `item_content_updated` 载荷：`field ∈ { summary, ocrText, bodyText }`。
+///
+/// 前端据此决定失效范围：正文影响卡片预览，要连列表一起失效；摘要与 OCR 只动详情。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentEvent {
+    pub id: String,
+    pub field: String,
+}
+
 /// 导入任务进度事件只携带 ID，计数由前端重新查询数据库。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -146,6 +156,8 @@ pub enum AppEvent {
     AppRecovered(AppRecoveredEvent),
     /// 备注保存成功；前端只失效该条详情，不动列表。
     ItemNoteUpdated(ItemEvent),
+    /// 用户编辑了 AI 描述 / OCR 文本 / 正文；前端按 `field` 决定失效详情还是连列表。
+    ItemContentUpdated(ContentEvent),
     /// 某条素材的标签关联变化；失效详情 + 标签云。
     ItemTagsUpdated(ItemEvent),
     /// 标签集合变化（新增/改名/删除）；失效标签云。
@@ -188,6 +200,7 @@ impl AppEvent {
             AppEvent::HotkeyConflict(_) => "hotkey_conflict",
             AppEvent::AppRecovered(_) => "app_recovered",
             AppEvent::ItemNoteUpdated(_) => "item_note_updated",
+            AppEvent::ItemContentUpdated(_) => "item_content_updated",
             AppEvent::ItemTagsUpdated(_) => "item_tags_updated",
             AppEvent::TagsChanged => "tags_changed",
             AppEvent::ItemDeleted(_) => "item_deleted",
@@ -216,6 +229,7 @@ impl AppEvent {
             AppEvent::HotkeyConflict(payload) => json(payload),
             AppEvent::AppRecovered(payload) => json(payload),
             AppEvent::ItemNoteUpdated(payload) => json(payload),
+            AppEvent::ItemContentUpdated(payload) => json(payload),
             AppEvent::ItemTagsUpdated(payload) => json(payload),
             AppEvent::TagsChanged => json(&serde_json::json!({})),
             AppEvent::ItemDeleted(payload) => json(payload),
@@ -369,6 +383,14 @@ mod tests {
         let event = AppEvent::SemanticStatus(SemanticStatusEvent { ready: false });
         assert_eq!(event.name(), "semantic_status");
         assert_eq!(event.payload()["ready"], false);
+
+        let event = AppEvent::ItemContentUpdated(ContentEvent {
+            id: "abc".into(),
+            field: "bodyText".into(),
+        });
+        assert_eq!(event.name(), "item_content_updated");
+        assert_eq!(event.payload()["id"], "abc");
+        assert_eq!(event.payload()["field"], "bodyText");
     }
 
     #[test]

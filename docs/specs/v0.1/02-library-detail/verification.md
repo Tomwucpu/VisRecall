@@ -188,3 +188,73 @@ pnpm build
   2. 阶段 01 门禁里仍然 `未验证（环境限制）` 的 9 项：物理 4K + PresentMon、双屏与混合 DPI、100%/200% 缩放、物理 OLE 四来源、DRM/独占全屏、提权窗口与 UIPI、30 分钟 + ≥20 次真实捕获、重复捕获不去重、滚动帧率量化（§1）；
   3. 详情读取耗时 P95、跨卷迁移（L4）、以及 L3 的取舍（只影响「裸 `cargo run`」，不影响 `pnpm tauri dev`）。
 - **建议下一阶段启动前确认**：①L3 是否保留现状（`custom-protocol` 默认开启：release 一条命令可用，代价是裸 `cargo build/run` 必须已有 `dist/`）；②阶段 03 的检索依赖标签/摘要，届时需先补本阶段未做的标签云筛选与 20 条数据验收。
+
+## 6. 增量验收：可编辑 AI 描述与原文（2026-11-15）
+
+> 对应需求：P2-R15 / P2-R16；设计：`design.md` §12；任务：`tasks.md` Task 22–26。
+> **功能状态：已实施（2026-11-15，Task 22–26）。** 自动化证据已回填；需要 GUI 的三项（改摘要后检索、改正文后看卡片预览、改 OCR 后看原图文字框）标「环境限制未验证」，附同路径的自动化替代证据。口径与 §2 一致——没有证据不得静默勾选。
+
+### 6.1 验收矩阵
+
+| 需求 | 场景 | 结论 | 证据 |
+|---|---|---|---|
+| P2-R15 | 改摘要后立即生效，重启后仍在 | **通过（持久化，自动化）** | `content_edit_db::summary_write_sets_user_edited_and_keeps_source`（`summary_source` 不变、保护位为真）；`content_edit_flow::summary_write_emits_the_summary_field` |
+| P2-R15 | 摘要加入唯一词「蓝鲸」后检索命中 | **未验证（环境限制：无 GUI）** | 无手工证据。同路径替代：`summary_and_ocr_writes_fire_the_hook` + 既有 `two_stage::note_change_cancels_old_index_job_and_writes_new_note_to_fts`（备注与摘要是同一条钩子） |
+| P2-R15 | 2000 / 2001 字符边界（超限被拒且保留旧值） | **通过** | `content_edit_db::summary_accepts_exactly_the_limit_and_rejects_overflow` |
+| P2-R15 | 空摘要可补写；清空后回到「待解析」占位 | **通过（后端）** | `content_edit_db::empty_summary_clears_it`（写 NULL）；前端占位由 `summary === null` 分支保证 |
+| P2-R15 | 注入一次 VLM 结果后人工摘要未被覆盖 | **通过** | `two_stage::vlm_does_not_overwrite_user_edited_summary`（摘要不变、`summary_source` 不变、颜色照常更新）；`copy_model_fields` 同样加了保护（无独立用例） |
+| P2-R15 | 保存失败（库只读）保留文本并可重试 | **通过** | `DetailPanel.test.tsx::keeps the summary text and reports failure when saving fails`（失败态 + 文本保留）；备注侧同一 `commitContent` 语义由 `keeps the note text...` 覆盖 |
+| P2-R15 | 切换素材不串台、未保存草稿丢弃 | **通过** | `DetailPanel.test.tsx::resets the content draft when switching to another item` |
+| P2-R15 | 保存后继续输入必须回到「未保存」 | **通过** | `DetailPanel.test.tsx::typing after a successful save returns to the unsaved state` |
+| P2-R15 | 摘要上限按字符（码点）计，emoji 算 1 个 | **通过** | `DetailPanel.test.tsx::counts the summary limit by code point and blocks overflow`（2001 个 emoji 截到 2000） |
+| P2-R16 | 正文编辑写回 `texts/*.txt`，卡片预览与检索立即更新 | **通过（文件与事件）/ 预览未验证（无 GUI）** | `content_edit_db::body_write_replaces_the_file_and_fires_the_hook`；`content_edit_flow::body_write_emits_the_body_field_and_updates_the_file`；`events.test.ts::content update invalidates the detail and refreshes the list only for body text` |
+| P2-R16 | 正文 20000 / 20001 边界；`bodyTextTruncated` 时只读 | **通过** | `body_write_rejects_documents_longer_than_the_display_limit`；`DetailPanel.test.tsx::hides the body editor when the original was truncated` |
+| P2-R16 | 外部引用素材正文只读（UI 禁用 + 后端 `INVALID_INPUT`） | **通过** | `body_write_rejects_external_reference_items`；`DetailPanel.test.tsx::keeps an external reference body read-only` |
+| P2-R16 | `texts/` 只读时保存返回 `IO`，`revision` 未变 | **通过（用同名文件占用父目录模拟写失败）** | `content_edit_db::body_write_failure_does_not_fire_the_hook`（`IO` 且钩子 0 次；只读属性在 Windows 上不阻止已打开句柄，故用目录占位） |
+| P2-R16 | OCR 文本编辑不重建文字框，检索按新文本命中 | **通过（框保留）/ 检索未验证（环境限制）** | `content_edit_db::ocr_write_keeps_boxes_and_sets_flag`；检索替代证据同 P2-R15 的钩子用例 |
+| P2-R16 | OCR 20000 / 20001 边界；`ocrTextTruncated` 时只读 | **通过** | `ocr_write_rejects_overflow_and_keeps_old_value`（后端限长）；`DetailPanel.test.tsx::hides the ocr editor when the text was truncated`（前端只读 + 提示） |
+| P2-R16 | 重新 OCR 不覆盖人工文本与文字框 | **通过** | `two_stage::ocr_does_not_overwrite_user_edited_text_or_boxes`（框为空、文本不变、保护位保留） |
+| P2-R16 | 清空正文 / OCR 后的空态与检索结果 | **通过（空态）** | `empty_body_clears_the_file`、`empty_ocr_clears_the_text_but_keeps_boxes` |
+| P2-R15/16 | `item_content_updated` 的失效范围：`bodyText` 额外刷新列表，`summary`/`ocrText` 不刷新 | **通过** | `events.test.ts::content update invalidates the detail and refreshes the list only for body text` |
+| P2-R15 | 待解析时不提供编辑，复制仍靠右 | **通过** | `DetailPanel.test.tsx::groups the summary copy action on the right and hides editing while unparsed` |
+| P2-R15/16 | AI 描述 / 识别文字与备注同构：textarea 常驻、无「编辑」按钮 | **通过** | `DetailPanel.test.tsx::keeps the summary editor always mounted like the note` |
+| P2-R15/16 | 摘要 / OCR 失焦：无改动隐藏按钮，有改动保留草稿 | **通过** | `hides the summary actions after blur when nothing changed`、`keeps the summary actions after blur when there are changes`、`hides the ocr actions after blur when nothing changed` |
+| P2-R16 | 原文（库内）与备注同构：常驻 textarea、无「编辑」按钮；外部引用与超长只读 | **通过** | `edits the body text of a text item`（直接编辑）、`keeps an empty body editable`、`keeps a missing body editable and disables copy`、`keeps an external reference body read-only`、`hides the body editor when the original was truncated` |
+| P2-R16 | 原文与识别到的文字支持一键复制，无文本时禁用 | **通过** | `copies the body text`、`copies the ocr text`、`disables copy when there is no text` |
+| P2-R15/16 | 绑定重新生成、`committed_bindings_are_up_to_date` 通过 | **通过** | `refresh_committed_bindings` 执行成功；`bindings.ts` 包含三条新命令与四个新字段；`pnpm typecheck` 通过 |
+
+### 6.2 已知取舍（本次明确接受）
+
+| 项 | 现状 | 依据 |
+|---|---|---|
+| 来源徽标不表示人工编辑 | `summary_source` 保持 `vlm`/`ocr`/`extractive`/`none`；编辑后徽标不变，界面无「已编辑」标记 | 需求 P2-R15、design D2-12 |
+| 无版本历史 / 恢复 AI 原文 | 只保留 `summary_user_edited` / `ocr_user_edited` 保护位，不保存旧值 | requirements §4 |
+| OCR 文字框不重算 | 编辑文本后 `ocr_boxes_json` 保持上次识别结果，界面提示可能不一致 | design D2-15 |
+| 超长不可编辑 | 正文 / OCR 超过 20000 字符只读，避免把截断内容写回文件 | design D2-14 |
+| 外部引用正文只读 | 外部原件始终只读，写请求返回 `INVALID_INPUT` | requirements P2-R16 |
+| OCR 置信度保留旧值 | 重新识别只更新 `ocr_engine`；`ocr_confidence` 仍是编辑前那次识别的值 | design §12.7 |
+| 保护位存在并发窗口 | handler 读保护位 → 调模型 → 整行写回；模型调用期间的用户编辑会被覆盖（用户侧已改列级写入，handler 侧未加版本号） | design §12.4「并发窗口」 |
+| 正文「缺失」与「不可读」共用 `null` | 文件不存在、非 UTF-8、无权限都返回 `body_text = null` 且允许编辑；保存会用新内容覆盖原文件（GBK 老文本可能被整体替换） | design §12.7；建议后续区分 `missing` / `unreadable` |
+| 正文编辑不刷新 `char_count` | 只更新 `updated_at`；列表不展示 `charCount`，卡片预览实时读文件 | 低影响，未排期 |
+
+### 6.3 验收命令
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+pnpm lint && pnpm typecheck && pnpm test && pnpm build
+cargo test -p visrecall --bin visrecall -- --ignored refresh_committed_bindings
+```
+
+### 6.4 本轮执行结果（2026-11-15）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo clippy --workspace --all-targets -- -D warnings` | 通过（0 warning） |
+| `cargo test --workspace` | 全部 `test result: ok`；新增 library 17 例、pipeline 2 例、app-core 4 例、IPC/事件稳定性用例若干 |
+| `NODE_ENV=test pnpm test` | 24 文件 / **188 passed** |
+| `pnpm typecheck` / `pnpm lint` | 通过（0 error / 0 warning） |
+| 前端构建 | `npx vite build --emptyOutDir false` 通过；`pnpm build` 的 `tsc --noEmit` 阶段通过，vite 清空 `dist/` 被 IDE 的 safe-delete shim 拦截（环境问题，非代码） |
+| `cargo fmt --all -- --check` | 本次改动文件格式化通过；全仓仍有既有基线差异（`app-core/src/app.rs` 未改动的测试行等），未混入格式化 diff |
+| `refresh_committed_bindings` | 通过；`src/lib/bindings.ts` 新增 3 条命令与 4 个字段 |

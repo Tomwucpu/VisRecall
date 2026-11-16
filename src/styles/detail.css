@@ -198,6 +198,14 @@
   color: var(--ink-3);
 }
 
+/* 区块标题右侧的操作组：靠右排列，避免 space-between 把两个按钮拆到两端。 */
+.d-sec-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
 .tag-input {
   width: 100%;
   min-width: 0;
@@ -366,6 +374,27 @@
 
 .d-note::placeholder {
   color: var(--ink-3);
+}
+
+/* 内容编辑区（AI 描述 / 原文 / OCR）：比备注更高，保留换行。 */
+.d-content-edit {
+  min-height: 120px;
+  white-space: pre-wrap;
+}
+
+/* 只读原因（外部引用 / 超长 / OCR 框说明）。 */
+.d-edit-hint {
+  margin: 6px 0 0;
+  color: var(--ink-3);
+  font-size: 10.5px;
+  line-height: 1.6;
+}
+
+/* OCR 文本可能很长：限高滚动，避免详情面板被一段文字撑爆。 */
+.d-ocr-text {
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
 }
 
 .d-actions {

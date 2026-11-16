@@ -15,6 +15,12 @@ export const commands = {
 	updateSettings: (patch: SettingsPatch_Deserialize) => __TAURI_INVOKE<SettingsDto_Serialize>("update_settings", { patch }),
 	getItemExt: (id: string) => __TAURI_INVOKE<ItemDetailDto_Serialize>("get_item_ext", { id }),
 	noteSet: (id: string, text: string) => __TAURI_INVOKE<null>("note_set", { id, text }),
+	/**  保存用户编辑的 AI 描述；`summary_source` 保持原值（不改来源标记）。 */
+	itemSummarySet: (id: string, text: string) => __TAURI_INVOKE<null>("item_summary_set", { id, text }),
+	/**  保存图片素材的 OCR 文本（不重算文字框）。 */
+	itemOcrTextSet: (id: string, text: string) => __TAURI_INVOKE<null>("item_ocr_text_set", { id, text }),
+	/**  保存文本素材的正文（写回库内文件；外部引用素材只读）。 */
+	itemBodyTextSet: (id: string, text: string) => __TAURI_INVOKE<null>("item_body_text_set", { id, text }),
 	tagsList: () => __TAURI_INVOKE<TagChipDto_Serialize[]>("tags_list"),
 	tagAdd: (itemId: string, name: string) => __TAURI_INVOKE<TagChipDto_Serialize>("tag_add", { itemId, name }),
 	tagDetach: (itemId: string, tagId: string) => __TAURI_INVOKE<null>("tag_detach", { itemId, tagId }),
@@ -132,6 +138,14 @@ export type DetailExtrasDto_Deserialize = {
 	ocrBoxes: OcrBoxDto[],
 	/**  文本素材的原文（前 20000 字符，超出部分已截断）。 */
 	bodyText?: string | null,
+	/**  原文是否被截断；为真时前端禁止编辑，避免把半截文本写回文件。 */
+	bodyTextTruncated: boolean,
+	/**  正文是否可编辑（文本素材且非外部引用）。 */
+	bodyTextEditable: boolean,
+	/**  图片素材的 OCR 文本；`None` 表示没有可展示的文本（未识别，或用户已清空）。 */
+	ocrText?: string | null,
+	/**  OCR 文本是否被截断；为真时前端禁止编辑。 */
+	ocrTextTruncated: boolean,
 	/**  图片素材的原图协议 URL；文本/链接为 `None`。 */
 	originalUrl?: string | null,
 	tags: TagChipDto_Deserialize[],
@@ -148,6 +162,14 @@ export type DetailExtrasDto_Serialize = {
 	ocrBoxes: OcrBoxDto[],
 	/**  文本素材的原文（前 20000 字符，超出部分已截断）。 */
 	bodyText: string | null,
+	/**  原文是否被截断；为真时前端禁止编辑，避免把半截文本写回文件。 */
+	bodyTextTruncated: boolean,
+	/**  正文是否可编辑（文本素材且非外部引用）。 */
+	bodyTextEditable: boolean,
+	/**  图片素材的 OCR 文本；`None` 表示没有可展示的文本（未识别，或用户已清空）。 */
+	ocrText: string | null,
+	/**  OCR 文本是否被截断；为真时前端禁止编辑。 */
+	ocrTextTruncated: boolean,
 	/**  图片素材的原图协议 URL；文本/链接为 `None`。 */
 	originalUrl: string | null,
 	tags: TagChipDto_Serialize[],

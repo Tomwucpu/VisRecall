@@ -1,5 +1,7 @@
 //! `items` 表的 CRUD：插入、按 `captured_at` 键集分页读取、取单条、更新状态。
 
+use std::fs;
+
 use rusqlite::types::{Type, Value};
 use rusqlite::{OptionalExtension, Row};
 use visrecall_domain::item::{Item, ItemKind, ItemStatus, NewItem};
@@ -21,6 +23,10 @@ pub const MAX_NOTE_CHARS: usize = 10_000;
 
 /// 用户标题长度上限（按字符计）；超出直接拒绝，不静默截断。
 pub const MAX_TITLE_CHARS: usize = 200;
+
+/// 文本素材正文长度上限（按字符计）：与详情展示的 20000 字符口径一致。
+/// 原文本身就超过这个长度时禁止在应用内编辑，避免把截断内容写回文件。
+pub const MAX_BODY_CHARS: usize = 20_000;
 
 /// 「全选当前筛选」一次最多返回的 id 数：防止把超大数组塞进 UI 状态与事件载荷。
 pub const MAX_FILTERED_IDS: u32 = 2_000;
@@ -240,6 +246,67 @@ impl Library {
             )));
         }
         self.set_item_note(id, text)
+    }
+
+    /// 保存文本素材的正文：写回库内文件并触发重新索引。
+    ///
+    /// 顺序硬约束：先原子写文件，成功后才刷新 `updated_at` 并入队索引；文件写失败直接返回
+    /// `IO`，`revision` 不变（不会出现「索引任务已排队、文件还是旧的」）。
+    /// 外部引用素材的正文属于外部原件，始终只读。
+    pub fn set_body_text(&self, id: &str, text: &str) -> Result<(), AppError> {
+        let item = self.get_item(id)?.ok_or(AppError::NotFound)?;
+        if item.kind != ItemKind::Text {
+            return Err(AppError::InvalidInput(
+                "only text items have body text".to_string(),
+            ));
+        }
+        if self.external_asset_for_item(id)?.is_some() {
+            return Err(AppError::InvalidInput(
+                "external asset body text is read-only".to_string(),
+            ));
+        }
+        if text.chars().count() > MAX_BODY_CHARS {
+            return Err(AppError::InvalidInput(format!(
+                "body text longer than {MAX_BODY_CHARS} chars"
+            )));
+        }
+        // 详情只展示前 20000 字符；原文本身更长时禁止编辑，避免截断内容被写回。
+        // UTF-8 每字符最多 4 字节：先用文件大小粗筛，避免把超大文件整块读进内存。
+        let path = self.resolve_existing_or_join(&item.original_path)?;
+        if let Ok(meta) = fs::metadata(&path) {
+            if meta.len() > (MAX_BODY_CHARS as u64) * 4 {
+                return Err(AppError::InvalidInput(
+                    "body text too long to edit".to_string(),
+                ));
+            }
+        }
+        let current_chars = crate::AssetReader::new(self)
+            .read_text(id, u64::MAX)
+            .map(|current| current.chars().count())
+            .unwrap_or(0);
+        if current_chars > MAX_BODY_CHARS {
+            return Err(AppError::InvalidInput(
+                "body text too long to edit".to_string(),
+            ));
+        }
+
+        crate::files::write_atomic(&path, text.as_bytes())?;
+
+        {
+            let conn = self.conn()?;
+            let updated = conn
+                .execute(
+                    "UPDATE items SET updated_at = ?2 WHERE id = ?1",
+                    rusqlite::params![id, now_millis()],
+                )
+                .map_err(db_error)?;
+            if updated == 0 {
+                tracing::warn!(item = %id, "body text written but item row is gone");
+                return Err(AppError::NotFound);
+            }
+        }
+        self.notify_metadata_changed(&[id.to_string()]);
+        Ok(())
     }
 
     /// 保存用户标题；`None` 或空白表示恢复「未改名」（写 NULL，展示层回落到来源标题）。

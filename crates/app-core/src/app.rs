@@ -32,8 +32,8 @@ use crate::capture_flow::{
 };
 use crate::detail::{load_detail, ItemDetail};
 use crate::events::{
-    AppEvent, AppRecoveredEvent, CaptureFailedEvent, EventSink, HotkeyConflictEvent, ItemEvent,
-    ItemUpdatedEvent, ItemsDeletedEvent,
+    AppEvent, AppRecoveredEvent, CaptureFailedEvent, ContentEvent, EventSink, HotkeyConflictEvent,
+    ItemEvent, ItemUpdatedEvent, ItemsDeletedEvent,
 };
 use crate::import_flow::ImportFlow;
 
@@ -664,6 +664,34 @@ impl AppCore {
         self.sink
             .emit(AppEvent::ItemNoteUpdated(ItemEvent { id: id.to_string() }));
         Ok(())
+    }
+
+    /// 保存用户编辑的 AI 描述；成功发 `item_content_updated { field: "summary" }`。
+    pub fn set_summary(&self, id: &str, text: &str) -> Result<(), AppError> {
+        self.library_required()?.set_summary(id, text)?;
+        self.emit_content_updated(id, "summary");
+        Ok(())
+    }
+
+    /// 保存用户编辑的 OCR 文本；成功发 `item_content_updated { field: "ocrText" }`。
+    pub fn set_ocr_text(&self, id: &str, text: &str) -> Result<(), AppError> {
+        self.library_required()?.set_ocr_text(id, text)?;
+        self.emit_content_updated(id, "ocrText");
+        Ok(())
+    }
+
+    /// 保存文本素材正文；成功发 `item_content_updated { field: "bodyText" }`。
+    pub fn set_body_text(&self, id: &str, text: &str) -> Result<(), AppError> {
+        self.library_required()?.set_body_text(id, text)?;
+        self.emit_content_updated(id, "bodyText");
+        Ok(())
+    }
+
+    fn emit_content_updated(&self, id: &str, field: &str) {
+        self.sink.emit(AppEvent::ItemContentUpdated(ContentEvent {
+            id: id.to_string(),
+            field: field.to_string(),
+        }));
     }
 
     /// 贴标签；成功发 `item_tags_updated` + `tags_changed`。

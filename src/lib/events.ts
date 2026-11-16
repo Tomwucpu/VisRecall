@@ -18,6 +18,7 @@ type EventName =
   | "items_reset"
   | "items_pruned"
   | "item_note_updated"
+  | "item_content_updated"
   | "item_tags_updated"
   | "tags_changed"
   | "hotkey_restored"
@@ -54,6 +55,7 @@ const ALL_EVENTS: EventName[] = [
   "items_reset",
   "items_pruned",
   "item_note_updated",
+  "item_content_updated",
   "item_tags_updated",
   "tags_changed",
   "hotkey_restored",
@@ -65,6 +67,16 @@ const ALL_EVENTS: EventName[] = [
   "import_task_progress",
   "import_task_finished",
 ];
+
+function contentFieldOf(payload: unknown): string | null {
+  if (typeof payload === "object" && payload !== null) {
+    const field = (payload as { field?: unknown }).field;
+    if (typeof field === "string") {
+      return field;
+    }
+  }
+  return null;
+}
 
 function itemIdOf(payload: unknown): string | null {
   if (typeof payload === "object" && payload !== null) {
@@ -209,6 +221,21 @@ function subscribe(names: readonly EventName[], client: QueryClient): () => void
       const id = itemIdOf(payload);
       if (id !== null) {
         void client.invalidateQueries({ queryKey: queryKeys.detail(id) });
+      }
+      return;
+    }
+
+    if (name === "item_content_updated") {
+      const id = itemIdOf(payload);
+      if (id !== null) {
+        void client.invalidateQueries({ queryKey: queryKeys.detail(id) });
+        // 正文会改变卡片预览（列表 / 筛选结果 / 检索结果都用 preview 渲染），三处都要刷新；
+        // 摘要与 OCR 不影响列表。
+        if (contentFieldOf(payload) === "bodyText") {
+          void client.invalidateQueries({ queryKey: queryKeys.items });
+          void client.invalidateQueries({ queryKey: ["items-filtered"] });
+          void client.invalidateQueries({ queryKey: queryKeys.search });
+        }
       }
       return;
     }

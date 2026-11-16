@@ -437,6 +437,14 @@ pub struct DetailExtrasDto {
     pub ocr_boxes: Vec<OcrBoxDto>,
     /// 文本素材的原文（前 20000 字符，超出部分已截断）。
     pub body_text: Option<String>,
+    /// 原文是否被截断；为真时前端禁止编辑，避免把半截文本写回文件。
+    pub body_text_truncated: bool,
+    /// 正文是否可编辑（文本素材且非外部引用）。
+    pub body_text_editable: bool,
+    /// 图片素材的 OCR 文本；`None` 表示没有可展示的文本（未识别，或用户已清空）。
+    pub ocr_text: Option<String>,
+    /// OCR 文本是否被截断；为真时前端禁止编辑。
+    pub ocr_text_truncated: bool,
     /// 图片素材的原图协议 URL；文本/链接为 `None`。
     pub original_url: Option<String>,
     pub tags: Vec<TagChipDto>,
@@ -475,6 +483,10 @@ impl From<visrecall_app_core::ItemDetail> for ItemDetailDto {
                     .map(OcrBoxDto::from)
                     .collect(),
                 body_text: detail.extras.body_text,
+                body_text_truncated: detail.extras.body_text_truncated,
+                body_text_editable: detail.extras.body_text_editable,
+                ocr_text: detail.extras.ocr_text,
+                ocr_text_truncated: detail.extras.ocr_text_truncated,
                 original_url: detail.extras.original_url,
                 tags: detail
                     .extras
@@ -675,6 +687,51 @@ pub async fn get_item_ext(app: tauri::AppHandle, id: String) -> Result<ItemDetai
 pub async fn note_set(app: tauri::AppHandle, id: String, text: String) -> Result<(), ApiError> {
     run_blocking(app, move |core| {
         core.set_note(&id, &text)
+            .map_err(|err| ApiError::from(&err))
+    })
+    .await
+}
+
+/// 保存用户编辑的 AI 描述；`summary_source` 保持原值（不改来源标记）。
+#[tauri::command]
+#[specta::specta]
+pub async fn item_summary_set(
+    app: tauri::AppHandle,
+    id: String,
+    text: String,
+) -> Result<(), ApiError> {
+    run_blocking(app, move |core| {
+        core.set_summary(&id, &text)
+            .map_err(|err| ApiError::from(&err))
+    })
+    .await
+}
+
+/// 保存图片素材的 OCR 文本（不重算文字框）。
+#[tauri::command]
+#[specta::specta]
+pub async fn item_ocr_text_set(
+    app: tauri::AppHandle,
+    id: String,
+    text: String,
+) -> Result<(), ApiError> {
+    run_blocking(app, move |core| {
+        core.set_ocr_text(&id, &text)
+            .map_err(|err| ApiError::from(&err))
+    })
+    .await
+}
+
+/// 保存文本素材的正文（写回库内文件；外部引用素材只读）。
+#[tauri::command]
+#[specta::specta]
+pub async fn item_body_text_set(
+    app: tauri::AppHandle,
+    id: String,
+    text: String,
+) -> Result<(), ApiError> {
+    run_blocking(app, move |core| {
+        core.set_body_text(&id, &text)
             .map_err(|err| ApiError::from(&err))
     })
     .await
@@ -1197,6 +1254,9 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             update_settings,
             get_item_ext,
             note_set,
+            item_summary_set,
+            item_ocr_text_set,
+            item_body_text_set,
             tags_list,
             tag_add,
             tag_detach,
@@ -1614,6 +1674,10 @@ mod tests {
                 summary_source: "none".into(),
                 ocr_boxes: vec![],
                 body_text: Some("abc".into()),
+                body_text_truncated: false,
+                body_text_editable: true,
+                ocr_text: None,
+                ocr_text_truncated: false,
                 original_url: None,
                 tags: vec![],
             },
@@ -1625,5 +1689,10 @@ mod tests {
         assert!(json["extras"]["ocrBoxes"].is_array());
         assert!(json["extras"]["originalUrl"].is_null());
         assert!(json["extras"]["tags"].is_array());
+        // 编辑相关字段的 camelCase 与默认值（前端据此决定是否给编辑入口）。
+        assert_eq!(json["extras"]["bodyTextTruncated"], false);
+        assert_eq!(json["extras"]["bodyTextEditable"], true);
+        assert!(json["extras"]["ocrText"].is_null());
+        assert_eq!(json["extras"]["ocrTextTruncated"], false);
     }
 }

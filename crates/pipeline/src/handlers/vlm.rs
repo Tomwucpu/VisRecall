@@ -165,9 +165,13 @@ fn cloud_text_allowed(ctx: &JobCtx<'_>, item: &visrecall_domain::Item) -> Result
 }
 
 /// 把模型结果写进 insight（保留已有 OCR 字段）。
+///
+/// 用户手工编辑过摘要（`summary_user_edited`）时只更新结构化属性，不覆盖摘要与来源。
 fn apply_model_result(insight: &mut Insight, result: &VisionInsight, provider: &str, now: i64) {
-    insight.summary = Some(result.summary.trim().to_string());
-    insight.summary_source = SummarySource::Vlm;
+    if !insight.summary_user_edited {
+        insight.summary = Some(result.summary.trim().to_string());
+        insight.summary_source = SummarySource::Vlm;
+    }
     insight.content_type = result.content_type.clone();
     insight.primary_color = result.primary_color.clone();
     insight.chart_type = result.chart_type.clone();
@@ -180,10 +184,12 @@ fn apply_model_result(insight: &mut Insight, result: &VisionInsight, provider: &
     insight.updated_at = now;
 }
 
-/// content_hash 复用时拷贝模型字段（不动本素材自己的 OCR 文本）。
+/// content_hash 复用时拷贝模型字段（不动本素材自己的 OCR 文本、不覆盖人工摘要）。
 fn copy_model_fields(insight: &mut Insight, other: &Insight) {
-    insight.summary = other.summary.clone();
-    insight.summary_source = other.summary_source;
+    if !insight.summary_user_edited {
+        insight.summary = other.summary.clone();
+        insight.summary_source = other.summary_source;
+    }
     insight.content_type = other.content_type.clone();
     insight.primary_color = other.primary_color.clone();
     insight.chart_type = other.chart_type.clone();

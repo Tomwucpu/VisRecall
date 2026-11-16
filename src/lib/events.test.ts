@@ -55,6 +55,7 @@ test("subscribes to every cache-affecting event", async () => {
     "items_reset",
     "items_pruned",
     "item_note_updated",
+    "item_content_updated",
     "item_tags_updated",
     "tags_changed",
     "hotkey_restored",
@@ -68,7 +69,7 @@ test("subscribes to every cache-affecting event", async () => {
   ]);
 
   cleanup();
-  expect(mocks.unlisten).toHaveBeenCalledTimes(18);
+  expect(mocks.unlisten).toHaveBeenCalledTimes(19);
 });
 
 test("import events refresh authoritative task and source queries", async () => {
@@ -183,6 +184,24 @@ test("note update only invalidates that detail", async () => {
   expect(invalidate).toHaveBeenCalledWith({ queryKey: ["detail", "abc"] });
   // 备注变化不得重置列表：否则用户正在浏览的列表会跳动。
   expect(reset).not.toHaveBeenCalled();
+
+  cleanup();
+});
+
+test("content update invalidates the detail and refreshes the list only for body text", async () => {
+  const { client, reset, invalidate } = makeClient();
+  const cleanup = subscribeAppEvents(client);
+  await flush();
+
+  emit("item_content_updated", { id: "abc", field: "summary" });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["detail", "abc"] });
+  expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["items"] });
+  expect(reset).not.toHaveBeenCalled();
+
+  invalidate.mockClear();
+  emit("item_content_updated", { id: "abc", field: "bodyText" });
+  // 正文会改变卡片预览：列表必须跟着刷新。
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["items"] });
 
   cleanup();
 });

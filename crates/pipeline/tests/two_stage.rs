@@ -797,3 +797,73 @@ fn crash_during_vlm_recovers_and_reruns_without_duplicates() {
     let tags = harness.library.tags_for_item(&item).unwrap();
     assert_eq!(tags.len(), 1, "自动标签不重复贴：{tags:?}");
 }
+
+#[test]
+fn vlm_does_not_overwrite_user_edited_summary() {
+    let harness = Harness::new(
+        FakeOcr::with_text("季度营收漏斗图"),
+        FakeVision::typical("模型写的描述", &["营收"]),
+    );
+    let item = harness.insert_image("hash-user-summary", "人工改过的摘要");
+    harness
+        .library
+        .set_summary(&item, "我自己写的描述")
+        .unwrap();
+
+    harness
+        .library
+        .enqueue_stage(&item, STAGE_OCR, PRIORITY_NEW)
+        .unwrap();
+    let handle = harness.spawn();
+    assert!(
+        wait_until(
+            || harness
+                .library
+                .insight_get(&item)
+                .unwrap()
+                .is_some_and(|insight| insight.primary_color.is_some()),
+            Duration::from_secs(5)
+        ),
+        "VLM 应完成并写入结构化属性"
+    );
+    handle.shutdown();
+
+    let insight = harness.library.insight_get(&item).unwrap().unwrap();
+    assert_eq!(insight.summary.as_deref(), Some("我自己写的描述"));
+    assert_eq!(insight.summary_source, SummarySource::None, "来源标记不被改写");
+    assert!(insight.summary_user_edited);
+    assert_eq!(
+        insight.primary_color.as_deref(),
+        Some("orange"),
+        "其他字段照常更新"
+    );
+}
+
+#[test]
+fn ocr_does_not_overwrite_user_edited_text_or_boxes() {
+    let harness = Harness::new(
+        FakeOcr::with_text("模型识别的文字"),
+        FakeVision::typical("描述", &[]),
+    );
+    let item = harness.insert_image("hash-user-ocr", "人工改过 OCR");
+    harness
+        .library
+        .set_ocr_text(&item, "我自己改的文字")
+        .unwrap();
+
+    harness
+        .library
+        .enqueue_stage(&item, STAGE_OCR, PRIORITY_NEW)
+        .unwrap();
+    let handle = harness.spawn();
+    assert!(wait_until(
+        || harness.library.get_item(&item).unwrap().unwrap().status == ItemStatus::Ready,
+        Duration::from_secs(5)
+    ));
+    handle.shutdown();
+
+    let insight = harness.library.insight_get(&item).unwrap().unwrap();
+    assert_eq!(insight.ocr_text.as_deref(), Some("我自己改的文字"));
+    assert!(insight.ocr_boxes.is_empty(), "文字框不被重新识别覆盖");
+    assert!(insight.ocr_user_edited);
+}

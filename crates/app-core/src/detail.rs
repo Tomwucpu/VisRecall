@@ -14,10 +14,14 @@ use std::io::Read;
 
 use visrecall_domain::tag::ItemTag;
 use visrecall_domain::{AppError, Item, ItemKind};
+use visrecall_library::insights::MAX_OCR_CHARS;
 use visrecall_library::Library;
 
 /// 原文返回的字符上限；超出部分截断并追加标记。
-pub const BODY_TEXT_LIMIT: usize = 20_000;
+///
+/// 与库层的正文编辑上限共用同一个常量：详情展示被截断时前端会禁用编辑，
+/// 两个口径一旦分叉就会出现「看到的内容能改、改完丢一半」。
+pub const BODY_TEXT_LIMIT: usize = visrecall_library::items::MAX_BODY_CHARS;
 
 /// 卡片预览的字符上限（列表用，只够铺满缩略区，不代表全文）。
 pub const PREVIEW_CHARS: usize = 160;
@@ -45,6 +49,14 @@ pub struct DetailExtras {
     pub ocr_boxes: Vec<visrecall_domain::OcrBox>,
     /// 文本素材的原文（前 [`BODY_TEXT_LIMIT`] 字符）。
     pub body_text: Option<String>,
+    /// 原文是否被截断；为真时前端禁止编辑（避免把截断内容写回文件）。
+    pub body_text_truncated: bool,
+    /// 正文是否可编辑：文本素材且不是外部引用（外部原件只读）。
+    pub body_text_editable: bool,
+    /// 图片素材的 OCR 文本（编辑入口用；超过上限时截断）。
+    pub ocr_text: Option<String>,
+    /// OCR 文本是否被截断；为真时前端禁止编辑。
+    pub ocr_text_truncated: bool,
     /// 图片素材的原图协议 URL；文本/链接为 `None`。
     pub original_url: Option<String>,
     /// 该素材的标签（含关联来源）。
@@ -65,10 +77,21 @@ pub fn load_detail(library: &Library, id: &str) -> Result<ItemDetail, AppError> 
     // 阶段 03：AI 解析结果（可能还没有行 → 全部按未解析展示）
     let insight = library.insight_get(&item.id)?;
 
-    let body_text = read_body_text(library, &item);
+    let (body_text, body_text_truncated) = read_body_text_with_flag(library, &item);
+    let external = library.external_asset_for_item(&item.id)?.is_some();
+    let body_text_editable = item.kind == ItemKind::Text && !external;
+    let ocr_raw = insight
+        .as_ref()
+        .and_then(|value| value.ocr_text.clone())
+        .filter(|text| !text.is_empty());
+    let ocr_text_truncated = ocr_raw
+        .as_deref()
+        .is_some_and(|text| text.chars().count() > MAX_OCR_CHARS);
+    let ocr_text = ocr_raw.map(|text| truncate_to(&text, MAX_OCR_CHARS));
+
     let original_url = match item.kind {
         ItemKind::Image => {
-            let suffix = if library.external_asset_for_item(&item.id)?.is_some() {
+            let suffix = if external {
                 format!("?revision={}", item.revision)
             } else {
                 String::new()
@@ -91,6 +114,10 @@ pub fn load_detail(library: &Library, id: &str) -> Result<ItemDetail, AppError> 
                 .map(|value| value.ocr_boxes.clone())
                 .unwrap_or_default(),
             body_text,
+            body_text_truncated,
+            body_text_editable,
+            ocr_text,
+            ocr_text_truncated,
             original_url,
             tags,
         },
@@ -101,13 +128,28 @@ pub fn load_detail(library: &Library, id: &str) -> Result<ItemDetail, AppError> 
 ///
 /// 非文本素材、文件不存在、内容不是合法 UTF-8 都返回 `None`。
 pub fn read_body_text(library: &Library, item: &Item) -> Option<String> {
+    read_body_text_with_flag(library, item).0
+}
+
+/// 读原文并返回「是否发生截断」：截断时前端禁用编辑，避免把半截文本写回文件。
+fn read_body_text_with_flag(library: &Library, item: &Item) -> (Option<String>, bool) {
     if item.kind != ItemKind::Text {
-        return None;
+        return (None, false);
     }
-    let text = visrecall_library::AssetReader::new(library)
-        .read_text(&item.id, u64::MAX)
-        .ok()?;
-    Some(truncate_body(&text))
+    let Ok(text) = visrecall_library::AssetReader::new(library).read_text(&item.id, u64::MAX)
+    else {
+        return (None, false);
+    };
+    let truncated = text.chars().count() > BODY_TEXT_LIMIT;
+    (Some(truncate_body(&text)), truncated)
+}
+
+/// 按字符截断到 `limit`（不切断多字节序列），不加标记。
+fn truncate_to(text: &str, limit: usize) -> String {
+    match text.char_indices().nth(limit) {
+        Some((byte_idx, _)) => text[..byte_idx].to_string(),
+        None => text.to_string(),
+    }
 }
 
 /// 按字符边界截断，超出时追加 [`TRUNCATED_MARKER`]。

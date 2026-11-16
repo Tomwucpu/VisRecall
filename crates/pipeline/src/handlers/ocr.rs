@@ -54,20 +54,24 @@ impl JobHandler for OcrHandler {
             .unwrap_or_else(|| Insight::empty(&item.id, now));
 
         let bytes = read_original_bytes(ctx.library, &item)?;
+        // 用户手工改过 OCR 文本：只更新引擎/时间，不覆盖文本与文字框（P2-R16）。
+        let user_edited = insight.ocr_user_edited;
         match ctx.deps.ocr.recognize_with_engine(&bytes) {
             Ok((output, engine)) => {
-                // 无文字时全部落 None/空：**不是 0**，否则会误触「OCR 置信度低」（0.6 阈值）
-                insight.ocr_text = output.text.filter(|text| !text.trim().is_empty());
-                insight.ocr_boxes = if insight.ocr_text.is_some() {
-                    output.boxes
-                } else {
-                    Vec::new()
-                };
-                insight.ocr_confidence = if insight.ocr_text.is_some() {
-                    output.confidence
-                } else {
-                    None
-                };
+                if !user_edited {
+                    // 无文字时全部落 None/空：**不是 0**，否则会误触「OCR 置信度低」（0.6 阈值）
+                    insight.ocr_text = output.text.filter(|text| !text.trim().is_empty());
+                    insight.ocr_boxes = if insight.ocr_text.is_some() {
+                        output.boxes
+                    } else {
+                        Vec::new()
+                    };
+                    insight.ocr_confidence = if insight.ocr_text.is_some() {
+                        output.confidence
+                    } else {
+                        None
+                    };
+                }
                 insight.ocr_engine = Some(engine.to_string());
             }
             Err(err) => {
@@ -77,9 +81,11 @@ impl JobHandler for OcrHandler {
                     %err,
                     "ocr engines failed; indexing without ocr text"
                 );
-                insight.ocr_text = None;
-                insight.ocr_boxes = Vec::new();
-                insight.ocr_confidence = None;
+                if !user_edited {
+                    insight.ocr_text = None;
+                    insight.ocr_boxes = Vec::new();
+                    insight.ocr_confidence = None;
+                }
                 insight.ocr_engine = None;
             }
         }

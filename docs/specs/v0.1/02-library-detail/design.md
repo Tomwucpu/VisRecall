@@ -715,3 +715,184 @@ pub trait ClipboardWriter: Send + Sync {
 
 - 阶段 02 退出前必须回填 `01-capture-loop/verification.md` 的 README §1 清单（详见 `verification.md` §1）。
 - 本阶段的技术债结转：gc 重试队列、迁移续传/热切换、保留预告、原图缩放参数、虚拟滚动 → 全部登记在本文件 §1.2 与 `verification.md` §4，不留在代码注释里。
+
+---
+
+## 12. 增量：可编辑 AI 描述与原文（2026-11-15）
+
+> 对应需求：`requirements.md` P2-R15、P2-R16。交互复用 §6.2 备注的形态：行内 textarea + 显式「保存 / 取消」，不做自动保存与乐观更新。
+
+### 12.1 设计决策
+
+| ID | 事项 | 结论 | 理由与代价 |
+|---|---|---|---|
+| D2-11 | 原文范围 | **正文 + OCR 文本都支持** | 两类内容都有真实纠错需求；但载体不同（库内文件 vs `insights` 列），因此拆成两条独立命令，不做统一的「原文」抽象 |
+| D2-12 | 摘要来源标记 | **不改 `summary_source`**，只置内部保护位 `summary_user_edited=1` | 已确认不做来源区分与旧值恢复；保护位仅用于阻止自动解析覆盖，不展示、不进 DTO |
+| D2-13 | 编辑后的索引时机 | **立即** `bump_revision` + 入队 `index`，与备注/标题同一条路径 | 否则刚改的字搜不到，用户会认为编辑没生效 |
+| D2-14 | 超长文本 | 正文与 OCR 均以 **20000 字符**为编辑上限；详情带 truncated 标记，超限只读 | 详情本来就在 20000 字符截断，允许编辑会把截断后的内容写回文件、丢掉后半段；不引入「编辑时另读全文」的第二套口径 |
+| D2-15 | OCR 文字框 | 编辑文本**不重建** `ocr_boxes` | 没有坐标来源；重算必须重跑 OCR，属于「重新解析」范畴，本期明确不做。界面固定提示框可能与新文本不一致 |
+| D2-16 | 正文写入位置 | **library 层**负责文件原子写与 revision；app-core 只做校验壳与事件 | 库根与 `original_path` 都在 library，避免 app-core 自己拼库内路径；与 `set_note` 的分层保持一致 |
+| D2-17 | 列表刷新 | 正文编辑**要**刷新列表；摘要/OCR 编辑**不**刷新 | 卡片预览来自正文；摘要与 OCR 不参与卡片渲染。与备注「刻意不刷新列表」是有意差异 |
+
+### 12.2 数据模型
+
+新增迁移 `crates/library/migrations/0009_editable_content.sql`（当前清单已用到 0008，故版本号为 9）：
+
+```sql
+-- 用户手工编辑 OCR 文本的保护位（不对外展示；仅阻止重新识别覆盖）。
+ALTER TABLE insights ADD COLUMN ocr_user_edited INTEGER NOT NULL DEFAULT 0;
+```
+
+- `summary_user_edited`（0003 第 17 行）已存在，本次启用；`ocr_user_edited` 为新增。
+- 两列都只作写入保护位：不进 `DetailExtrasDto`、不参与界面渲染、不做「已编辑」徽标。
+- 迁移只加列，不改旧行；升级后默认 0，既有行为不变。
+- 正文不新增列：仍然是 `items.original_path` 指向的库内 UTF-8 文件（`texts/`）。
+
+### 12.3 写入路径
+
+**(1) 摘要（P2-R15）**
+
+```text
+ipc item_summary_set(id, text)
+  → AppCore::set_summary(id, text)                // 校验后转发 + 发事件
+  → Library::set_summary(id, text)
+      ├─ chars().count() > MAX_SUMMARY_CHARS(2000) → InvalidInput
+      ├─ 列级写入：INSERT (item_id, summary, summary_user_edited, updated_at)
+      │   ON CONFLICT DO UPDATE SET summary / summary_user_edited=1 / updated_at
+      ├─ summary = trim 后为空 ? None : Some(text)   // summary_source 保持原值
+      └─ notify_metadata_changed(&[id])          // revision +1 + 入队 index
+```
+
+空文本语义：清空摘要写 `NULL`（面板回到「待解析」占位），`summary_source` 不变但界面因 `summary === null` 不显示来源徽标。
+
+**(2) 图片 OCR 文本（P2-R16）**
+
+```text
+ipc item_ocr_text_set(id, text)
+  → AppCore::set_ocr_text
+  → Library::set_ocr_text
+      ├─ item.kind == Image，否则 InvalidInput
+      ├─ 字符数 ≤ MAX_OCR_CHARS(20000)
+      ├─ 列级写入：只更新 ocr_text / ocr_user_edited=1 / updated_at
+      ├─ 保留 ocr_boxes_json / ocr_engine / ocr_confidence 原值
+      └─ notify_metadata_changed
+```
+
+**(3) 文本素材正文（P2-R16）**
+
+```text
+ipc item_body_text_set(id, text)
+  → AppCore::set_body_text
+  → Library::set_body_text
+      ├─ item.kind == Text，否则 InvalidInput
+      ├─ external_asset_for_item(id).is_some() → InvalidInput("外部引用素材的原文只读")
+      ├─ 字符数 ≤ MAX_BODY_CHARS(20000)
+      ├─ 读当前文件字符数；> 20000 → InvalidInput("原文过长，暂不支持应用内编辑")
+      ├─ files::write_atomic(root.join(&item.original_path), text.as_bytes())
+      ├─ UPDATE items SET updated_at = now WHERE id = ?
+      └─ notify_metadata_changed(&[id])
+```
+
+顺序硬约束：**先写文件、后更新 revision**。文件写失败直接返回 `IO`，不递增 revision、不发事件；`UPDATE` 影响 0 行返回 `NotFound`（文件已改但记录不在，属删除竞态，记 `warn` 并由后续删除流程清理文件）。
+
+**(4) 索引副作用**
+
+`notify_metadata_changed` 走库层元数据钩子（`Library::set_metadata_hook` 注册，与备注 / 标题共用同一条路径）→ `bump_revision_and_enqueue(id, STAGE_INDEX, PRIORITY_NEW)`（同一事务）。随后 `IndexHandler` 重新读取：
+
+| 编辑内容 | 重新写入索引的列 |
+|---|---|
+| `summary` | `items_fts.summary` + 向量 document 的摘要段 |
+| `ocr_text` | `items_fts.ocr_text` + 向量 document 的 OCR 段 |
+| 正文文件 | `items_fts.original_text`（前 10000 字符）+ 向量 document 的原文段 |
+
+pipeline 未启动（单元测试、CLI）时钩子为空操作：只写库、不重索引，与备注一致；下次索引/重建时收敛。
+
+### 12.4 写入保护（防止自动解析覆盖人工编辑）
+
+| 写入点 | 位置 | 改动 |
+|---|---|---|
+| VLM 结果落库 | `crates/pipeline/src/handlers/vlm.rs::apply_model_result` | `insight.summary_user_edited` 为真时跳过 `summary` / `summary_source`，其余字段照常更新 |
+| content_hash 复用 | 同文件 `copy_model_fields` | 同样跳过摘要两字段 |
+| 占位摘要 | `crates/pipeline/src/handlers/mod.rs::placeholder_summary` | **无需改动**：现有实现已检查 `summary_user_edited`（第 72 行） |
+| OCR 重新识别 | `crates/pipeline/src/handlers/ocr.rs` | `insight.ocr_user_edited` 为真时跳过 `ocr_text` 与 `ocr_boxes`，置信度/引擎照常更新 |
+| 重建索引 | `crates/pipeline/src/handlers/rebuild.rs` | 不重跑 VLM/OCR，只重算 FTS 与向量，天然不覆盖 |
+
+**并发窗口（已知技术债）**：handler 先 `insight_get` 读保护位，再调用模型（可能数秒），最后整行 `insight_upsert`。若用户在模型调用期间保存，handler 的整行写回会把人工文本连同保护位一起覆盖。用户侧已改为列级写入（只碰自己那一列），缩小了回滚面；handler 侧仍是既有的 read-modify-write 架构，未引入版本号。因此「重新解析不覆盖人工编辑」只保证「编辑先于解析开始」的情形，不覆盖模型调用期间的并发编辑——这一条必须在 `verification.md` §6.2 保留，不得写成绝对保证。
+
+### 12.5 IPC 契约
+
+新增命令（均返回 `null`）：
+
+| 命令 | 参数 | 错误码 |
+|---|---|---|
+| `item_summary_set` | `id: String`, `text: String` | `NOT_FOUND` / `INVALID_INPUT` / `IO` |
+| `item_ocr_text_set` | `id: String`, `text: String` | `NOT_FOUND` / `INVALID_INPUT`（非图片、超限）/ `IO` |
+| `item_body_text_set` | `id: String`, `text: String` | `NOT_FOUND` / `INVALID_INPUT`（非文本、外部引用、超限）/ `IO` |
+
+`get_item_ext` 的 `DetailExtrasDto` 增字段（`camelCase`）：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `ocrText` | `string \| null` | 图片素材当前 OCR 文本；无则 `null` |
+| `ocrTextTruncated` | `bool` | OCR 文本超过 20000，编辑禁用 |
+| `bodyTextTruncated` | `bool` | 正文超过 20000，编辑禁用 |
+| `bodyTextEditable` | `bool` | 文本素材且非外部引用（外部引用为 `false`） |
+
+事件：`item_content_updated { id, field }`，`field ∈ {"summary","ocrText","bodyText"}`。
+
+前端 `src/lib/events.ts`：
+- 三种 field 都失效 `queryKeys.detail(id)`；
+- `bodyText` 额外失效列表三处（`queryKeys.items`、`items-filtered`、`queryKeys.search`）——卡片预览来自正文，列表、筛选结果与检索结果都用 `preview` 渲染，漏一处就会看到旧预览（与 `item_renamed` 的先例一致）；
+- 不做全局 toast，保存状态显示在编辑区旁（与备注的 `saveState` 同构）。
+
+### 12.6 前端形态（DetailPanel）
+
+| 区块 | 展示 / 编辑 |
+|---|---|
+| AI 描述 | **与备注同构**：有摘要时 textarea 常驻（上限 2000，head 显示字数与保存态），聚焦或有改动时显示「取消 / 保存」；无摘要（待解析）时只显示占位与禁用的「复制」，不提供编辑 |
+| 识别到的文字 | **与备注同构**：有 OCR 文本时 textarea 常驻（上限 20000），交互同上；无文本时显示「未识别到文字」，不提供编辑；`ocrTextTruncated=true` 时只读 |
+| 原文（文本素材） | **与备注同构**：库内正文为常驻 textarea（上限 20000），聚焦或有改动时显示「取消 / 保存」；外部引用与超长截断时只读展示并给出原因 |
+
+状态与备注一致：独立草稿 + `saved` 快照 + `saveState: idle|saving|saved|error`；用 `activeId` ref 防止切换素材时旧请求写回；切换素材时重置草稿。失败**不回滚输入**，保留文本并提示可重试。
+
+交互细节：
+
+- **AI 描述 / 识别文字采用备注模板**：不再有「编辑」按钮，textarea 常驻；聚焦或有未保存改动时按钮可见，失焦且无改动时按钮隐藏（草稿保留，因为编辑区没有“退出”概念）。
+- **识别状态不提供编辑**：摘要在待解析、OCR 在未识别到文字时只显示占位文案，不渲染 textarea；因此共用一套模板不会出现空编辑器。
+- **三块内容统一采用备注模板**：AI 描述、识别文字与库内正文都是常驻 textarea，不再有「编辑」按钮；三者的按钮显隐、保存态、失败保留完全同构。外部引用正文与超长截断仍只读，不渲染 textarea。
+- **按钮分组**：复制等操作放在同一个右侧按钮组（`.d-sec-actions`，`margin-left: auto`），避免待解析状态没有来源徽标时被 `space-between` 拆到两端。
+- **一键复制**：AI 描述（原有）、原文、识别到的文字都提供复制；走 `navigator.clipboard.writeText`，失败提示「复制失败：剪贴板不可用」，无文本时按钮禁用。区块内的复制按钮用 `aria-label` 与底部「复制原文」区分。
+
+### 12.7 失败与降级
+
+| 场景 | 行为 |
+|---|---|
+| 库只读 / 磁盘满 | 返回 `IO`；前端保留文本与错误提示，可重复保存 |
+| 素材已被删除 | 返回 `NOT_FOUND`；toast + 关闭面板 + 刷新列表 |
+| 外部引用素材正文 | `bodyTextEditable=false`；后端兜底 `INVALID_INPUT` |
+| 超长（摘要 >2000 / 正文或 OCR >20000） | 前端阻止输入；后端兜底 `INVALID_INPUT`，保留旧值 |
+| OCR 文本清空 | 允许；`ocr_boxes` 保留，原图仍显示旧框，但字面/语义检索不再命中旧文本 |
+| OCR 置信度 | 重新识别只更新 `ocr_engine`，`ocr_confidence` 保留编辑前的值 | 置信度描述的是「上次识别的质量」，挂在人工文本上没有意义；与 requirements「置信度可更新」的措辞有偏差，登记在 `verification.md` §6.2 |
+| 正文文件缺失（`body_text = null`） | 仍允许编辑：写入时 `write_atomic` 会创建父目录与文件，用户可补录原文；保存后正常重索引 |
+| 正文文件不可读（非 UTF-8 / 无权限） | 与「文件缺失」共用 `body_text = null`，前端仍给编辑入口；保存会覆盖原文件（GBK 老文本可能被整体替换）。**已知遗留**，见 `verification.md` §6.2 |
+| 图片素材没有 `insights` 行 | 详情 `ocrText = null`；允许编辑并用 `Insight::empty` 建行，保存后触发索引 |
+| pipeline 未启动 | 只写库、不重索引；下次索引或重建索引时收敛（与备注一致） |
+| 文件写成功但 `UPDATE` 影响 0 行 | 返回 `NOT_FOUND` 并 `warn`；不重索引（记录已被删除，后续删除流程会清文件） |
+
+### 12.8 测试策略
+
+| 层 | 用例 |
+|---|---|
+| library（`tests/content_edit_db.rs`） | 摘要限长/空值/不存在；OCR 非图片拒绝、保留 boxes；正文原子写、外部引用拒绝、超长拒绝、写失败不改 revision；三者的钩子触发次数 |
+| pipeline（`tests/two_stage.rs` 或新增） | `summary_user_edited` 下 VLM 不覆盖摘要；`ocr_user_edited` 下 OCR 不覆盖文本；保护位为 0 时照常覆盖 |
+| app-core | 三个方法与 `item_content_updated` 事件的 field 取值 |
+| IPC | 三个命令的错误码映射；`DetailExtrasDto` 新字段序列化 |
+| 前端（`DetailPanel.test.tsx`） | 编辑态切换、显式保存才调用、取消恢复、超限阻止、失败保留、切换素材不串台、正文保存后失效列表 |
+| 绑定 | `refresh_committed_bindings` + `committed_bindings_are_up_to_date` |
+
+### 12.9 与既有行为的差异
+
+- 备注刻意不刷新列表（§6.2）；正文编辑**要**刷新列表，因为卡片预览来自正文（D2-17）。
+- 「AI 描述」区块从纯展示变为可编辑，但 `summary_source` 的语义不变：徽标仍表示「这段文字最初由谁生成」，不代表当前内容是否被人工改过。
+- 图片素材的详情新增 OCR 文本展示；此前只能通过「在图中查看 N 处文字」间接感知。
+

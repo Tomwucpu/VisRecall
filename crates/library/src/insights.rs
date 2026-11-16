@@ -9,14 +9,20 @@
 
 use rusqlite::{params, OptionalExtension, Row, Transaction};
 use visrecall_domain::insight::{OcrBox, SummarySource};
-use visrecall_domain::{AppError, Insight};
+use visrecall_domain::{now_millis, AppError, Insight, ItemKind};
 
 use crate::db::{db_error, Library};
+
+/// AI 描述长度上限（按字符计）：用户手工编辑时校验，超限拒绝而不是截断。
+pub const MAX_SUMMARY_CHARS: usize = 2_000;
+
+/// OCR 文本长度上限（按字符计）：与详情展示的 20000 字符口径一致。
+pub const MAX_OCR_CHARS: usize = 20_000;
 
 const COLUMNS: &str = "item_id, summary, summary_source, content_type, primary_color, chart_type, \
                        ui_type, entities_json, ocr_text, ocr_boxes_json, ocr_engine, ocr_confidence, \
                        latex, has_formula, model_provider, model_name, confidence, \
-                       summary_user_edited, tags_user_edited, updated_at";
+                       summary_user_edited, tags_user_edited, updated_at, ocr_user_edited";
 
 /// 整行 upsert（`item_id` 冲突时覆盖所有列）。
 pub fn insight_upsert_tx(tx: &Transaction<'_>, insight: &Insight) -> Result<(), AppError> {
@@ -29,8 +35,9 @@ pub fn insight_upsert_tx(tx: &Transaction<'_>, insight: &Insight) -> Result<(), 
         "INSERT INTO insights
            (item_id, summary, summary_source, content_type, primary_color, chart_type, ui_type,
             entities_json, ocr_text, ocr_boxes_json, ocr_engine, ocr_confidence, latex, has_formula,
-            model_provider, model_name, confidence, summary_user_edited, tags_user_edited, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+            model_provider, model_name, confidence, summary_user_edited, tags_user_edited, updated_at,
+            ocr_user_edited)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
          ON CONFLICT(item_id) DO UPDATE SET
            summary = excluded.summary,
            summary_source = excluded.summary_source,
@@ -50,7 +57,8 @@ pub fn insight_upsert_tx(tx: &Transaction<'_>, insight: &Insight) -> Result<(), 
            confidence = excluded.confidence,
            summary_user_edited = excluded.summary_user_edited,
            tags_user_edited = excluded.tags_user_edited,
-           updated_at = excluded.updated_at",
+           updated_at = excluded.updated_at,
+           ocr_user_edited = excluded.ocr_user_edited",
         params![
             insight.item_id,
             insight.summary,
@@ -72,6 +80,7 @@ pub fn insight_upsert_tx(tx: &Transaction<'_>, insight: &Insight) -> Result<(), 
             insight.summary_user_edited,
             insight.tags_user_edited,
             insight.updated_at,
+            insight.ocr_user_edited,
         ],
     )
     .map_err(db_error)?;
@@ -79,6 +88,74 @@ pub fn insight_upsert_tx(tx: &Transaction<'_>, insight: &Insight) -> Result<(), 
 }
 
 impl Library {
+    /// 保存用户编辑的 AI 描述。
+    ///
+    /// `summary_source` 保持原值（不改成 `user`），只置 `summary_user_edited` 阻止后续自动解析覆盖；
+    /// 空白文本写 `NULL`（面板回到「待解析」占位）。成功后触发元数据钩子重新索引。
+    pub fn set_summary(&self, id: &str, text: &str) -> Result<(), AppError> {
+        self.get_item(id)?.ok_or(AppError::NotFound)?;
+        if text.chars().count() > MAX_SUMMARY_CHARS {
+            return Err(AppError::InvalidInput(format!(
+                "summary longer than {MAX_SUMMARY_CHARS} chars"
+            )));
+        }
+
+        // 列级写入：只碰 summary / 保护位 / 时间，不回写整行，
+        // 避免把并发的解析结果（OCR、颜色、标签等列）覆盖成旧值。
+        let trimmed = text.trim();
+        let summary = (!trimmed.is_empty()).then(|| trimmed.to_string());
+        {
+            let conn = self.conn()?;
+            conn.execute(
+                "INSERT INTO insights (item_id, summary, summary_user_edited, updated_at)
+                 VALUES (?1, ?2, 1, ?3)
+                 ON CONFLICT(item_id) DO UPDATE SET
+                   summary = excluded.summary,
+                   summary_user_edited = 1,
+                   updated_at = excluded.updated_at",
+                params![id, summary, now_millis()],
+            )
+            .map_err(db_error)?;
+        }
+        self.notify_metadata_changed(&[id.to_string()]);
+        Ok(())
+    }
+
+    /// 保存用户编辑的 OCR 文本。
+    ///
+    /// 只改 `ocr_text` 与保护位 `ocr_user_edited`，保留 `ocr_boxes` 与识别元数据
+    /// （没有坐标来源，不重算文字框）。空文本视为清空。成功后触发元数据钩子重新索引。
+    pub fn set_ocr_text(&self, id: &str, text: &str) -> Result<(), AppError> {
+        let item = self.get_item(id)?.ok_or(AppError::NotFound)?;
+        if item.kind != ItemKind::Image {
+            return Err(AppError::InvalidInput(
+                "only image items have ocr text".to_string(),
+            ));
+        }
+        if text.chars().count() > MAX_OCR_CHARS {
+            return Err(AppError::InvalidInput(format!(
+                "ocr text longer than {MAX_OCR_CHARS} chars"
+            )));
+        }
+
+        // 列级写入：只碰 ocr_text / 保护位 / 时间，文字框与识别元数据原样保留。
+        {
+            let conn = self.conn()?;
+            conn.execute(
+                "INSERT INTO insights (item_id, ocr_text, ocr_user_edited, updated_at)
+                 VALUES (?1, ?2, 1, ?3)
+                 ON CONFLICT(item_id) DO UPDATE SET
+                   ocr_text = excluded.ocr_text,
+                   ocr_user_edited = 1,
+                   updated_at = excluded.updated_at",
+                params![id, text, now_millis()],
+            )
+            .map_err(db_error)?;
+        }
+        self.notify_metadata_changed(&[id.to_string()]);
+        Ok(())
+    }
+
     /// 写入（覆盖）一条解析结果。
     pub fn insight_upsert(&self, insight: &Insight) -> Result<(), AppError> {
         let mut conn = self.conn()?;
@@ -173,6 +250,7 @@ fn row_to_insight(row: &Row<'_>) -> rusqlite::Result<Insight> {
         summary_user_edited: row.get::<_, i64>(17)? != 0,
         tags_user_edited: row.get::<_, i64>(18)? != 0,
         updated_at: row.get(19)?,
+        ocr_user_edited: row.get::<_, i64>(20)? != 0,
     })
 }
 

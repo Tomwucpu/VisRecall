@@ -217,6 +217,15 @@ export const api = {
     await commands.noteSet(id, text);
   },
 
+  /** 保存用户编辑的 AI 描述；`summary_source` 保持不变。 */
+  setSummary: (id: string, text: string): Promise<null> => commands.itemSummarySet(id, text),
+
+  /** 保存图片素材的 OCR 文本（不重算文字框）。 */
+  setOcrText: (id: string, text: string): Promise<null> => commands.itemOcrTextSet(id, text),
+
+  /** 保存文本素材正文（写回库内文件；外部引用素材只读）。 */
+  setBodyText: (id: string, text: string): Promise<null> => commands.itemBodyTextSet(id, text),
+
   /** 标签云（含每个标签的素材数量）。 */
   listTags: (): Promise<TagChip[]> => commands.tagsList(),
 

@@ -1399,3 +1399,331 @@ grep -n "\[ \]" docs/specs/v0.1/01-capture-loop/verification.md
 ```
 
 **Commit:** `docs(spec): record phase 02 verification results`
+
+---
+
+### Task 22: 迁移 0009 与库层写入（摘要 / OCR / 正文）
+
+**Files:**
+- Create: `crates/library/migrations/0009_editable_content.sql`
+- Modify: `crates/library/src/migrations.rs`（`MIGRATIONS` 追加 `(9, include_str!(...))`）
+- Modify: `crates/domain/src/insight.rs`（`Insight` 增加 `ocr_user_edited: bool`，`empty` 置 `false`）
+- Modify: `crates/library/src/insights.rs`（`COLUMNS`、`insight_upsert_tx`、`row_to_insight` 同步新列）
+- Modify: `crates/library/src/items.rs`（长度常量 + `set_body_text`）
+- Create: `crates/library/tests/content_edit_db.rs`
+
+**Interfaces:**
+- Consumes: `insight_get` / `insight_upsert`、`items.original_path`、`files::write_atomic`、`notify_metadata_changed`
+- Produces:
+  - `MAX_SUMMARY_CHARS: usize = 2_000`
+  - `MAX_OCR_CHARS: usize = 20_000`
+  - `MAX_BODY_CHARS: usize = 20_000`
+  - `Library::set_summary(id, text)`
+  - `Library::set_ocr_text(id, text)`
+  - `Library::set_body_text(id, text)`
+
+- [x] **Step 1: 迁移 0009**
+
+```sql
+-- crates/library/migrations/0009_editable_content.sql
+-- 用户手工编辑 OCR 文本的保护位：不对外展示，只阻止重新识别覆盖。
+ALTER TABLE insights ADD COLUMN ocr_user_edited INTEGER NOT NULL DEFAULT 0;
+```
+
+`summary_user_edited` 复用 0003 已有列，不重复添加；迁移只加列，不改旧行。
+
+- [x] **Step 2: `Insight` 与 upsert 同步**
+
+`COLUMNS` 追加 `ocr_user_edited`；`insight_upsert_tx` 的 INSERT 列与 `DO UPDATE SET` 都要带上；`row_to_insight` 按新顺序取值（放在 `summary_user_edited` 之后、`tags_user_edited` 之前，或明确文档化顺序）。
+
+- [x] **Step 3: `Library::set_summary`**
+
+```rust
+pub fn set_summary(&self, id: &str, text: &str) -> Result<(), AppError> {
+    self.get_item(id)?.ok_or(AppError::NotFound)?;
+    if text.chars().count() > MAX_SUMMARY_CHARS {
+        return Err(AppError::InvalidInput(format!(
+            "summary longer than {MAX_SUMMARY_CHARS} chars"
+        )));
+    }
+    let mut insight = self
+        .insight_get(id)?
+        .unwrap_or_else(|| Insight::empty(id, now_millis()));
+    let trimmed = text.trim();
+    insight.summary = (!trimmed.is_empty()).then(|| trimmed.to_string());
+    insight.summary_user_edited = true;   // summary_source 保持原值
+    insight.updated_at = now_millis();
+    self.insight_upsert(&insight)?;
+    self.notify_metadata_changed(&[id.to_string()]);
+    Ok(())
+}
+```
+
+`insights` 行不存在时用 `Insight::empty` 建行（空摘要也允许先建行）；素材不存在优先返回 `AppError::NotFound`，不依赖外键报错。
+
+- [x] **Step 4: `Library::set_ocr_text`**
+
+校验 `item.kind == Image`、字符数 ≤ `MAX_OCR_CHARS`；只改 `ocr_text` 与 `ocr_user_edited`，**保留** `ocr_boxes` / `ocr_engine` / `ocr_confidence`；写库后 `notify_metadata_changed`。
+
+- [x] **Step 5: `Library::set_body_text`**
+
+```rust
+pub fn set_body_text(&self, id: &str, text: &str) -> Result<(), AppError> {
+    let item = self.get_item(id)?.ok_or(AppError::NotFound)?;
+    if item.kind != ItemKind::Text {
+        return Err(AppError::InvalidInput("only text items have body text".into()));
+    }
+    if self.external_asset_for_item(id)?.is_some() {
+        return Err(AppError::InvalidInput("external asset is read-only".into()));
+    }
+    if text.chars().count() > MAX_BODY_CHARS {
+        return Err(AppError::InvalidInput(format!(
+            "body text longer than {MAX_BODY_CHARS} chars"
+        )));
+    }
+    let current = AssetReader::new(self).read_text(id, u64::MAX).unwrap_or_default();
+    if current.chars().count() > MAX_BODY_CHARS {
+        return Err(AppError::InvalidInput("body text too long to edit".into()));
+    }
+    visrecall_library::files::write_atomic(&self.root().join(&item.original_path), text.as_bytes())?;
+    // 文件成功后再更新 revision / 入队
+    {
+        let conn = self.conn()?;
+        let updated = conn.execute(
+            "UPDATE items SET updated_at = ?2 WHERE id = ?1",
+            rusqlite::params![id, now_millis()],
+        ).map_err(db_error)?;
+        if updated == 0 {
+            tracing::warn!(item = %id, "body text written but item row is gone");
+            return Err(AppError::NotFound);
+        }
+    }
+    self.notify_metadata_changed(&[id.to_string()]);
+    Ok(())
+}
+```
+
+- [x] **Step 6: 测试（`tests/content_edit_db.rs`）**
+
+- 摘要：2000/2001 字符边界；空串 → `summary IS NULL`；`summary_source` 不变；`summary_user_edited=1`。
+- OCR：非图片素材拒绝；20000/20001 边界；`ocr_boxes` 与 `ocr_engine` 未被改写；`ocr_user_edited=1`。
+- 正文：写入后文件内容为新值；外部引用拒绝；超长拒绝（先构造 20001 字符文件）；`texts/` 只读时返回 `IO` 且 `revision` 未变。
+- 三者成功时各触发一次元数据钩子（用 `Library::set_metadata_hook` 计数）。
+
+**Verify:**
+
+```bash
+cargo test -p visrecall-library --test content_edit_db
+cargo test -p visrecall-library
+```
+
+**Commit:** `feat(library): add summary, ocr and body text writers`
+
+---
+
+### Task 23: 自动解析的写入保护
+
+**Files:**
+- Modify: `crates/pipeline/src/handlers/vlm.rs`（`apply_model_result` / `copy_model_fields`）
+- Modify: `crates/pipeline/src/handlers/ocr.rs`
+- Modify: `crates/pipeline/tests/two_stage.rs`（或新增 `tests/user_edited_content.rs`）
+
+**Interfaces:**
+- Consumes: `Insight::summary_user_edited` / `Insight::ocr_user_edited`
+- Produces: 自动解析不覆盖人工编辑内容
+
+- [x] **Step 1: VLM 摘要保护**
+
+```rust
+fn apply_model_result(insight: &mut Insight, result: &VisionInsight, provider: &str, now: i64) {
+    if !insight.summary_user_edited {
+        insight.summary = Some(result.summary.trim().to_string());
+        insight.summary_source = SummarySource::Vlm;
+    }
+    // 其余内容类型 / 颜色 / 图表 / 实体 / 公式照常更新
+    ...
+}
+```
+
+`copy_model_fields`（content_hash 复用）同样跳过 `summary` / `summary_source`。
+
+- [x] **Step 2: OCR 文本保护**
+
+OCR handler 写回前：
+
+```rust
+if !insight.ocr_user_edited {
+    insight.ocr_text = Some(text);
+    insight.ocr_boxes = boxes;
+}
+insight.ocr_engine = Some(engine);
+insight.ocr_confidence = Some(confidence);
+```
+
+占位摘要无需改动：`placeholder_summary` 已检查 `summary_user_edited`。
+
+- [x] **Step 3: 测试**
+
+- 预置 `summary_user_edited=1`，跑 VLM handler（假 Provider）→ 摘要不变、颜色/类型仍更新。
+- 预置 `ocr_user_edited=1`，跑 OCR handler（假 OCR）→ `ocr_text` 与 `ocr_boxes` 不变、置信度更新。
+- 保护位为 0 时两条路径照常覆盖。
+- 编辑后重新索引：FTS `summary` / `ocr_text` 列命中新文本（复用 `two_stage.rs` 现有断言方式）。
+
+**Verify:**
+
+```bash
+cargo test -p visrecall-pipeline
+```
+
+**Commit:** `fix(pipeline): keep user-edited summary and ocr text`
+
+---
+
+### Task 24: IPC、事件与前端 API 包装
+
+**Files:**
+- Modify: `crates/app-core/src/app.rs`（`set_summary` / `set_ocr_text` / `set_body_text`）
+- Modify: `crates/app-core/src/events.rs`（`ItemContentUpdated { id, field }` + 事件名 + payload）
+- Modify: `crates/app-core/src/detail.rs`（`DetailExtras` 增 `ocr_text` / `*_truncated` / `body_text_editable`）
+- Modify: `src-tauri/src/ipc.rs`（3 条命令 + DTO 字段 + 注册）
+- Modify: `src/lib/api.ts`、`src/lib/events.ts`、`src/lib/searchTypes.ts`（如需类型别名）
+- Regenerate: `src/lib/bindings.ts`
+
+**Interfaces:**
+- Consumes: Task 22 的三条库方法
+- Produces:
+  - IPC `item_summary_set` / `item_ocr_text_set` / `item_body_text_set`
+  - `DetailExtrasDto { ocr_text, ocr_text_truncated, body_text_truncated, body_text_editable }`
+  - 事件 `item_content_updated { id, field }`
+  - `api.setSummary` / `api.setOcrText` / `api.setBodyText`
+
+- [x] **Step 1: app-core 编排**
+
+三个方法只做「库方法 + 事件」，不发全局 toast：
+
+```rust
+pub fn set_summary(&self, id: &str, text: &str) -> Result<(), AppError> {
+    self.library_required()?.set_summary(id, text)?;
+    self.sink.emit(AppEvent::ItemContentUpdated(ContentEvent { id: id.into(), field: "summary".into() }));
+    Ok(())
+}
+```
+
+- [x] **Step 2: 详情聚合扩展**
+
+`read_body_text` 改为返回 `(Option<String>, bool /*truncated*/)` 或在 `DetailExtras` 里同时给 `body_text` 与 `body_text_truncated`；OCR 文本按 `MAX_OCR_CHARS` 截断并给 `ocr_text_truncated`；`body_text_editable = kind == Text && external_asset_for_item(id)?.is_none()`。
+
+- [x] **Step 3: IPC 命令与 DTO**
+
+三条命令均为 `run_blocking` + `ApiError::from(&err)`；`DetailExtrasDto` 新字段按 camelCase 序列化；`specta_builder()` 的命令列表注册三条新命令。
+
+- [x] **Step 4: 前端包装与事件**
+
+```ts
+setSummary: (id: string, text: string): Promise<null> => commands.itemSummarySet(id, text),
+setOcrText: (id: string, text: string): Promise<null> => commands.itemOcrTextSet(id, text),
+setBodyText: (id: string, text: string): Promise<null> => commands.itemBodyTextSet(id, text),
+```
+
+`events.ts`：`item_content_updated` → `invalidateQueries(detail(id))`；`field === "bodyText"` 时额外 `invalidateQueries(items)`。
+
+- [x] **Step 5: 绑定与测试**
+
+```bash
+cargo test -p visrecall --bin visrecall -- --ignored refresh_committed_bindings
+cargo test -p visrecall --bin visrecall committed_bindings_are_up_to_date
+```
+
+**Verify:**
+
+```bash
+cargo test -p visrecall-app-core
+cargo test -p visrecall --bin visrecall
+pnpm typecheck
+```
+
+**Commit:** `feat(ipc): expose editable content commands and event`
+
+---
+
+### Task 25: 详情面板编辑 UI
+
+**Files:**
+- Modify: `src/features/detail/DetailPanel.tsx`
+- Modify: `src/features/detail/DetailPanel.test.tsx`
+- Modify: `src/styles/detail.css`
+
+**Interfaces:**
+- Consumes: `api.setSummary` / `api.setOcrText` / `api.setBodyText`、`DetailExtras` 新字段、`item_content_updated`
+- Produces: 三块内容的查看 / 编辑 / 取消 / 保存
+
+- [x] **Step 1: 状态与串台防护**
+
+仿照备注：`summaryDraft` / `ocrDraft` / `bodyDraft` + 对应 `saved` 快照 + `saveState`；用 `activeId` ref 保证切素材后旧请求不写回；素材切换时重置草稿。
+
+- [x] **Step 2: AI 描述区块**
+
+只读态：摘要 + 来源徽标 + 「复制」+「编辑」。编辑态：textarea（`aria-label="编辑 AI 描述"`，上限 2000，右下角字数）+「取消 / 保存」；保存中禁用按钮；失败保留文本并显示「保存失败 · 文本未丢失」。
+
+- [x] **Step 3: 原文区块**
+
+- 文本素材：`bodyText`；`bodyTextEditable=false` 时显示「引用素材，原文只读」且无「编辑」；`bodyTextTruncated=true` 时显示「原文超过 20000 字符，暂不支持在应用内编辑」。
+- 图片素材：展示 `ocrText`（`null` → 「未识别到文字」）；编辑态下方固定提示「手工修改后，原图文字框仍按上次识别结果标注」；`ocrTextTruncated=true` 时只读。
+
+- [x] **Step 4: 测试**
+
+- 点击「编辑」出现 textarea；只在点击「保存」时调用对应命令（不做自动保存）。
+- 取消恢复为已保存值且不调用命令。
+- 输入超过上限被阻止，不发请求。
+- 保存失败保留文本并显示失败态。
+- 切换素材后草稿重置，不串台。
+- 正文保存成功后触发列表失效（可在 events 测试中断言 `reset`/`invalidate`）。
+
+**Verify:**
+
+```bash
+pnpm test -- src/features/detail
+pnpm typecheck
+pnpm lint
+```
+
+**Commit:** `feat(ui): edit ai summary and original text in detail panel`
+
+---
+
+### Task 26: 增量验收与文档回填
+
+**Files:**
+- Modify: `docs/specs/v0.1/02-library-detail/verification.md`（§6 填结论）
+- Modify: `docs/specs/v0.1/02-library-detail/requirements.md`（如实现与需求有偏差）
+- Modify: `docs/specs/v0.1/README.md`（阶段 02 状态补一句增量）
+
+**Interfaces:**
+- Consumes: Task 22–25 全部产物
+- Produces: 可审计的增量验收记录
+
+- [x] **Step 1: 自动化门禁**
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+pnpm lint && pnpm typecheck && pnpm test && pnpm build
+```
+
+- [ ] **Step 2: 手工验证**（本轮无 GUI：三项交互验收在 `verification.md` §6.1 标「环境限制未验证」并附替代证据；有 GUI 时补做后再勾选）
+
+按 `verification.md` §6 执行：改摘要后搜索新词、改正文后看卡片预览与搜索、改 OCR 后看文字框与新词检索；三种失败路径（`texts/` 只读、外部引用素材、超长素材）各一次。
+
+- [x] **Step 3: 回填**
+
+在 `verification.md` §6 逐行填结论与证据（测试用例名 / 命令输出）；无法执行 GUI 的项标注「环境限制未验证」并给替代证据；需求或设计有偏差先改 spec 再改代码。
+
+**Verify:**
+
+```bash
+git diff --stat docs/
+grep -n "\[ \]" docs/specs/v0.1/02-library-detail/tasks.md | tail -20
+```
+
+**Commit:** `docs(spec): record editable content verification`
