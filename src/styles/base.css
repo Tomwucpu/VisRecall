@@ -263,7 +263,15 @@ svg {
   justify-content: center;
 }
 
+/* 反色按钮的悬停必须自己重申底色：`.btn:hover:not(:disabled)` 的特异性（0,3,0）
+ * 高于 `.btn.primary`（0,2,0），只写 opacity 会让底色退回 --hover，
+ * 而文字仍是 --inv-ink —— 深色主题下白底变黑、浅色主题下黑底变白，文字都不可读。
+ * 原型里 `.btn:hover` 与 `.btn.primary` 同级靠源顺序取胜，这里补上 :not(:disabled)
+ * 后必须显式覆盖。 */
 .btn.primary:hover:not(:disabled) {
+  background: var(--inv-bg);
+  border-color: var(--inv-bg);
+  color: var(--inv-ink);
   opacity: 0.9;
 }
 
