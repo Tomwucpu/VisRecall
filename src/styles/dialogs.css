@@ -299,9 +299,15 @@
   background: var(--seal);
 }
 
-/* 重命名弹窗：与确认弹窗同宽同层级，输入框独占一行。 */
+/*
+ * 重命名弹窗：与确认弹窗同宽同层级，输入框独占一行。
+ * 垂直节奏固定为 标题→16px→字段标签→7px→输入框→7px→提示行→18px→按钮，
+ * 各段间距只有两种量级，避免忽大忽小。
+ * 注意：提示行不能复用全局 `.hint`——那是空状态样式，自带 26px 上下内边距，
+ * 会把这一行撑到 50px 以上，并让上下留白失衡。
+ */
 .rename-panel {
-  width: min(400px, 88vw);
+  width: min(420px, 88vw);
   padding: 20px 22px 18px;
   border: 1px solid var(--line-2);
   border-radius: 13px;
@@ -311,54 +317,89 @@
 }
 
 .rename-panel h2 {
-  margin: 0 0 14px;
+  margin: 0 0 16px;
   font-size: 13.5px;
   font-weight: 600;
+  letter-spacing: 0.01em;
 }
 
 .rename-field {
-  display: block;
-}
-
-.rename-field .label {
-  display: block;
-  margin-bottom: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
 }
 
 .rename-field input {
   width: 100%;
-  height: 32px;
-  padding: 0 10px;
+  height: 34px;
+  padding: 0 11px;
   border: 1px solid var(--line-2);
   border-radius: 7px;
   background: var(--surface);
   color: var(--ink);
   font: inherit;
   font-size: 13px;
+  transition:
+    border-color 0.16s var(--ease),
+    box-shadow 0.16s var(--ease);
 }
 
+.rename-field input::placeholder {
+  color: var(--ink-3);
+}
+
+.rename-field input:hover:not(:focus) {
+  border-color: var(--ink-3);
+}
+
+/* 打开即聚焦，焦点环用低透明度光晕而不是粗描边，塞满输入框也不会显脏。 */
 .rename-field input:focus {
-  outline: 2px solid var(--hue-ochre);
-  outline-offset: 1px;
+  outline: 0;
+  border-color: var(--hue-ochre);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--hue-ochre) 20%, transparent);
 }
 
 .rename-meta {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-top: 8px;
+  margin-top: 7px;
+  /* 固定行高：提示文案在「Enter 保存 / 将显示来源标题」间切换时面板不跳动。 */
+  min-height: 16px;
 }
 
-.rename-meta .hint {
-  font-size: 11px;
+.rename-hint {
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+  letter-spacing: 0.03em;
   color: var(--ink-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.rename-meta .mono {
+.rename-count {
+  flex: none;
   font-family: var(--mono);
   font-size: 10px;
+  line-height: 1.5;
   color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.rename-panel .confirm-actions {
+  margin-top: 18px;
+}
+
+/* `.btn.primary` 默认 flex:1，会把「保存」拉满整行、把「取消」挤成小按钮；
+ * 这里统一成等宽右对齐，两个按钮形成一条整齐的基线。 */
+.rename-panel .confirm-actions .btn {
+  flex: 0 0 auto;
+  justify-content: center;
+  min-width: 76px;
+  height: 31px;
 }
 
 /* 危险区：默认折叠，展开后才显示不可恢复操作（P2-R06）。 */

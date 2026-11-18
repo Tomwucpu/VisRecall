@@ -54,6 +54,7 @@ export function RenameItemDialog({ item, onClose, onSaved }: Props) {
         role="dialog"
         aria-modal="true"
         aria-labelledby="rename-title"
+        aria-describedby="rename-hint"
         tabIndex={-1}
         onMouseDown={(event) => event.stopPropagation()}
         onKeyDown={(event) => {
@@ -81,8 +82,10 @@ export function RenameItemDialog({ item, onClose, onSaved }: Props) {
           />
         </label>
         <div className="rename-meta">
-          <span className="hint">{willFallback ? "将显示来源标题" : "Enter 保存 · Esc 取消"}</span>
-          <span className="mono">
+          <span className="rename-hint" id="rename-hint">
+            {willFallback ? "将显示来源标题" : "Enter 保存 · Esc 取消"}
+          </span>
+          <span className="rename-count">
             {draft.length}/{TITLE_LIMIT}
           </span>
         </div>
