@@ -188,6 +188,7 @@ pub struct FakeVision {
     pub calls: AtomicUsize,
     insight: Mutex<VisionInsight>,
     fail: Mutex<Option<FakeFail>>,
+    ready: AtomicBool,
 }
 
 impl FakeVision {
@@ -196,6 +197,7 @@ impl FakeVision {
             calls: AtomicUsize::new(0),
             insight: Mutex::new(insight),
             fail: Mutex::new(None),
+            ready: AtomicBool::new(true),
         }
     }
 
@@ -221,6 +223,13 @@ impl FakeVision {
         fake
     }
 
+    /// 模拟「没有可用视觉模型」（未配置 / 无 Key）的降级场景。
+    pub fn not_ready() -> Self {
+        let fake = Self::typical("", &[]);
+        fake.ready.store(false, Ordering::SeqCst);
+        fake
+    }
+
     pub fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
     }
@@ -230,6 +239,10 @@ impl FakeVision {
 impl VisionProvider for FakeVision {
     fn id(&self) -> &str {
         "vlm-primary"
+    }
+
+    fn ready(&self) -> bool {
+        self.ready.load(Ordering::SeqCst)
     }
 
     async fn analyze(&self, _png: &[u8]) -> Result<VisionInsight, AppError> {

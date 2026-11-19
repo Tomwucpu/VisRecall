@@ -58,6 +58,7 @@
 - OpenAI 兼容 chat/completions 接口（可配 base URL 与模型名）作为 `VisionProvider`（图片）与 `TextProvider`（文本摘要）；主备两组配置。
 - 图片素材：摘要、标签（≤8 个，去停用词）、`content_type`/`primary_color`/`chart_type`/`ui_type` 结构化属性、实体列表、公式（`latex` + `has_formula`）、置信度。
 - 文本素材：摘要 + 标签。
+- 云端增强受「设置 → 模型」中的「图片上传云端解析」「文本上传云端解析」开关控制，默认关闭；关闭时只做本地 OCR、FTS 与向量索引，不发起云端请求。
 - 返回 JSON 严格 schema 校验：解析失败时把错误信息回传模型**修复一次**，仍失败按本次调用失败处理（走重试/主备），不落脏数据。
 - VLM 失败/离线：OCR 摘录占位（`summary_source='ocr'`，取 `ocr_text` 前 280 字符），素材 `status='pending'` 可重试；**不在启动或恢复时自动重试**，由用户在详情面板点「重新解析」手动触发（2026-11-09 变更）。
 - VLM 成功：`summary_source='vlm'`，`status='ready'`；自动标签以 `origin='auto'` 关联，写入前过滤 `tag_suppressions`（用户删过的自动标签不回贴），同名标签复用既有行。

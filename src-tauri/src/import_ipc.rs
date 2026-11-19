@@ -193,7 +193,6 @@ pub struct ImportSourceDto {
     pub include_subdirectories: bool,
     pub include_images: bool,
     pub include_text: bool,
-    pub ai_allowed: bool,
     pub status: String,
     pub last_scanned_at: Option<i64>,
     pub item_count: u64,
@@ -207,7 +206,6 @@ impl From<ImportSource> for ImportSourceDto {
             include_subdirectories: source.include_subdirectories,
             include_images: source.include_images,
             include_text: source.include_text,
-            ai_allowed: source.ai_allowed,
             status: source.status.as_str().into(),
             last_scanned_at: source.last_scanned_at,
             item_count: source.item_count,
@@ -221,7 +219,6 @@ pub struct DirectoryScanOptionsDto {
     pub include_subdirectories: bool,
     pub include_images: bool,
     pub include_text: bool,
-    pub ai_allowed: bool,
 }
 
 impl From<DirectoryScanOptionsDto> for DirectoryScanOptions {
@@ -230,7 +227,6 @@ impl From<DirectoryScanOptionsDto> for DirectoryScanOptions {
             include_subdirectories: options.include_subdirectories,
             include_images: options.include_images,
             include_text: options.include_text,
-            ai_allowed: options.ai_allowed,
         }
     }
 }

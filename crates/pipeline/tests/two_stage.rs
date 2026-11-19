@@ -228,6 +228,7 @@ fn ocr_then_index_then_vlm_emits_in_order_and_makes_item_searchable() {
         FakeOcr::with_text("季度营收漏斗图 转化率提升"),
         FakeVision::typical("一张季度营收漏斗图", &["营收", "漏斗图"]),
     );
+    harness.library.set_cloud_image_ai(true).unwrap();
     let item = harness.insert_image("hash-1", "Chrome 中的看板");
     // 只入队 ocr：index 与 vlm 由 ocr handler 接力入队（顺序保证）
     harness
@@ -295,6 +296,7 @@ fn image_without_text_keeps_summary_null_and_is_still_indexed() {
         FakeOcr::empty(),
         FakeVision::typical("纯色背景的空白页", &["空白"]),
     );
+    harness.library.set_cloud_image_ai(true).unwrap();
     let item = harness.insert_image("hash-blank", "空白窗口");
     // 只入队 ocr：index 与 vlm 由 ocr handler 接力入队（顺序保证）
     harness
@@ -360,6 +362,7 @@ fn vlm_retryable_failure_marks_pending_after_three_attempts() {
         FakeOcr::with_text("发票号码 00329181"),
         FakeVision::failing(FakeFail::Provider("503".into())),
     );
+    harness.library.set_cloud_image_ai(true).unwrap();
     let item = harness.insert_image("hash-retry", "发票页面");
     // 只入队 ocr：index 与 vlm 由 ocr handler 接力入队（顺序保证）
     harness
@@ -397,6 +400,7 @@ fn vlm_config_error_marks_pending_without_retry() {
         FakeOcr::with_text("报错原文"),
         FakeVision::failing(FakeFail::Config("HTTP 401".into())),
     );
+    harness.library.set_cloud_image_ai(true).unwrap();
     let item = harness.insert_image("hash-401", "登录页");
     harness
         .library
@@ -426,6 +430,7 @@ fn suppressed_auto_tag_is_not_reattached() {
         FakeOcr::with_text("发票"),
         FakeVision::typical("一张发票截图", &["发票", "财务"]),
     );
+    harness.library.set_cloud_image_ai(true).unwrap();
     let item = harness.insert_image("hash-tags", "发票明细");
     // 用户之前删过自动标签「发票」：先自动贴上再手动移除 → 写抑制记录
     let suppressed = harness
@@ -465,6 +470,7 @@ fn identical_content_hash_calls_vlm_once() {
         FakeOcr::with_text("同一画面"),
         FakeVision::typical("同一张截图的摘要", &["截图"]),
     );
+    harness.library.set_cloud_image_ai(true).unwrap();
     let first = harness.insert_image("same-hash", "第一次捕获");
     let second = harness.insert_image("same-hash", "第二次捕获");
     for item in [&first, &second] {
@@ -653,6 +659,69 @@ fn text_vlm_is_skipped_when_text_provider_is_not_ready() {
     assert!(harness.events.pending.lock().unwrap().is_empty());
 }
 
+/// 图片开关默认关闭：即使队列里有图片的 `vlm` 任务（旧队列 / 重新解析），也不得上云。
+#[test]
+fn image_vlm_is_skipped_when_cloud_image_ai_is_disabled() {
+    let harness = Harness::new(FakeOcr::empty(), FakeVision::typical("摘要", &[]));
+    let item = harness.insert_image("hash-img-off", "本地图片");
+    assert!(!harness.library.cloud_image_ai_enabled(), "默认必须关闭");
+    harness
+        .library
+        .enqueue_stage(&item, STAGE_VLM, PRIORITY_NEW)
+        .unwrap();
+
+    let handle = harness.spawn();
+    assert!(
+        wait_until(
+            || job_state(&harness, &item, STAGE_VLM) == Some(JobState::Succeeded),
+            Duration::from_secs(5)
+        ),
+        "关闭时 vlm 任务应被跳过而不是失败"
+    );
+    handle.shutdown();
+
+    assert_eq!(
+        harness.vision.calls.load(Ordering::SeqCst),
+        0,
+        "关闭时不得调用云端视觉模型"
+    );
+    assert_eq!(
+        harness.library.get_item(&item).unwrap().unwrap().status,
+        ItemStatus::Ready,
+        "跳过不等于失败：素材保持 ready"
+    );
+    assert!(harness.events.pending.lock().unwrap().is_empty());
+}
+
+/// 图片开关开启但模型不可用：跳过并保持 ready，不制造「待重试」。
+#[test]
+fn image_vlm_is_skipped_when_vision_provider_is_not_ready() {
+    let harness = Harness::new(FakeOcr::empty(), FakeVision::not_ready());
+    harness.library.set_cloud_image_ai(true).unwrap();
+    let item = harness.insert_image("hash-img-nomodel", "没有模型");
+    harness
+        .library
+        .enqueue_stage(&item, STAGE_VLM, PRIORITY_NEW)
+        .unwrap();
+
+    let handle = harness.spawn();
+    assert!(
+        wait_until(
+            || job_state(&harness, &item, STAGE_VLM) == Some(JobState::Succeeded),
+            Duration::from_secs(5)
+        ),
+        "没有可用视觉模型时应跳过而不是失败重试"
+    );
+    handle.shutdown();
+
+    assert_eq!(harness.vision.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        harness.library.get_item(&item).unwrap().unwrap().status,
+        ItemStatus::Ready
+    );
+    assert!(harness.events.pending.lock().unwrap().is_empty());
+}
+
 #[test]
 fn startup_checks_repair_missing_fts_rows() {
     let harness = Harness::new(FakeOcr::with_text("原文"), FakeVision::typical("摘要", &[]));
@@ -766,6 +835,7 @@ fn crash_during_vlm_recovers_and_reruns_without_duplicates() {
         FakeOcr::with_text("报错原文"),
         FakeVision::typical("一张报错截图", &["报错"]),
     );
+    harness.library.set_cloud_image_ai(true).unwrap();
     let item = harness.insert_image("hash-crash", "崩溃恢复");
     harness
         .library
@@ -804,6 +874,7 @@ fn vlm_does_not_overwrite_user_edited_summary() {
         FakeOcr::with_text("季度营收漏斗图"),
         FakeVision::typical("模型写的描述", &["营收"]),
     );
+    harness.library.set_cloud_image_ai(true).unwrap();
     let item = harness.insert_image("hash-user-summary", "人工改过的摘要");
     harness
         .library

@@ -204,7 +204,6 @@ fn body_write_rejects_external_reference_items() {
             include_subdirectories: true,
             include_images: true,
             include_text: true,
-            ai_allowed: false,
         })
         .unwrap();
     let item = lib

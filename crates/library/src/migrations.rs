@@ -27,6 +27,10 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
     (7, include_str!("../migrations/0007_item_title.sql")),
     (8, include_str!("../migrations/0008_snippet_html.sql")),
     (9, include_str!("../migrations/0009_editable_content.sql")),
+    (
+        10,
+        include_str!("../migrations/0010_unified_cloud_parse_policy.sql"),
+    ),
 ];
 
 const MIGRATIONS_TABLE: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (\n  version INTEGER PRIMARY KEY,\n  applied_at INTEGER NOT NULL\n)";
@@ -329,6 +333,41 @@ mod tests {
             })
             .unwrap();
         assert_eq!(exclusions, 0);
+    }
+
+    /// 0010：旧的来源级 `ai_allowed=false` 归一为 1，不再具有任何效果。
+    #[test]
+    fn migration_0010_normalizes_legacy_ai_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = open_file_db(dir.path());
+        conn.execute_batch(MIGRATIONS_TABLE).unwrap();
+        for (version, sql) in MIGRATIONS.iter().take(9) {
+            conn.execute_batch(sql).unwrap();
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![version, now_millis()],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO import_sources
+               (id, root_path, path_key, include_subdirectories, include_images,
+                include_text, ai_allowed, status, created_at, updated_at)
+             VALUES ('s1', '/tmp/pics', '/tmp/pics', 1, 1, 1, 0, 'available', 0, 0)",
+            [],
+        )
+        .unwrap();
+
+        apply(&mut conn, dir.path()).unwrap();
+
+        let ai_allowed: i64 = conn
+            .query_row(
+                "SELECT ai_allowed FROM import_sources WHERE id = 's1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(ai_allowed, 1);
     }
 
     #[test]

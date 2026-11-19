@@ -286,6 +286,7 @@ fn rebuild_fts_row_restores_a_deleted_row() {
 #[test]
 fn image_pipeline_from_ocr_only_reaches_ready() {
     let harness = Harness::new();
+    harness.library.set_cloud_image_ai(true).unwrap();
     let item = harness.insert_image("h0", "接力链路");
     // capture 只入队 ocr，其余由 handler 接力（index → vlm → index）
     harness

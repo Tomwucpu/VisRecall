@@ -107,8 +107,8 @@ pub(crate) fn run_for(ctx: &JobCtx<'_>) -> Result<(), AppError> {
 
     // 此刻起三路可检索；`status` 仍是 parsing（阶段二才置 ready）
     ctx.events.item_indexed(&item.id);
-    // 未授权云端 AI 的目录引用在本地索引完成后即可使用，不能一直停留在 parsing。
-    if !ctx.library.cloud_ai_allowed(&item.id)? {
+    // 不会进入云端阶段（开关关闭 / 链接 / 来源离线）时，本地索引完成即可使用。
+    if !ctx.library.cloud_parse_allowed(&item)? {
         ctx.library
             .update_status(&item.id, ItemStatus::Ready, None)?;
     }

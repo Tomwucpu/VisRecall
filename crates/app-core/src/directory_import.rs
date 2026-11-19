@@ -40,8 +40,6 @@ pub struct DirectoryScanOptions {
     pub include_subdirectories: bool,
     pub include_images: bool,
     pub include_text: bool,
-    /// 是否允许该来源把内容交给当前配置的云端模型。
-    pub ai_allowed: bool,
 }
 
 impl Default for DirectoryScanOptions {
@@ -50,7 +48,6 @@ impl Default for DirectoryScanOptions {
             include_subdirectories: true,
             include_images: true,
             include_text: true,
-            ai_allowed: false,
         }
     }
 }
@@ -159,7 +156,6 @@ impl DirectoryImportService {
             include_subdirectories: options.include_subdirectories,
             include_images: options.include_images,
             include_text: options.include_text,
-            ai_allowed: options.ai_allowed,
         })?;
         // 重新扫描同一目录时，上一次没确认的扫描结果立即作废，不再留在库里。
         self.library.delete_directory_scan_tasks(&source.id)?;
@@ -695,7 +691,6 @@ fn options_from_source(source: &ImportSource) -> DirectoryScanOptions {
         include_subdirectories: source.include_subdirectories,
         include_images: source.include_images,
         include_text: source.include_text,
-        ai_allowed: source.ai_allowed,
     }
 }
 
@@ -985,6 +980,18 @@ fn read_snapshot(root: &Path, entry: &ImportTaskEntry) -> Result<Snapshot, AppEr
 mod tests {
     use super::*;
     use crate::events::{NullEventSink, RecordingSink};
+
+    /// 旧任务 `options_json` 里残留的 `aiAllowed` 必须被忽略，不能导致扫描无法恢复。
+    #[test]
+    fn legacy_directory_options_with_ai_allowed_still_deserialize() {
+        let options: DirectoryScanOptions = serde_json::from_str(
+            r#"{"includeSubdirectories":true,"includeImages":true,"includeText":false,"aiAllowed":false}"#,
+        )
+        .unwrap();
+        assert!(options.include_subdirectories);
+        assert!(options.include_images);
+        assert!(!options.include_text);
+    }
 
     #[test]
     fn scan_import_and_refresh_preserve_external_file_and_item_id() {

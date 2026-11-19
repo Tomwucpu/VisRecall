@@ -283,6 +283,11 @@ export const api = {
     await commands.retentionSet(days);
   },
 
+  /** 图片是否允许上传云端解析（库内策略，默认关闭）。 */
+  setCloudImageAi: async (enabled: boolean): Promise<void> => {
+    await commands.cloudImageAiSet(enabled);
+  },
+
   /** 文本/片段是否允许上传云端解析（库内策略，默认关闭）。 */
   setCloudTextAi: async (enabled: boolean): Promise<void> => {
     await commands.cloudTextAiSet(enabled);

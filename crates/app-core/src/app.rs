@@ -799,22 +799,16 @@ impl AppCore {
         Ok(report)
     }
 
-    /// 重新解析：对该素材强制重跑完整解析链（当前选用模型），成功后发 `item_updated`。
+    /// 重新解析：本地链路始终重跑，云端阶段按当前设置决定，成功后发 `item_updated`。
     ///
     /// `bump_revision` 让进行中的旧任务作废（worker 的 stale 检查），点击立即生效；
-    /// 图片从 `ocr` 重跑（handler 接力 index + vlm），文本/链接显式入队 index + vlm
-    /// （`index` handler 不接力 vlm，入库时也只入队了 index）。旧结果无需清理：
+    /// 图片从 `ocr` 重跑（handler 视开关接力 index + vlm），文本/链接显式入队 index，
+    /// 文本在开关允许时再入队 vlm（`index` handler 不接力 vlm）。旧结果无需清理：
     /// ocr/index/insights 都是覆盖写，vlm 的 content_hash 复用排除了素材自身。
     pub fn reparse_item(&self, id: &str) -> Result<(), AppError> {
         let library = self.library_required()?;
         let item = library.get_item(id)?.ok_or(AppError::NotFound)?;
-        // 文本上云需要用户显式授权：先校验再改状态，避免「拒绝后卡在解析中」。
-        if item.kind == ItemKind::Text && !library.cloud_text_ai_enabled() {
-            return Err(AppError::InvalidInput(
-                "云端文本解析未开启：请先在「设置 → 模型」中开启「文本上传云端解析」".to_string(),
-            ));
-        }
-        // 状态回 parsing：卡片/详情立即出现「解析中」反馈，由 vlm 结果再翻 Ready/Pending
+        // 状态回 parsing：卡片/详情立即出现「解析中」反馈，由本地收口或 vlm 结果再翻 Ready/Pending
         library.update_status(id, visrecall_domain::ItemStatus::Parsing, None)?;
         if item.kind == ItemKind::Image {
             library.bump_revision_and_enqueue(
@@ -828,12 +822,14 @@ impl AppCore {
                 visrecall_pipeline::STAGE_INDEX,
                 visrecall_pipeline::PRIORITY_NEW,
             )?;
-            library.enqueue_stage_at(
-                id,
-                visrecall_pipeline::STAGE_VLM,
-                revision,
-                visrecall_pipeline::PRIORITY_NEW,
-            )?;
+            if item.kind == ItemKind::Text && library.cloud_parse_allowed(&item)? {
+                library.enqueue_stage_at(
+                    id,
+                    visrecall_pipeline::STAGE_VLM,
+                    revision,
+                    visrecall_pipeline::PRIORITY_NEW,
+                )?;
+            }
         }
         self.sink.emit(AppEvent::ItemUpdated(ItemUpdatedEvent {
             id: id.to_string(),
@@ -874,9 +870,14 @@ impl AppCore {
         self.library_required()?.set_retention(days)
     }
 
+    /// 图片是否允许上传云端解析（库内策略，默认关闭）。
+    pub fn set_cloud_image_ai(&self, enabled: bool) -> Result<(), AppError> {
+        self.library_required()?.set_cloud_image_ai(enabled)
+    }
+
     /// 文本/片段是否允许上传云端解析（库内策略，默认关闭）。
     ///
-    /// 只影响自动链路（导入时的初始入队）；图片不受它约束。
+    /// 两个开关分别约束图片与文本；均只影响之后的解析，不回溯历史素材。
     pub fn set_cloud_text_ai(&self, enabled: bool) -> Result<(), AppError> {
         self.library_required()?.set_cloud_text_ai(enabled)
     }
@@ -2315,7 +2316,6 @@ mod tests {
                 include_subdirectories: true,
                 include_images: true,
                 include_text: true,
-                ai_allowed: false,
             })
             .unwrap();
         let item = library

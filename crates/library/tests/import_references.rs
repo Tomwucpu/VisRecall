@@ -30,7 +30,6 @@ fn reference_read_and_delete_never_touch_external_file() {
             include_subdirectories: true,
             include_images: true,
             include_text: true,
-            ai_allowed: false,
         })
         .unwrap();
     let item = library
@@ -61,7 +60,6 @@ fn reference_rejects_parent_and_absolute_paths() {
             include_subdirectories: true,
             include_images: true,
             include_text: true,
-            ai_allowed: false,
         })
         .unwrap();
     let item = library
@@ -171,7 +169,6 @@ fn import_source_root_is_stored_without_extended_prefix() {
             include_subdirectories: true,
             include_images: true,
             include_text: true,
-            ai_allowed: false,
         })
         .unwrap();
     assert_eq!(source.root_path, plain);
@@ -190,7 +187,6 @@ fn import_source_reuses_source_for_trailing_separator() {
         include_subdirectories: true,
         include_images: true,
         include_text: true,
-        ai_allowed: false,
     };
 
     let first = library.create_import_source(new_source(plain.clone())).unwrap();

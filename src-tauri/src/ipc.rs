@@ -336,6 +336,8 @@ pub struct SettingsDto {
     pub capacity_gb: u32,
     /// 库里保存的保留天数；`null` 为永久保留。
     pub retention_days: Option<u32>,
+    /// 图片是否允许上传云端解析；库不可用时为默认值（关闭）。
+    pub cloud_image_ai: bool,
     /// 文本/片段是否允许上传云端解析；库不可用时为默认值（关闭）。
     pub cloud_text_ai: bool,
 }
@@ -364,6 +366,7 @@ impl SettingsDto {
             .unwrap_or(visrecall_domain::storage::DEFAULT_CAPACITY_GB);
         let retention_days = library.and_then(|library| library.retention().days);
         // 隐私保守：库不可用（读不到策略）时按「不上传」处理。
+        let cloud_image_ai = library.is_some_and(Library::cloud_image_ai_enabled);
         let cloud_text_ai = library.is_some_and(Library::cloud_text_ai_enabled);
 
         SettingsDto {
@@ -375,6 +378,7 @@ impl SettingsDto {
             hide_in_fullscreen: config.ball.hide_in_fullscreen,
             capacity_gb,
             retention_days,
+            cloud_image_ai,
             cloud_text_ai,
         }
     }
@@ -926,6 +930,17 @@ pub async fn retention_set(app: tauri::AppHandle, days: Option<u32>) -> Result<(
     .await
 }
 
+/// 图片是否允许上传云端解析；库内策略，默认关闭。
+#[tauri::command]
+#[specta::specta]
+pub async fn cloud_image_ai_set(app: tauri::AppHandle, enabled: bool) -> Result<(), ApiError> {
+    run_blocking(app, move |core| {
+        core.set_cloud_image_ai(enabled)
+            .map_err(|err| ApiError::from(&err))
+    })
+    .await
+}
+
 /// 文本/片段是否允许上传云端解析；库内策略，默认关闭。
 #[tauri::command]
 #[specta::specta]
@@ -1273,6 +1288,7 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             library_purge,
             storage_usage_get,
             storage_capacity_set,
+            cloud_image_ai_set,
             cloud_text_ai_set,
             retention_set,
             retention_preview,
@@ -1546,29 +1562,34 @@ mod tests {
         assert_eq!(restart.message, "restart required");
     }
 
-    /// 「文本上传云端解析」来自库内策略：默认关闭，写入后随 SettingsDto 一起回前端。
+    /// 两个云端解析开关都来自库内策略：默认关闭，写入后随 SettingsDto 一起回前端。
     #[test]
-    fn settings_dto_reads_cloud_text_ai_from_library() {
+    fn settings_dto_reads_cloud_switches_from_library() {
         let dir = tempfile::tempdir().unwrap();
         let library = Library::open(dir.path().to_path_buf()).unwrap();
         let config = visrecall_app_core::AppConfig::default();
 
         let dto = SettingsDto::from_config(&config, Some(&library));
-        assert!(!dto.cloud_text_ai, "默认必须是关闭");
+        assert!(!dto.cloud_image_ai, "图片开关默认必须是关闭");
+        assert!(!dto.cloud_text_ai, "文本开关默认必须是关闭");
         // 前端契约：JSON 键名是 camelCase。
         let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json["cloudImageAi"], serde_json::Value::Bool(false));
         assert_eq!(json["cloudTextAi"], serde_json::Value::Bool(false));
 
+        library.set_cloud_image_ai(true).unwrap();
         library.set_cloud_text_ai(true).unwrap();
         let dto = SettingsDto::from_config(&config, Some(&library));
+        assert!(dto.cloud_image_ai);
         assert!(dto.cloud_text_ai);
     }
 
     /// 库打不开时也应回默认（关闭），而不是 panic 或报错。
     #[test]
-    fn settings_dto_cloud_text_ai_defaults_when_library_unavailable() {
+    fn settings_dto_cloud_switches_default_when_library_unavailable() {
         let config = visrecall_app_core::AppConfig::default();
         let dto = SettingsDto::from_config(&config, None);
+        assert!(!dto.cloud_image_ai);
         assert!(!dto.cloud_text_ai);
     }
 

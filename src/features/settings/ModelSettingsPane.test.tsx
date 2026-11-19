@@ -15,7 +15,7 @@ import { ModelSettingsPane } from "./ModelSettingsPane";
 const EMPTY: ModelConfigDto = { entries: [], activeId: null };
 
 /** 设置 DTO 的完整形状（新增字段时这里必须一起改，避免用例悄悄失效）。 */
-function settings(cloudTextAi: boolean): SettingsDto {
+function settings(cloudTextAi: boolean, cloudImageAi = false): SettingsDto {
   return {
     libraryPath: "D:\\VisRecall\\library",
     captureHotkey: "Ctrl+Shift+S",
@@ -25,6 +25,7 @@ function settings(cloudTextAi: boolean): SettingsDto {
     hideInFullscreen: true,
     capacityGb: 50,
     retentionDays: null,
+    cloudImageAi,
     cloudTextAi,
   };
 }
@@ -227,6 +228,40 @@ test("test connection reports success and failure states", async () => {
 
   fireEvent.click(screen.getByText("测试连接"));
   expect(await screen.findByText("测试失败：HTTP 401")).toBeInTheDocument();
+});
+
+test("cloud image ai switch is off by default and persists a toggle", async () => {
+  vi.spyOn(api, "getModelConfig").mockResolvedValue(EMPTY);
+  let enabled = false;
+  vi.spyOn(api, "getSettings").mockImplementation(async () => settings(false, enabled));
+  const save = vi.spyOn(api, "setCloudImageAi").mockImplementation(async (next) => {
+    enabled = next;
+  });
+  renderPane();
+
+  const toggle = await screen.findByRole("switch", { name: "图片上传云端解析" });
+  expect(toggle).toHaveAttribute("aria-checked", "false");
+  await waitFor(() => expect(toggle).toBeEnabled());
+
+  fireEvent.click(toggle);
+  await waitFor(() => expect(save).toHaveBeenCalledWith(true));
+  await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
+});
+
+test("cloud image ai toggle failure keeps the old state and reports an error", async () => {
+  vi.spyOn(api, "getModelConfig").mockResolvedValue(EMPTY);
+  vi.spyOn(api, "setCloudImageAi").mockRejectedValue({
+    code: "DATABASE",
+    message: "database is locked",
+  });
+  renderPane();
+
+  const toggle = await screen.findByRole("switch", { name: "图片上传云端解析" });
+  await waitFor(() => expect(toggle).toBeEnabled());
+  fireEvent.click(toggle);
+
+  expect(await screen.findByText(/保存失败/)).toBeInTheDocument();
+  expect(toggle).toHaveAttribute("aria-checked", "false");
 });
 
 test("cloud text ai switch is off by default and persists a toggle", async () => {

@@ -45,3 +45,23 @@ fn cloud_text_ai_defaults_to_disabled_and_round_trips() {
     core.set_cloud_text_ai(false).unwrap();
     assert!(!core.library().unwrap().cloud_text_ai_enabled());
 }
+
+#[test]
+fn cloud_image_ai_defaults_to_disabled_and_round_trips() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = open(dir.path());
+
+    assert!(
+        !core.library().unwrap().cloud_image_ai_enabled(),
+        "默认必须关闭：未开启前图片不得上传云端"
+    );
+
+    core.set_cloud_image_ai(true).unwrap();
+    assert!(core.library().unwrap().cloud_image_ai_enabled());
+
+    let reopened = Library::open(dir.path().join("library")).unwrap();
+    assert!(reopened.cloud_image_ai_enabled());
+
+    core.set_cloud_image_ai(false).unwrap();
+    assert!(!core.library().unwrap().cloud_image_ai_enabled());
+}

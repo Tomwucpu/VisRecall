@@ -14,6 +14,7 @@ const commands = vi.hoisted(() => ({
     hideInFullscreen: true,
     capacityGb: 50,
     retentionDays: null as number | null,
+    cloudImageAi: false,
     cloudTextAi: false,
   })),
   updateSettings: vi.fn(async (patch: Record<string, unknown>) => ({
@@ -25,8 +26,10 @@ const commands = vi.hoisted(() => ({
     hideInFullscreen: true,
     capacityGb: 50,
     retentionDays: null as number | null,
+    cloudImageAi: false,
     cloudTextAi: false,
   })),
+  cloudImageAiSet: vi.fn(async () => undefined),
   cloudTextAiSet: vi.fn(async () => undefined),
   openLibraryFolder: vi.fn(async () => null),
   storageUsageGet: vi.fn(async () => ({

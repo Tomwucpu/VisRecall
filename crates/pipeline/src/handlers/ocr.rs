@@ -36,7 +36,7 @@ impl JobHandler for OcrHandler {
                 ctx.revision(),
                 PRIORITY_NEW,
             )?;
-            if ctx.library.cloud_ai_allowed(&item.id)? {
+            if ctx.library.cloud_parse_allowed(&item)? {
                 ctx.library.enqueue_stage_at(
                     &item.id,
                     crate::STAGE_VLM,
@@ -98,7 +98,7 @@ impl JobHandler for OcrHandler {
         // 素材立即可检索，VLM 再异步增强」的顺序保证（P3-R04）。capture 路径只入队 `ocr`。
         ctx.library
             .enqueue_stage_at(&item.id, crate::STAGE_INDEX, ctx.revision(), PRIORITY_NEW)?;
-        if ctx.library.cloud_ai_allowed(&item.id)? {
+        if ctx.library.cloud_parse_allowed(&item)? {
             ctx.library.enqueue_stage_at(
                 &item.id,
                 crate::STAGE_VLM,

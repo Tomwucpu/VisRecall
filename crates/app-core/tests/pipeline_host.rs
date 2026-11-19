@@ -81,7 +81,7 @@ fn initial_indexing_enqueues_ocr_for_images_and_index_for_text() {
         .is_empty());
 }
 
-/// 文本是否进阶段二由「上传云端解析」开关决定（默认关闭）；图片不受影响。
+/// 文本是否进阶段二由「文本上传云端解析」开关决定（默认关闭）；图片始终只入队 ocr。
 #[test]
 fn initial_indexing_enqueues_vlm_for_text_only_when_cloud_text_ai_is_enabled() {
     let dir = tempfile::tempdir().unwrap();
@@ -113,12 +113,20 @@ fn initial_indexing_enqueues_vlm_for_text_only_when_cloud_text_ai_is_enabled() {
         "开启后文本要进阶段二（摘要 + 自动标签）"
     );
 
-    // 图片仍只入队 ocr：vlm 由 ocr handler 接力，不受该开关影响
+    // 图片即使开关开启也只入队 ocr：vlm 由 ocr handler 在 OCR 完成后接力。
+    library.set_cloud_image_ai(true).unwrap();
     let image = insert_item(&library, ItemKind::Image, "img");
     enqueue_initial_indexing(&library, &image);
     assert_eq!(
         library.jobs_for_stage(&image.id, STAGE_OCR).unwrap().len(),
         1
+    );
+    assert!(
+        library
+            .jobs_for_stage(&image.id, STAGE_VLM)
+            .unwrap()
+            .is_empty(),
+        "图片不得在入队时直接排 vlm"
     );
 }
 
@@ -504,9 +512,9 @@ fn reparse_text_enqueues_index_and_vlm_at_same_revision() {
     }
 }
 
-/// 开关关闭时点「重新解析」：明确告知去设置里开启，且不改状态、不排任务。
+/// 开关关闭时点「重新解析」：本地索引照常重跑，云端阶段跳过。
 #[test]
-fn reparse_text_is_rejected_while_cloud_text_ai_is_disabled() {
+fn reparse_text_without_cloud_switch_only_enqueues_local_index() {
     let dir = tempfile::tempdir().unwrap();
     let (core, _sink) = open(dir.path());
     let library = core.library().expect("library");
@@ -515,30 +523,70 @@ fn reparse_text_is_rejected_while_cloud_text_ai_is_disabled() {
         .update_status(&text.id, visrecall_domain::ItemStatus::Ready, None)
         .unwrap();
 
-    let err = core.reparse_item(&text.id).expect_err("关闭时应明确拒绝");
-    assert!(
-        matches!(err, visrecall_app_core::AppError::InvalidInput(_)),
-        "err={err:?}"
-    );
-    let message = err.to_string();
-    assert!(message.contains("设置"), "提示要指向设置页：{message}");
+    core.reparse_item(&text.id).expect("重新解析不应被硬拦截");
 
     let reloaded = library.get_item(&text.id).unwrap().unwrap();
+    assert_eq!(reloaded.status, visrecall_domain::ItemStatus::Parsing);
     assert_eq!(
-        reloaded.status,
-        visrecall_domain::ItemStatus::Ready,
-        "拒绝时不能把素材卡在解析中"
+        library.jobs_for_stage(&text.id, STAGE_INDEX).unwrap().len(),
+        1,
+        "本地索引必须重跑"
     );
-    for stage in [STAGE_INDEX, STAGE_VLM] {
+    assert!(
+        library
+            .jobs_for_stage(&text.id, STAGE_VLM)
+            .unwrap()
+            .is_empty(),
+        "开关关闭时不得排队上云"
+    );
+}
+
+/// 链接重新解析只跑本地索引，不进入云端阶段。
+#[test]
+fn reparse_link_only_enqueues_local_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let (core, _sink) = open(dir.path());
+    let library = core.library().expect("library");
+    core.set_cloud_text_ai(true).unwrap();
+    core.set_cloud_image_ai(true).unwrap();
+    let link = insert_item(library, ItemKind::Link, "link");
+
+    core.reparse_item(&link.id).expect("链接 reparse 应成功");
+
+    assert_eq!(
+        library.jobs_for_stage(&link.id, STAGE_INDEX).unwrap().len(),
+        1
+    );
+    assert!(library
+        .jobs_for_stage(&link.id, STAGE_VLM)
+        .unwrap()
+        .is_empty());
+}
+
+/// 图片重新解析：开关开闭都先排 ocr，vlm 由 ocr handler 接力，不在入口直接排队。
+#[test]
+fn reparse_image_queues_ocr_only_for_both_switch_states() {
+    let dir = tempfile::tempdir().unwrap();
+    let (core, _sink) = open(dir.path());
+    let library = core.library().expect("library");
+
+    for (hash, enabled) in [("img-off", false), ("img-on", true)] {
+        core.set_cloud_image_ai(enabled).unwrap();
+        let image = insert_item(library, ItemKind::Image, hash);
+        core.reparse_item(&image.id).expect("图片 reparse 应成功");
+        assert_eq!(
+            library.jobs_for_stage(&image.id, STAGE_OCR).unwrap().len(),
+            1,
+            "{hash}: 必须从 ocr 重跑"
+        );
         assert!(
-            library.jobs_for_stage(&text.id, stage).unwrap().is_empty(),
-            "{stage} 不得入队"
+            library
+                .jobs_for_stage(&image.id, STAGE_VLM)
+                .unwrap()
+                .is_empty(),
+            "{hash}: vlm 只能由 ocr handler 接力"
         );
     }
-
-    // 图片重新解析不受该开关约束（保持现状）
-    let image = insert_item(library, ItemKind::Image, "img-off");
-    core.reparse_item(&image.id).expect("图片 reparse 应成功");
 }
 
 #[test]

@@ -128,8 +128,10 @@ test("scans and paginates a directory before confirming reference import", async
   expect(screen.getByText(/说明\.pdf/)).toBeInTheDocument();
   expect(screen.getByText(/不支持的文件类型/)).toBeInTheDocument();
   expect(commands.scanImportDirectory).toHaveBeenCalledWith("directory-token", {
-    includeSubdirectories: true, includeImages: true, includeText: true, aiAllowed: false,
+    includeSubdirectories: true, includeImages: true, includeText: true,
   });
+  expect(screen.queryByLabelText(/允许此来源/)).not.toBeInTheDocument();
+  expect(screen.getByText(/云端解析由「设置 → 模型」中的开关统一决定/)).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "确认引用导入" }));
   await waitFor(() => expect(commands.startDirectoryImport).toHaveBeenCalledWith("scan-1"));
 });

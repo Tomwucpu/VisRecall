@@ -4,7 +4,7 @@ import { ImportSourcesPane } from "./ImportSourcesPane";
 
 const source = {
   id: "source-1", rootPath: "D:\\素材", includeSubdirectories: true,
-  includeImages: true, includeText: true, aiAllowed: false, status: "available",
+  includeImages: true, includeText: true, status: "available",
   lastScannedAt: 1_700_000_000_000, itemCount: 3,
 };
 const commands = vi.hoisted(() => ({

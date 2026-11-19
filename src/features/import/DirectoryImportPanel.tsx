@@ -111,13 +111,13 @@ export function DirectoryImportPanel({
         引用原文件，不复制。移动或断开原目录后，可在设置中重新定位。<br />
         TXT / Markdown 仅前 10,000 字符参与检索。
       </p>
+      <p className="import-reference-note">云端解析由「设置 → 模型」中的开关统一决定。</p>
 
       {current === null ? (
         <div className="directory-options">
           <label><input type="checkbox" checked={options.includeSubdirectories} disabled={busy} onChange={(event) => onOptionsChange({ ...options, includeSubdirectories: event.target.checked })} />包含子目录</label>
           <label><input type="checkbox" checked={options.includeImages} disabled={busy || !options.includeText} onChange={(event) => onOptionsChange({ ...options, includeImages: event.target.checked })} />图片</label>
           <label><input type="checkbox" checked={options.includeText} disabled={busy || !options.includeImages} onChange={(event) => onOptionsChange({ ...options, includeText: event.target.checked })} />TXT / Markdown</label>
-          <label className="directory-ai-option"><input type="checkbox" checked={options.aiAllowed} disabled={busy} onChange={(event) => onOptionsChange({ ...options, aiAllowed: event.target.checked })} />允许此来源按全局隐私设置使用云端 AI</label>
         </div>
       ) : (
         <div className="directory-scan-summary" role="status" aria-live="polite">

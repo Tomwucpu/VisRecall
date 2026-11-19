@@ -96,6 +96,16 @@ pub struct TextInsight {
 pub trait VisionProvider: Send + Sync {
     /// 稳定标识，写入 `insights.model_provider`（如 `"vlm-primary"`）。
     fn id(&self) -> &str;
+
+    /// 是否已配置可用模型（与 [`TextProvider::ready`] 同构）。
+    ///
+    /// `false` 表示这次调用注定失败（未配置 / 无 Key）：调用方应直接跳过而不是
+    /// 排队重试——图片素材在离线时仍需保持 `ready`，不该被标成「待重试」。
+    /// 默认 `true` 兼容既有实现（测试假实现按需覆盖）。
+    fn ready(&self) -> bool {
+        true
+    }
+
     async fn analyze(&self, png: &[u8]) -> Result<VisionInsight, AppError>;
 }
 

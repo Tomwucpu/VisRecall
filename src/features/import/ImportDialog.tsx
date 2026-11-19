@@ -30,7 +30,6 @@ const DEFAULT_DIRECTORY_OPTIONS: DirectoryScanOptionsDto = {
   includeSubdirectories: true,
   includeImages: true,
   includeText: true,
-  aiAllowed: false,
 };
 
 const VIEW_TITLE: Record<View, string> = {
@@ -114,7 +113,6 @@ export function ImportDialog({ searching, onShowAll, onClose }: Props) {
       includeSubdirectories: source.includeSubdirectories,
       includeImages: source.includeImages,
       includeText: source.includeText,
-      aiAllowed: source.aiAllowed,
     });
     setScanTask(task);
     setTextSaved(false);

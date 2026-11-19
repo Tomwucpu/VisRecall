@@ -45,7 +45,6 @@ pub struct ImportSource {
     pub include_subdirectories: bool,
     pub include_images: bool,
     pub include_text: bool,
-    pub ai_allowed: bool,
     pub status: SourceStatus,
     pub last_scanned_at: Option<i64>,
     pub item_count: u64,
@@ -59,7 +58,6 @@ pub struct NewImportSource {
     pub include_subdirectories: bool,
     pub include_images: bool,
     pub include_text: bool,
-    pub ai_allowed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,16 +127,17 @@ impl Library {
         let key = path_identity(&root_path);
         let conn = self.conn()?;
         conn.execute(
+            // 来源级 AI 授权已废弃：列暂时保留并统一写 1，行为完全由全局开关决定。
             "INSERT INTO import_sources
                (id, root_path, path_key, include_subdirectories, include_images,
                 include_text, ai_allowed, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?7)
              ON CONFLICT(path_key) DO UPDATE SET
                root_path = excluded.root_path,
                include_subdirectories = excluded.include_subdirectories,
                include_images = excluded.include_images,
                include_text = excluded.include_text,
-               ai_allowed = excluded.ai_allowed,
+               ai_allowed = 1,
                status = 'available', updated_at = excluded.updated_at",
             rusqlite::params![
                 id,
@@ -147,7 +146,6 @@ impl Library {
                 new.include_subdirectories,
                 new.include_images,
                 new.include_text,
-                new.ai_allowed,
                 now,
             ],
         )
@@ -356,14 +354,17 @@ impl Library {
         Ok(())
     }
 
-    /// 引用来源必须单独授权云端 AI；托管素材沿用现有模型设置。
-    pub fn cloud_ai_allowed(&self, item_id: &str) -> Result<bool, AppError> {
+    /// 素材当前是否可读：托管素材恒为 `true`，引用素材要求来源目录可用。
+    ///
+    /// 这里只回答「能否读取」，是否允许上云由 [`crate::ai_policy`] 的
+    /// [`Library::cloud_parse_allowed`] 统一决定。
+    pub fn cloud_source_available(&self, item_id: &str) -> Result<bool, AppError> {
         let Some(asset) = self.external_asset_for_item(item_id)? else {
             return Ok(true);
         };
         Ok(self
             .get_import_source(&asset.source_id)?
-            .is_some_and(|source| source.ai_allowed && source.status == SourceStatus::Available))
+            .is_some_and(|source| source.status == SourceStatus::Available))
     }
 
     /// 同事务创建引用素材与路径映射，避免出现无法定位的半成品。
@@ -476,7 +477,7 @@ fn external_asset_from_row(row: &Row<'_>) -> rusqlite::Result<ExternalAsset> {
 }
 
 const SOURCE_SELECT: &str = "SELECT s.id, s.root_path, s.path_key, s.include_subdirectories,
-  s.include_images, s.include_text, s.ai_allowed, s.status, s.last_scanned_at,
+  s.include_images, s.include_text, s.status, s.last_scanned_at,
   (SELECT COUNT(*) FROM external_assets e WHERE e.source_id = s.id),
   s.created_at, s.updated_at FROM import_sources s";
 
@@ -495,7 +496,7 @@ fn source_query(
 }
 
 fn source_from_row(row: &Row<'_>) -> rusqlite::Result<ImportSource> {
-    let status: String = row.get(7)?;
+    let status: String = row.get(6)?;
     Ok(ImportSource {
         id: row.get(0)?,
         root_path: row.get(1)?,
@@ -503,12 +504,11 @@ fn source_from_row(row: &Row<'_>) -> rusqlite::Result<ImportSource> {
         include_subdirectories: row.get(3)?,
         include_images: row.get(4)?,
         include_text: row.get(5)?,
-        ai_allowed: row.get(6)?,
         status: SourceStatus::parse(&status),
-        last_scanned_at: row.get(8)?,
-        item_count: row.get::<_, i64>(9)? as u64,
-        created_at: row.get(10)?,
-        updated_at: row.get(11)?,
+        last_scanned_at: row.get(7)?,
+        item_count: row.get::<_, i64>(8)? as u64,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
     })
 }
 

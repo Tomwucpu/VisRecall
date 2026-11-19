@@ -110,21 +110,18 @@ fn build_provider(
 /// 目录批量导入时云端任务的优先级：让新捕获先跑，批量扫描慢慢补。
 pub const PRIORITY_BULK_CLOUD: i64 = 100;
 
-/// 文本/片段是否应该进入阶段二：`上传云端解析` 开关打开且来源允许云端。
+/// 该素材是否应该进入云端阶段：由库层 [`Library::cloud_parse_allowed`] 统一判定。
 ///
-/// 图片恒为 `false`（由 `ocr` handler 接力 `vlm`，不受该开关约束）；
-/// 链接没有本地原文，保持原状不在这里放开。
-pub fn cloud_text_ai_pending(library: &Library, item: &visrecall_domain::Item) -> bool {
-    item.kind == visrecall_domain::ItemKind::Text
-        && library.cloud_text_ai_enabled()
-        && library.cloud_ai_allowed(&item.id).unwrap_or(false)
+/// 图片只在 `ocr` 完成后接力 `vlm`，文本由入队函数显式排入，链接恒为 `false`。
+pub fn cloud_parse_pending(library: &Library, item: &visrecall_domain::Item) -> bool {
+    library.cloud_parse_allowed(item).unwrap_or(false)
 }
 
 /// 提交成功后入队第一阶段任务（图片 `ocr`、文本/链接 `index`）。
 ///
 /// **顺序不变量**：文本先入队 `index`（≤3s 可检索），再入队 `vlm`；同一优先级下按 rowid
 /// 先进先出，因此阶段一必然先被 claim（P3-R04）。`index` handler 不接力 `vlm`（否则成环），
-/// 所以文本的第二阶段只能在这里显式入队——是否入队由 [`cloud_text_ai_pending`] 决定。
+/// 所以文本的第二阶段只能在这里显式入队——是否入队由 [`cloud_parse_pending`] 决定。
 ///
 /// 入队失败只记 `warn`——捕获主链路不为索引让路，素材可由启动自检补索引。
 pub fn enqueue_initial_indexing(library: &Library, item: &visrecall_domain::Item) {
@@ -145,7 +142,8 @@ fn enqueue_indexing_with(library: &Library, item: &visrecall_domain::Item, cloud
     if let Err(err) = library.enqueue_stage(&item.id, stage, PRIORITY_NEW) {
         tracing::warn!(item = %item.id, stage, %err, "failed to enqueue initial indexing");
     }
-    if cloud_text_ai_pending(library, item) {
+    // 图片的 `vlm` 由 `ocr` handler 接力；这里只显式排入文本。
+    if item.kind == visrecall_domain::ItemKind::Text && cloud_parse_pending(library, item) {
         if let Err(err) = library.enqueue_stage(&item.id, STAGE_VLM, cloud_priority) {
             tracing::warn!(item = %item.id, %err, "failed to enqueue cloud text analysis");
         }
@@ -169,6 +167,11 @@ impl RoutedVision {
 impl VisionProvider for RoutedVision {
     fn id(&self) -> &str {
         self.registry.active_slot()
+    }
+
+    /// 与 [`RoutedText::ready`] 同构：未配置模型 / 无 Key 时提前声明不可用。
+    fn ready(&self) -> bool {
+        self.registry.active().is_some()
     }
 
     async fn analyze(&self, png: &[u8]) -> Result<VisionInsight, AppError> {

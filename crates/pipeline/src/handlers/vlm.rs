@@ -29,11 +29,22 @@ impl JobHandler for VlmHandler {
             .library
             .get_item(ctx.item_id())?
             .ok_or(AppError::NotFound)?;
-        // 防御性检查：旧队列也不能绕过云端授权。
-        // - 来源级授权对全部素材生效；
-        // - 文本/片段另受「上传云端解析」开关约束（默认关闭）；
-        // - 没配置可用模型时直接跳过，避免离线把文本批量标成「待重试」。
-        if !ctx.library.cloud_ai_allowed(&item.id)? || !cloud_text_allowed(ctx, &item)? {
+        // 执行前重新校验：任务排队期间用户可能已关闭开关或来源离线。
+        // 没配置可用模型时也直接跳过，避免离线把素材批量标成「待重试」。
+        if !ctx.library.cloud_parse_allowed(&item)? {
+            tracing::debug!(
+                item = %item.id,
+                "cloud parse not allowed; skipping vlm"
+            );
+            ctx.library
+                .update_status(&item.id, visrecall_domain::ItemStatus::Ready, None)?;
+            return Ok(());
+        }
+        if !provider_ready(ctx, &item) {
+            tracing::debug!(
+                item = %item.id,
+                "cloud provider not ready; skipping vlm"
+            );
             ctx.library
                 .update_status(&item.id, visrecall_domain::ItemStatus::Ready, None)?;
             return Ok(());
@@ -146,22 +157,15 @@ impl JobHandler for VlmHandler {
     }
 }
 
-/// 文本/片段是否有资格上云：开关打开且文本 Provider 已配置。
+/// 对应 Provider 是否已配置可用模型：图片看视觉模型，文本看文本模型。
 ///
-/// 图片不受影响（沿用既有模型设置）；`Link` 素材没有本地原文，保持原状不额外放开。
-fn cloud_text_allowed(ctx: &JobCtx<'_>, item: &visrecall_domain::Item) -> Result<bool, AppError> {
-    if item.kind != ItemKind::Text {
-        return Ok(true);
+/// 链接不参与自动云端解析，`cloud_parse_allowed` 已提前拦截。
+fn provider_ready(ctx: &JobCtx<'_>, item: &visrecall_domain::Item) -> bool {
+    match item.kind {
+        ItemKind::Image => ctx.deps.vision.ready(),
+        ItemKind::Text => ctx.deps.text.ready(),
+        ItemKind::Link => false,
     }
-    if !ctx.library.cloud_text_ai_enabled() {
-        tracing::debug!(item = %item.id, "cloud text ai disabled; skipping vlm");
-        return Ok(false);
-    }
-    if !ctx.deps.text.ready() {
-        tracing::debug!(item = %item.id, "text provider not ready; skipping vlm");
-        return Ok(false);
-    }
-    Ok(true)
 }
 
 /// 把模型结果写进 insight（保留已有 OCR 字段）。
