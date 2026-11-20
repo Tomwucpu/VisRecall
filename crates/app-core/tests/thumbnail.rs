@@ -123,7 +123,8 @@ fn load_thumb_bytes_returns_the_webp() {
     let dir = tempfile::tempdir().unwrap();
     let (library, id) = image_with_thumb(dir.path());
 
-    let bytes = load_thumb_bytes(&library, &id).expect("read thumbnail");
+    let (bytes, mime) = load_thumb_bytes(&library, &id).expect("read thumbnail");
+    assert_eq!(mime, "image/webp");
     assert_eq!(&bytes[..4], b"RIFF");
     assert_eq!(
         bytes,

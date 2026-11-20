@@ -156,7 +156,7 @@ fn asset_response(library: Option<&Library>, method: &Method, path: &str) -> Res
     };
 
     let loaded = match kind {
-        AssetKind::Thumb => load_thumb_bytes(library, item_id).map(|bytes| (bytes, "image/png")),
+        AssetKind::Thumb => load_thumb_bytes(library, item_id),
         AssetKind::Original => load_original_bytes(library, item_id),
     };
 
@@ -254,6 +254,34 @@ mod tests {
         (library, id)
     }
 
+    fn library_with_webp_thumb(dir: &Path) -> (Library, String) {
+        let library = Library::open(dir.to_path_buf()).expect("open temp library");
+        let id = "webp-1".to_string();
+        library
+            .insert_item_with_id(
+                id.clone(),
+                NewItem {
+                    kind: ItemKind::Image,
+                    captured_at: 1,
+                    source_app: None,
+                    source_title: None,
+                    source_url: None,
+                    width: Some(10),
+                    height: Some(10),
+                    char_count: None,
+                    original_path: "originals/images/2026/01/webp-1.png".into(),
+                    content_hash: "hash".into(),
+                },
+            )
+            .unwrap();
+        let relative = format!("thumbs/{id}.webp");
+        fs::write(dir.join(&relative), b"RIFF\x1a\x00\x00\x00WEBPVP8 thumb").unwrap();
+        library
+            .update_status(&id, ItemStatus::Ready, Some(&relative))
+            .unwrap();
+        (library, id)
+    }
+
     #[test]
     fn parses_thumb_paths() {
         assert_eq!(parse_thumb_request_path("/thumb/abc123"), Ok("abc123"));
@@ -345,7 +373,21 @@ mod tests {
     }
 
     #[test]
-    fn returns_png_with_cache_header() {
+    fn returns_webp_with_cache_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let (library, id) = library_with_webp_thumb(dir.path());
+
+        let response = asset_response(Some(&library), &Method::GET, &format!("/thumb/{id}"));
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[CONTENT_TYPE], "image/webp");
+        assert_eq!(
+            response.headers()[CACHE_CONTROL],
+            "public, max-age=31536000, immutable"
+        );
+    }
+
+    #[test]
+    fn returns_legacy_png_with_cache_header() {
         let dir = tempfile::tempdir().unwrap();
         let (library, id) = library_with_thumb(dir.path());
 

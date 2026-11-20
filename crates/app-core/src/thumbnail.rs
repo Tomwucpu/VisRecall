@@ -113,12 +113,16 @@ pub fn generate_thumbnail(src: &Path, dst: &Path, max_edge: u32) -> Result<(), A
     write_bytes_atomic_in(parent, &tmp_id, dst, &webp)
 }
 
-/// 读取素材缩略图的字节（资源协议用）。
+/// 读取素材缩略图的字节与 MIME（资源协议用）。
 ///
+/// MIME 按 `thumb_path` 扩展名推导：新缩略图是 `.webp`，旧库里的 `.png` 继续可用。
 /// 素材不存在、没有 `thumb_path`、或缩略图文件已丢失都返回 [`AppError::NotFound`]；
 /// `thumb_path` 不在 `thumbs/` 下（库被手工改坏指向 `texts/` 等库内文件）或不是库内
 /// 相对路径，返回 [`AppError::InvalidInput`]，从不读取库根目录之外的文件。
-pub fn load_thumb_bytes(library: &Library, item_id: &str) -> Result<Vec<u8>, AppError> {
+pub fn load_thumb_bytes(
+    library: &Library,
+    item_id: &str,
+) -> Result<(Vec<u8>, &'static str), AppError> {
     let item = library.get_item(item_id)?.ok_or(AppError::NotFound)?;
     let thumb = item.thumb_path.ok_or(AppError::NotFound)?;
 
@@ -135,10 +139,11 @@ pub fn load_thumb_bytes(library: &Library, item_id: &str) -> Result<Vec<u8>, App
         _ => AppError::NotFound,
     })?;
 
-    fs::read(&path).map_err(|err| match err.kind() {
+    let bytes = fs::read(&path).map_err(|err| match err.kind() {
         std::io::ErrorKind::NotFound => AppError::NotFound,
         _ => AppError::Io(format!("read {thumb}: {err}")),
-    })
+    })?;
+    Ok((bytes, image_mime(&thumb)))
 }
 
 /// 读取素材原图的字节与 MIME（资源协议 `visrecall://original/<id>` 用）。
