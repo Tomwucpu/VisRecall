@@ -47,3 +47,11 @@ test("shows the full-page error card when nothing has loaded yet", () => {
   expect(screen.getByText("无法读取素材")).toBeInTheDocument();
   expect(screen.queryByRole("list")).not.toBeInTheDocument();
 });
+
+test("keeps loaded cards mounted while the list is pending again", () => {
+  render(<ItemGrid {...baseProps} items={[item]} isPending />);
+
+  // 刷新期间保留网格：卸载会闪白、丢滚动位置，并让缩略图全部重新解码。
+  expect(screen.getByText("Test")).toBeInTheDocument();
+  expect(screen.queryByText("正在加载素材…")).not.toBeInTheDocument();
+});

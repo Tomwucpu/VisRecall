@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { toOriginalSrc, toThumbSrc } from "../../lib/format";
 import { resetToasts } from "../../lib/toast";
 import { ItemCard, type ItemCardData } from "./ItemCard";
-import { toItemCardData } from "./useItems";
+import { toItemCardData } from "../../lib/itemDto";
 
 const commands = vi.hoisted(() => ({
   copyItemOriginal: vi.fn(async () => undefined),

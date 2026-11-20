@@ -1,30 +1,12 @@
 import { useInfiniteQuery } from "@tanstack/react-query";
-import { commands, type ItemDto } from "../../lib/bindings";
+import { commands } from "../../lib/bindings";
 import type { ItemFilters } from "../../lib/api";
-import { toThumbSrc } from "../../lib/format";
-import { hueForColor } from "../../lib/hue";
+import { toItemCardData } from "../../lib/itemDto";
 import { queryKeys } from "../../lib/queryClient";
 import type { ItemCardData } from "./ItemCard";
 
 /** 与后端 `list_items` 的分页上限一致（命令内 clamp 到 1..=100，这里固定 50）。 */
 export const ITEM_PAGE_SIZE = 50;
-
-/** `ItemDto` → 卡片数据；缩略图 URL 在这里一次性转成可加载地址。 */
-export function toItemCardData(dto: ItemDto): ItemCardData {
-  return {
-    id: dto.id,
-    kind: dto.kind,
-    status: dto.status,
-    capturedAt: dto.capturedAt,
-    sourceApp: dto.sourceApp ?? null,
-    sourceTitle: dto.sourceTitle ?? null,
-    title: dto.title ?? null,
-    thumbUrl: toThumbSrc(dto.thumbUrl ?? null),
-    // 阶段 03：主色 → 主题色令牌（未解析为 null，落到中性灰）
-    hue: hueForColor(dto.primaryColor ?? null),
-    preview: dto.preview ?? null,
-  };
-}
 
 /** 无限分页 → 去重后的有序卡片数组（同一条可能出现在相邻页边界）。 */
 export function flattenItemPages(pages: ItemCardData[][] | undefined): ItemCardData[] {

@@ -308,3 +308,55 @@ test("renaming from the detail panel saves through itemRename", async () => {
     expect(commands.itemRename).toHaveBeenCalledWith("item-1", "会议记录");
   });
 });
+
+test("removes batch-deleted cards without blanking the grid", async () => {
+  renderApp();
+
+  await screen.findByRole("button", { name: /第一条素材/ });
+  fireEvent.click(screen.getByRole("button", { name: "选择" }));
+  fireEvent.click(await screen.findByRole("checkbox", { name: /第一条素材/ }));
+  fireEvent.click(screen.getByRole("button", { name: "删除" }));
+
+  const dialog = await screen.findByRole("dialog");
+  fireEvent.click(within(dialog).getByRole("button", { name: "删除" }));
+
+  await waitFor(() => {
+    expect(screen.queryByRole("checkbox", { name: /第一条素材/ })).not.toBeInTheDocument();
+  });
+  // 删除后不得出现整块加载占位，也不得等待下一次列表重取才移除。
+  expect(screen.queryByText("正在加载素材…")).not.toBeInTheDocument();
+  expect(commands.itemDeleteMany).toHaveBeenCalledWith(["item-1"]);
+});
+
+test("keeps the open detail while the list is transiently empty", async () => {
+  renderApp();
+
+  fireEvent.click(await screen.findByRole("button", { name: /第一条素材/ }));
+  expect(await screen.findByLabelText("备注")).toBeInTheDocument();
+
+  // 输入搜索词后进入防抖窗口：检索结果暂时为空，但已打开的详情不能跟着卸载。
+  fireEvent.change(screen.getByRole("searchbox", { name: "搜索素材" }), {
+    target: { value: "会议" },
+  });
+
+  expect(screen.getByLabelText("备注")).toBeInTheDocument();
+});
+
+test("keeps previous cards visible while a filter query is loading", async () => {
+  let resolveFiltered: (() => void) | undefined;
+  commands.listItemsFiltered.mockImplementationOnce(
+    () => new Promise((resolve) => { resolveFiltered = () => resolve([]); }),
+  );
+
+  renderApp();
+  await screen.findByRole("button", { name: /第一条素材/ });
+
+  fireEvent.click(screen.getByRole("button", { name: /类型/ }));
+  fireEvent.click(screen.getByLabelText("图片", { exact: false }));
+
+  // 新筛选还没返回时，旧结果继续可见，不出现整块加载占位。
+  expect(screen.getByRole("button", { name: /第一条素材/ })).toBeInTheDocument();
+  expect(screen.queryByText("正在加载素材…")).not.toBeInTheDocument();
+
+  resolveFiltered?.();
+});

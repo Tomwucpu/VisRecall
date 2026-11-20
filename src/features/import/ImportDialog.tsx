@@ -196,7 +196,8 @@ export function ImportDialog({ searching, onShowAll, onClose }: Props) {
       setActiveTask(null);
       setTextSaved(true);
       setView("task");
-      void queryClient.resetQueries({ queryKey: queryKeys.items });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.items });
+      void queryClient.invalidateQueries({ queryKey: ["items-filtered"] });
       pushToast("文字已添加到素材库");
     } catch (reason) {
       setError(describeError(reason));

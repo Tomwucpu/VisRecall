@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { commands, type AppStatus } from "../lib/bindings";
 import { api, type MigrationProgress } from "../lib/api";
 import { queryKeys } from "../lib/queryClient";
+import { removeItemsEverywhere } from "../lib/itemCache";
 import { describeError } from "../lib/errors";
 import { pushToast } from "../lib/toast";
 import { toggleTheme } from "../lib/theme";
@@ -62,6 +63,7 @@ function statusText(state: LoadState): string {
 }
 
 export default function App() {
+  const queryClient = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // 默认不显示详情列，选中素材后滑入，关闭后整列滑出（原型 `.detail.is-hidden`）。
   const [detailHidden, setDetailHidden] = useState(true);
@@ -93,6 +95,20 @@ export default function App() {
   // 检索结果也要能打开详情与多选：统一成卡片数据，避免两套查找逻辑。
   const searchCards = useMemo(() => search.hits.map(hitToCardData), [search.hits]);
   const visibleCards = searching ? searchCards : list;
+
+  // 切换筛选/首次进入筛选时，新查询会短暂 pending：先把上一份可见结果留在网格里，
+  // 避免整块加载占位把已有卡片卸载（与 React Query 的 keepPreviousData 同效）。
+  const lastVisibleCards = useRef<ItemCardData[]>([]);
+  useEffect(() => {
+    // 只记普通列表/筛选列表；检索结果不参与，避免清空搜索时短暂显示旧命中。
+    if (!searching && visibleCards.length > 0) {
+      lastVisibleCards.current = visibleCards;
+    }
+  }, [visibleCards, searching]);
+  const gridCards =
+    !searching && listQuery.isPending && list.length === 0
+      ? lastVisibleCards.current
+      : visibleCards;
   const orderedIds = useMemo(() => visibleCards.map((item) => item.id), [visibleCards]);
   const selection = useSelection(orderedIds);
   const {
@@ -103,6 +119,16 @@ export default function App() {
     clear: clearSelection,
     exit: exitSelection,
   } = selection;
+
+  // 传给卡片的回调必须稳定，否则 memo 后的 ItemCard 每次列表渲染都会重新渲染。
+  const { toggle: toggleSelection } = selection;
+  const { fetchNextPage, refetch: refetchList } = listQuery;
+  const toggleCardSelection = useCallback(
+    (item: ItemCardData, shift: boolean) => toggleSelection(item.id, shift),
+    [toggleSelection],
+  );
+  const loadMore = useCallback(() => void fetchNextPage(), [fetchNextPage]);
+  const retryList = useCallback(() => void refetchList(), [refetchList]);
 
   const tagsQuery = useQuery({ queryKey: queryKeys.tags, queryFn: () => api.listTags() });
   const tagOptions = useMemo(
@@ -292,6 +318,23 @@ export default function App() {
         ? `已加载 ${shownCount} 项`
         : `找到 ${shownCount} 项`;
   const selected = visibleCards.find((item) => item.id === selectedId) ?? null;
+
+  // 列表可能因检索防抖/筛选切换瞬时为空：保留最近一次选中的卡片，
+  // 避免详情被卸载（也会连带丢掉面板里未保存的草稿）。
+  const lastSelectedCard = useRef<ItemCardData | null>(null);
+  useEffect(() => {
+    if (selected !== null) {
+      lastSelectedCard.current = selected;
+    }
+  }, [selected]);
+  const shownSelected =
+    selected ??
+    (selectedId !== null &&
+    visibleCards.length === 0 &&
+    (listQuery.isPending || search.busy) &&
+    lastSelectedCard.current?.id === selectedId
+      ? lastSelectedCard.current
+      : null);
   const migrationPercent =
     migration !== null && migration.total > 0
       ? Math.min(100, Math.round((migration.done / migration.total) * 100))
@@ -330,6 +373,8 @@ export default function App() {
         failed += report.failed;
       }
       selection.remove(ids);
+      // 事件载荷只有计数，批量删除在这里按已知 ids 立即移除，避免等一次整表重取。
+      removeItemsEverywhere(queryClient, new Set(ids));
       if (selectedId !== null && ids.includes(selectedId)) {
         closeDetail();
       }
@@ -344,7 +389,7 @@ export default function App() {
     } finally {
       setDeleting(false);
     }
-  }, [selection, selectedId, deleting, closeDetail]);
+  }, [selection, selectedId, deleting, closeDetail, queryClient]);
 
   return (
     <div className="app">
@@ -482,25 +527,25 @@ export default function App() {
                 selectedId={selectedId}
                 selectionMode={selectionMode}
                 selectedIds={selectedIds}
-                onToggleSelect={(item, shift) => selection.toggle(item.id, shift)}
+                onToggleSelect={toggleCardSelection}
               />
             ) : !listQuery.isPending && !listQuery.isError && list.length === 0 && !filters.active ? (
               <EmptyState onAdd={() => setImportOpen(true)} />
             ) : (
               <ItemGrid
-                items={list}
+                items={gridCards}
                 isPending={listQuery.isPending}
                 isError={listQuery.isError}
                 errorMessage={listQuery.error ? describeError(listQuery.error) : null}
                 hasNextPage={listQuery.hasNextPage}
                 isFetchingNextPage={listQuery.isFetchingNextPage}
-                onLoadMore={() => void listQuery.fetchNextPage()}
-                onRetry={() => void listQuery.refetch()}
+                onLoadMore={loadMore}
+                onRetry={retryList}
                 onOpen={openDetail}
                 selectedId={selectedId}
                 selectionMode={selectionMode}
                 selectedIds={selectedIds}
-                onToggleSelect={(item, shift) => selection.toggle(item.id, shift)}
+                onToggleSelect={toggleCardSelection}
                 emptyText={
                   filters.active ? "没有符合当前筛选条件的素材。" : "还没有素材。"
                 }
@@ -514,8 +559,8 @@ export default function App() {
           aria-hidden={detailHidden}
           inert={detailHidden}
         >
-          {selected !== null ? (
-            <DetailPanel item={selected} onClose={closeDetail} onRename={setRenameTarget} />
+          {shownSelected !== null ? (
+            <DetailPanel item={shownSelected} onClose={closeDetail} onRename={setRenameTarget} />
           ) : (
             <DetailEmpty />
           )}

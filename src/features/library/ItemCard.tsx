@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties, type MouseEvent } from "react";
+import { memo, useEffect, useState, type CSSProperties, type MouseEvent } from "react";
 import { api } from "../../lib/api";
 import { errorCode, errorMessage } from "../../lib/errors";
 import {
@@ -65,7 +65,7 @@ function showsBadge(status: string): boolean {
 }
 
 /** 单张素材卡：缩略图（无图时占位）、状态徽标、复制/重命名按钮、标题与元信息。 */
-export function ItemCard({
+function ItemCardImpl({
   item,
   onOpen,
   selected = false,
@@ -245,3 +245,6 @@ export function ItemCard({
     </article>
   );
 }
+
+/** 列表刷新时绝大多数卡片数据未变：memo 避免整页重渲染。 */
+export const ItemCard = memo(ItemCardImpl);

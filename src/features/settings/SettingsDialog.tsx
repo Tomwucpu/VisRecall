@@ -263,6 +263,7 @@ export function SettingsDialog({ onClose }: Props) {
       const report = await api.applyRetention();
       refreshUsage();
       void queryClient.invalidateQueries({ queryKey: queryKeys.items });
+      void queryClient.invalidateQueries({ queryKey: ["items-filtered"] });
       pushToast(`清理完成：成功 ${report.deleted} 条，失败 ${report.failed} 条`);
     } catch (error) {
       pushToast(errorMessage(error), "error");
@@ -299,6 +300,7 @@ export function SettingsDialog({ onClose }: Props) {
       setPurgeWord("");
       refreshUsage();
       void queryClient.invalidateQueries({ queryKey: queryKeys.items });
+      void queryClient.invalidateQueries({ queryKey: ["items-filtered"] });
       void queryClient.invalidateQueries({ queryKey: queryKeys.tags });
       pushToast("素材库已清空");
     } catch (error) {

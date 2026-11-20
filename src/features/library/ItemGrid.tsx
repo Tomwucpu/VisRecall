@@ -41,7 +41,9 @@ export function ItemGrid({
   onToggleSelect,
   emptyText = "没有符合当前条件的素材。",
 }: Props) {
-  if (isPending) {
+  // 只有「从未加载出任何数据」时才用整块加载占位；刷新期间必须保留网格，
+  // 否则会闪白、丢滚动位置，并让所有缩略图重新解码。
+  if (isPending && items.length === 0) {
     return <p className="hint">正在加载素材…</p>;
   }
 

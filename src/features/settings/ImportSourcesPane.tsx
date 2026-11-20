@@ -66,7 +66,8 @@ export function ImportSourcesPane() {
       setRemoveItems(false);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.importSources }),
-        queryClient.resetQueries({ queryKey: queryKeys.items }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.items }),
+        queryClient.invalidateQueries({ queryKey: ["items-filtered"] }),
       ]);
       pushToast(removeItems ? "来源及关联索引已移除，外部原件未改动" : "来源已停用，素材索引仍保留");
     } catch (reason) {
