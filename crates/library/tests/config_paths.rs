@@ -5,7 +5,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use visrecall_library::config::{AppConfig, BallConfig, CaptureConfig};
+use visrecall_library::config::{
+    AppConfig, BallConfig, CaptureConfig, BALL_MAX_SIZE, BALL_MIN_SIZE,
+};
 use visrecall_library::paths::{ensure_library_root, AppPaths, LibraryMeta};
 
 fn backup_names(dir: &Path, prefix: &str) -> Vec<String> {
@@ -124,11 +126,24 @@ fn default_config_matches_design() {
     assert!(cfg.library_path.ends_with(Path::new("VisRecall")));
     assert_eq!(cfg.hotkeys.capture, "Ctrl+Shift+S");
     assert!(cfg.ball.enabled);
-    assert_eq!(cfg.ball.size, 48);
+    assert_eq!(cfg.ball.size, 56);
     assert!(cfg.ball.positions.is_empty());
     assert!(cfg.capture.realtime_fallback);
     assert!(!cfg.privacy.clipboard_capture);
     assert!(!cfg.privacy.telemetry);
+}
+
+#[test]
+fn loading_clamps_the_ball_size_to_the_supported_range() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let mut cfg = AppConfig::default();
+
+    for (stored, expected) in [(40, BALL_MIN_SIZE), (200, BALL_MAX_SIZE), (100, 100)] {
+        cfg.ball.size = stored;
+        cfg.save_atomic(&path).unwrap();
+        assert_eq!(AppConfig::load_or_default(&path).ball.size, expected);
+    }
 }
 
 #[test]

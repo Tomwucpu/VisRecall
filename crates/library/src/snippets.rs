@@ -100,7 +100,9 @@ mod tests {
     fn html_follows_item_deletion() {
         let (_dir, library) = fixture();
         let id = insert_text(&library);
-        library.set_snippet_html(&id, "<p>会随素材删除</p>").unwrap();
+        library
+            .set_snippet_html(&id, "<p>会随素材删除</p>")
+            .unwrap();
 
         library.delete_item(&id).unwrap();
         let conn = library.conn().unwrap();

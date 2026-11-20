@@ -22,8 +22,14 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
     (2, include_str!("../migrations/0002_library_detail.sql")),
     (3, include_str!("../migrations/0003_ai_search.sql")),
     (4, include_str!("../migrations/0004_import_references.sql")),
-    (5, include_str!("../migrations/0005_drop_import_history.sql")),
-    (6, include_str!("../migrations/0006_normalize_import_paths.sql")),
+    (
+        5,
+        include_str!("../migrations/0005_drop_import_history.sql"),
+    ),
+    (
+        6,
+        include_str!("../migrations/0006_normalize_import_paths.sql"),
+    ),
     (7, include_str!("../migrations/0007_item_title.sql")),
     (8, include_str!("../migrations/0008_snippet_html.sql")),
     (9, include_str!("../migrations/0009_editable_content.sql")),

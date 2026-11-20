@@ -505,16 +505,16 @@ mod tests {
     #[test]
     fn protocol_changes_endpoint() {
         let base = "https://api.anthropic.com/v1";
-        let anthropic = OpenAiCompatible::new("vlm-primary", base, "m", None)
-            .with_protocol("anthropic", "");
+        let anthropic =
+            OpenAiCompatible::new("vlm-primary", base, "m", None).with_protocol("anthropic", "");
         assert_eq!(anthropic.endpoint(), format!("{base}/messages"));
 
         let rest = OpenAiCompatible::new("vlm-primary", base, "m", None)
             .with_protocol("rest", "/my-proto/v1/");
         assert_eq!(rest.endpoint(), format!("{base}/my-proto/v1"));
 
-        let ollama = OpenAiCompatible::new("vlm-primary", base, "m", None)
-            .with_protocol("ollama", "");
+        let ollama =
+            OpenAiCompatible::new("vlm-primary", base, "m", None).with_protocol("ollama", "");
         assert_eq!(ollama.protocol(), Protocol::Ollama);
         assert_eq!(ollama.endpoint(), format!("{base}/chat/completions"));
     }

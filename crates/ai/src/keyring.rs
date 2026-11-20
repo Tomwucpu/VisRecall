@@ -31,7 +31,11 @@ impl KeySlot {
             })
             .take(64)
             .collect();
-        let safe = if safe.is_empty() { "model".to_string() } else { safe };
+        let safe = if safe.is_empty() {
+            "model".to_string()
+        } else {
+            safe
+        };
         Self(format!("vlm-{safe}"))
     }
 

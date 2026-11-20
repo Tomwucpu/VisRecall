@@ -30,7 +30,8 @@ function splitHotkey(hotkey: string): string[] {
     .filter((part) => part.length > 0);
 }
 
-const BALL_SIZES = [40, 48, 56] as const;
+const BALL_SIZE_MIN = 50;
+const BALL_SIZE_MAX = 150;
 const RETENTION_PRESETS = [30, 90, 180] as const;
 const CAPACITY_MIN = 1;
 const CAPACITY_MAX = 4096;
@@ -130,6 +131,8 @@ export function SettingsDialog({ onClose }: Props) {
   const [purgeWord, setPurgeWord] = useState("");
   const [orphanConfirm, setOrphanConfirm] = useState(false);
   const [migration, setMigration] = useState<MigrationProgress | null>(null);
+  const [ballSizeDraft, setBallSizeDraft] = useState<number | null>(null);
+  const ballSizeTimer = useRef<number | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const queryClient = useQueryClient();
 
@@ -164,6 +167,7 @@ export function SettingsDialog({ onClose }: Props) {
   const loading = settings.isPending;
   const hotkey = settings.data?.captureHotkey ?? "";
   const ballSize = settings.data?.ballSize ?? null;
+  const displayedBallSize = ballSizeDraft ?? ballSize ?? 56;
   const ballEnabled = settings.data?.ballEnabled ?? false;
   const edgeHide = settings.data?.ballEdgeHide ?? false;
   const hideInFullscreen = settings.data?.hideInFullscreen ?? false;
@@ -187,6 +191,29 @@ export function SettingsDialog({ onClose }: Props) {
       return false;
     }
   };
+
+  /** 拖动时即时显示数值，150ms 防抖后落盘并热更新球体。 */
+  const commitBallSize = (value: number) => {
+    setBallSizeDraft(value);
+    if (ballSizeTimer.current !== null) {
+      window.clearTimeout(ballSizeTimer.current);
+    }
+    ballSizeTimer.current = window.setTimeout(() => {
+      ballSizeTimer.current = null;
+      void patchSettings({ ballSize: value }, "修改尺寸").finally(() => {
+        setBallSizeDraft(null);
+      });
+    }, 150);
+  };
+
+  useEffect(
+    () => () => {
+      if (ballSizeTimer.current !== null) {
+        window.clearTimeout(ballSizeTimer.current);
+      }
+    },
+    [],
+  );
 
   const openLibrary = async () => {
     setOpening(true);
@@ -441,18 +468,19 @@ export function SettingsDialog({ onClose }: Props) {
                     </div>
                   </div>
                   <div className="row-r">
-                    <div className="seg" role="group" aria-label="悬浮球直径">
-                      {BALL_SIZES.map((size) => (
-                        <button
-                          key={size}
-                          type="button"
-                          className={ballSize === size ? "on" : undefined}
-                          aria-pressed={ballSize === size}
-                          onClick={() => void patchSettings({ ballSize: size }, "修改尺寸")}
-                        >
-                          {size}
-                        </button>
-                      ))}
+                    <div className="ball-size">
+                      <input
+                        type="range"
+                        className="mono-slider"
+                        min={BALL_SIZE_MIN}
+                        max={BALL_SIZE_MAX}
+                        step={1}
+                        value={displayedBallSize}
+                        disabled={ballSize === null}
+                        aria-label="悬浮球直径"
+                        onChange={(event) => commitBallSize(Number(event.target.value))}
+                      />
+                      <span className="ball-size-value">{displayedBallSize}</span>
                     </div>
                     <button
                       type="button"

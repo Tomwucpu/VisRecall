@@ -107,19 +107,21 @@ fn invalid_hotkey_text_is_rejected_before_touching_the_disk() {
 }
 
 #[test]
-fn ball_size_accepts_only_the_three_supported_options() {
+fn ball_size_accepts_the_supported_range() {
     let dir = tempfile::tempdir().unwrap();
     let (core, _sink) = open(dir.path());
 
-    let err = core
-        .update_settings(SettingsPatchInput {
-            ball_size: Some(41),
-            ..SettingsPatchInput::default()
-        })
-        .unwrap_err();
-    assert!(matches!(err, AppError::InvalidInput(_)));
+    for size in [49u32, 151] {
+        let err = core
+            .update_settings(SettingsPatchInput {
+                ball_size: Some(size),
+                ..SettingsPatchInput::default()
+            })
+            .unwrap_err();
+        assert!(matches!(err, AppError::InvalidInput(_)));
+    }
 
-    for size in [40u32, 48, 56] {
+    for size in [50u32, 100, 150] {
         let updated = core
             .update_settings(SettingsPatchInput {
                 ball_size: Some(size),
@@ -201,7 +203,7 @@ fn submitting_the_same_hotkey_does_not_re_register() {
     let updated = core
         .update_settings(SettingsPatchInput {
             capture_hotkey: Some(combo.clone()),
-            ball_size: Some(48),
+            ball_size: Some(56),
             ..SettingsPatchInput::default()
         })
         .expect("same hotkey must not be re-registered");
@@ -252,19 +254,19 @@ fn ball_settings_changes_are_persisted() {
 
     let updated = core
         .update_settings(SettingsPatchInput {
-            ball_size: Some(40),
+            ball_size: Some(50),
             ball_edge_hide: Some(false),
             hide_in_fullscreen: Some(false),
             ..SettingsPatchInput::default()
         })
         .unwrap();
 
-    assert_eq!(updated.ball.size, 40);
+    assert_eq!(updated.ball.size, 50);
     assert!(!updated.ball.edge_hide);
     assert!(!updated.ball.hide_in_fullscreen);
 
     let reloaded = AppConfig::load_or_default(&core.paths().config_file);
-    assert_eq!(reloaded.ball.size, 40);
+    assert_eq!(reloaded.ball.size, 50);
     assert!(!reloaded.ball.edge_hide);
     assert!(!reloaded.ball.hide_in_fullscreen);
 }

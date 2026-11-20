@@ -43,18 +43,22 @@ use windows::Win32::Graphics::Gdi::{
     HDC, HGDIOBJ,
 };
 use windows::Win32::Graphics::GdiPlus::{
-    GdipCreateBitmapFromScan0, GdipCreateFont, GdipCreateFontFamilyFromName, GdipCreatePen1,
-    GdipCreateSolidFill, GdipCreateStringFormat, GdipDeleteBrush, GdipDeleteFont,
-    GdipDeleteFontFamily, GdipDeleteGraphics, GdipDeletePen, GdipDeleteStringFormat,
-    GdipDisposeImage, GdipDrawEllipse, GdipDrawRectangle, GdipDrawString, GdipFillEllipse,
-    GdipFillRectangle, GdipGetImageGraphicsContext, GdipGraphicsClear, GdipSetSmoothingMode,
-    GdipSetStringFormatAlign, GdipSetStringFormatLineAlign, GdiplusShutdown, GdiplusStartup,
-    GdiplusStartupInput, GpBitmap, GpBrush, GpFont, GpFontFamily, GpGraphics, GpImage, GpPen,
-    GpSolidFill, GpStringFormat, RectF, SmoothingModeAntiAlias, StringAlignmentCenter, UnitPixel,
+    DashCapFlat, FillModeAlternate, GdipAddPathArc, GdipAddPathLine, GdipClosePathFigure,
+    GdipCreateBitmapFromScan0, GdipCreateFont, GdipCreateFontFamilyFromName, GdipCreatePath,
+    GdipCreatePen1, GdipCreateSolidFill, GdipCreateStringFormat, GdipDeleteBrush, GdipDeleteFont,
+    GdipDeleteFontFamily, GdipDeleteGraphics, GdipDeletePath, GdipDeletePen,
+    GdipDeleteStringFormat, GdipDisposeImage, GdipDrawArc, GdipDrawLine, GdipDrawPath,
+    GdipDrawString, GdipFillPath, GdipGetImageGraphicsContext, GdipGraphicsClear,
+    GdipSetPenLineCap197819, GdipSetSmoothingMode, GdipSetStringFormatAlign,
+    GdipSetStringFormatLineAlign, GdipSetTextRenderingHint, GdiplusShutdown, GdiplusStartup,
+    GdiplusStartupInput, GpBitmap, GpBrush, GpFont, GpFontFamily, GpGraphics, GpImage, GpPath,
+    GpPen, GpSolidFill, GpStringFormat, LineCapRound, RectF, SmoothingModeAntiAlias,
+    StringAlignmentCenter, TextRenderingHintAntiAlias, UnitPixel,
 };
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Ole::{OleInitialize, OleUninitialize};
+use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
     VK_LBUTTON,
@@ -62,23 +66,29 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW,
     GetWindowLongPtrW, KillTimer, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassW,
-    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage,
-    UnregisterClassW, UpdateLayeredWindow, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, IDC_ARROW, MSG,
-    SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE,
+    SetTimer, SetWindowLongPtrW, ShowWindow, SystemParametersInfoW, TranslateMessage,
+    UnregisterClassW, UpdateLayeredWindow, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HTCLIENT,
+    HTTRANSPARENT, IDC_ARROW, MSG, SPI_GETWORKAREA, SW_HIDE, SW_SHOWNOACTIVATE,
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ULW_ALPHA, WM_APP, WM_CAPTURECHANGED, WM_CLOSE,
-    WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCHITTEST, WM_SETTINGCHANGE,
+    WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP,
 };
 
+use crate::ball::anim::{
+    hits_visual, tooltip_rect, tooltip_width, window_rect, BallMetrics, CornerRadii, Curve,
+    Transition, VisualFrame,
+};
 use crate::drop_target::{DropRegistration, DropVisual, WM_BALL_DROP_VISUAL};
 
+pub mod anim;
 pub mod state;
 
 use crate::{CaptureTrigger, ShellEvent};
 pub use state::{
     clamp_size, BallAction, BallEdge, BallEvent, BallSettings, BallStateMachine, BallVisual,
-    BALL_SIZE_OPTIONS, COLLAPSE_DELAY_MS, EDGE_SNAP_PX, EXPAND_DELAY_MS, FULLSCREEN_TICKS,
-    RETRACT_DELAY_MS, STRIP_HIT_PADDING, STRIP_THICKNESS,
+    BALL_MAX_SIZE, BALL_MIN_SIZE, COLLAPSE_DELAY_MS, EDGE_SNAP_PX, FULLSCREEN_TICKS,
+    RETRACT_DELAY_MS,
 };
 
 /// 悬浮球窗口类名（`FindWindowW("VisRecallBall")` 可用于排查）。
@@ -87,11 +97,11 @@ pub const BALL_CLASS_NAME: &str = "VisRecallBall";
 const BALL_WINDOW_TITLE: &str = "VisRecall Ball";
 
 /// 默认尺寸（与 `BallConfig::default().size` 一致）。
-pub const DEFAULT_BALL_SIZE: u32 = 48;
-/// 尺寸下限：配置被手工改坏时不至于画出不可见的球。
-pub const MIN_BALL_SIZE: u32 = 16;
-/// 尺寸上限：配置被手工改坏时不至于画出占满屏幕的球。
-pub const MAX_BALL_SIZE: u32 = 256;
+pub const DEFAULT_BALL_SIZE: u32 = 56;
+/// 尺寸下限：与设置页滑动条一致。
+pub const MIN_BALL_SIZE: u32 = 50;
+/// 尺寸上限：与设置页滑动条一致。
+pub const MAX_BALL_SIZE: u32 = 150;
 /// 悬浮球线程回报「窗口已就绪」的最长等待时间。
 ///
 /// 超时只影响首帧：`spawn_ball_thread` 不阻塞启动（M-8），线程仍会继续创建窗口，
@@ -109,6 +119,8 @@ const WM_BALL_SET_VISIBLE: u32 = WM_APP + 1;
 const WM_BALL_SET_SIZE: u32 = WM_APP + 10;
 /// 设置补丁：`wparam` 打包 size / edge_hide / hide_in_fullscreen。
 const WM_BALL_APPLY_SETTINGS: u32 = WM_APP + 11;
+/// app-core 回推进度/结果：`wparam` 由 [`BallFeedback::pack`] 打包。
+const WM_BALL_FEEDBACK: u32 = WM_APP + 12;
 
 /// `WM_MOUSELEAVE`：`windows` crate 未导出该常量，按 `winuser.h` 定义。
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -117,6 +129,60 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 const TIMER_STATE: usize = 1;
 /// 全屏检测的 1s 采样定时器。
 const TIMER_FULLSCREEN: usize = 2;
+/// 形变/缩放/光环的 60fps 驱动。
+const TIMER_ANIM: usize = 3;
+/// 进度结果（对勾/失败）复位。
+const TIMER_FEEDBACK: usize = 4;
+
+/// 球体常态不透明度（原型 0.76）。
+const BALL_OPACITY: f32 = 0.76;
+/// 拖入放大倍数。
+const DROP_SCALE: f32 = 1.14;
+/// 拖动放大倍数。
+const DRAG_SCALE: f32 = 1.08;
+/// 形变/移动动画时长。
+const MORPH_MS: u64 = 420;
+/// 缩放动画时长。
+const SCALE_MS: u64 = 340;
+/// 对勾保持时长。
+const SUCCESS_MS: u64 = 720;
+/// 失败反馈保持时长。
+const FAILURE_MS: u64 = 600;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Theme {
+    Light,
+    Dark,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IconKind {
+    Default,
+    Drop,
+    Check,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FeedbackState {
+    Idle,
+    Busy,
+    Success,
+    Failure,
+}
+
+/// 每帧传给绘制的离散状态（不参与插值）。
+struct PaintPayload {
+    icon: IconKind,
+    /// 0..=1 的确定进度；`None` 且 `indeterminate` 时画旋转弧。
+    progress: Option<f32>,
+    indeterminate: bool,
+    failed: bool,
+    accepted: bool,
+    halo_rotation: f32,
+    halo_breath: f32,
+    ring_rotation: f32,
+    tooltip: Option<(String, bool)>,
+}
 
 /// 打包 `BallSettings` 到 `wparam`：低 16 位尺寸，第 16/17 位两个开关。
 fn pack_settings(settings: BallSettings) -> usize {
@@ -165,6 +231,77 @@ impl Default for BallConfig {
     }
 }
 
+/// app-core 回推给悬浮球的导入反馈。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BallFeedback {
+    /// 导入进行中；`progress` 为 0..=99，`None` 表示不确定进度。
+    Busy {
+        progress: Option<u8>,
+    },
+    Success,
+    Failure,
+}
+
+impl BallFeedback {
+    /// 打包到 `WM_BALL_FEEDBACK` 的 `wparam`。
+    ///
+    /// 进度加一存储，用 0 表示「不确定」，从而能区分 `Some(0)`。
+    pub fn pack(self) -> usize {
+        match self {
+            BallFeedback::Busy { progress: None } => 0,
+            BallFeedback::Busy {
+                progress: Some(progress),
+            } => (usize::from(progress.min(99)) + 1) << 8,
+            BallFeedback::Success => 1,
+            BallFeedback::Failure => 2,
+        }
+    }
+
+    pub fn unpack(payload: usize) -> Self {
+        let raw = (payload >> 8) & 0xFF;
+        match payload & 0x3 {
+            1 => BallFeedback::Success,
+            2 => BallFeedback::Failure,
+            _ => BallFeedback::Busy {
+                progress: if raw > 0 { Some((raw - 1) as u8) } else { None },
+            },
+        }
+    }
+}
+
+/// 可跨线程克隆的反馈句柄；窗口已销毁时发送为空操作。
+#[derive(Clone, Debug)]
+pub struct BallFeedbackHandle {
+    hwnd: Arc<AtomicIsize>,
+}
+
+impl BallFeedbackHandle {
+    /// 测试或未启动运行时使用的空句柄。
+    pub fn detached() -> Self {
+        Self {
+            hwnd: Arc::new(AtomicIsize::new(0)),
+        }
+    }
+
+    pub fn send(&self, feedback: BallFeedback) {
+        let raw = self.hwnd.load(Ordering::SeqCst);
+        if raw == 0 {
+            return;
+        }
+        // SAFETY: `hwnd` 来自本进程的悬浮球线程；窗口销毁后消息返回失败，只记日志。
+        if let Err(err) = unsafe {
+            PostMessageW(
+                Some(HWND(raw as *mut c_void)),
+                WM_BALL_FEEDBACK,
+                WPARAM(feedback.pack()),
+                LPARAM(0),
+            )
+        } {
+            debug!(error = %err, "failed to post feedback to the floating ball");
+        }
+    }
+}
+
 /// 悬浮球线程句柄；drop 时等价于 [`BallHandle::stop`]。
 #[derive(Debug)]
 pub struct BallHandle {
@@ -197,6 +334,13 @@ impl BallHandle {
                 Some(WPARAM(usize::from(visible))),
                 Some(LPARAM(0)),
             );
+        }
+    }
+
+    /// 供 app-core 跨线程回推进度/结果；句柄可克隆，窗口销毁后自动失效。
+    pub fn feedback_handle(&self) -> BallFeedbackHandle {
+        BallFeedbackHandle {
+            hwnd: Arc::clone(&self.hwnd),
         }
     }
 
@@ -543,6 +687,12 @@ fn run_ball_window(
     );
     let drop_visual = Arc::new(Mutex::new(DropVisual::default()));
     let drop_events = events.clone();
+    let metrics = BallMetrics::new(size);
+    let initial_frame = ball_frame(
+        PhysicalRect::new(position.x, position.y, size, size),
+        metrics,
+    );
+    let theme = system_theme();
     let state = Box::new(RefCell::new(BallWindowState {
         base_size: size,
         size,
@@ -557,6 +707,14 @@ fn run_ball_window(
         started: Instant::now(),
         fullscreen: false,
         tracking_leave: false,
+        theme,
+        frame: initial_frame,
+        transition: None,
+        feedback: FeedbackState::Idle,
+        feedback_progress: None,
+        feedback_until: None,
+        drop_active: false,
+        tooltip: None,
     }));
     let state_ptr = Box::into_raw(state);
 
@@ -572,11 +730,24 @@ fn run_ball_window(
     // SAFETY: 状态由本线程独占，窗口销毁（消息循环退出）之前一直有效。
     unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize) };
 
+    let initial_window = window_rect(initial_frame.rect, None, false, metrics);
     if let Err(err) = render_ball(
         hwnd,
-        PhysicalRect::new(position.x, position.y, size, size),
-        None,
-        true,
+        initial_window,
+        &initial_frame,
+        &PaintPayload {
+            icon: IconKind::Default,
+            progress: None,
+            indeterminate: false,
+            failed: false,
+            accepted: true,
+            halo_rotation: 0.0,
+            halo_breath: 1.0,
+            ring_rotation: 0.0,
+            tooltip: None,
+        },
+        theme,
+        metrics,
     ) {
         // SAFETY: 窗口与状态都由本线程管理；销毁窗口后取回状态。
         unsafe {
@@ -683,16 +854,354 @@ fn is_fullscreen() -> bool {
     }
 }
 
+/// 系统「应用主题」：`AppsUseLightTheme == 0` 视为深色。
+fn system_theme() -> Theme {
+    let subkey = wide(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+    let value = wide("AppsUseLightTheme");
+    let mut data: u32 = 1;
+    let mut size = size_of::<u32>() as u32;
+    // SAFETY: 子键/值名以 NUL 结尾且在调用期间存活；输出缓冲为栈上 u32。
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            PCWSTR(subkey.as_ptr()),
+            PCWSTR(value.as_ptr()),
+            RRF_RT_REG_DWORD,
+            None,
+            Some(&mut data as *mut u32 as *mut c_void),
+            Some(&mut size),
+        )
+    };
+    if status.0 == 0 && data == 0 {
+        Theme::Dark
+    } else {
+        Theme::Light
+    }
+}
+
+struct Palette {
+    body: (u8, u8, u8),
+    border: u32,
+    icon: u32,
+    tooltip_bg: u32,
+    tooltip_text: u32,
+    ring_track: u32,
+    highlight: u32,
+}
+
+fn palette(theme: Theme, accepted: bool) -> Palette {
+    if !accepted {
+        return Palette {
+            body: (107, 114, 128),
+            border: argb(255, 75, 85, 99),
+            icon: argb(255, 255, 255, 255),
+            tooltip_bg: argb(255, 75, 85, 99),
+            tooltip_text: argb(255, 255, 255, 255),
+            ring_track: argb(32, 255, 255, 255),
+            highlight: argb(60, 255, 255, 255),
+        };
+    }
+    match theme {
+        Theme::Light => Palette {
+            body: (255, 255, 255),
+            border: argb(36, 0, 0, 0),
+            icon: argb(255, 17, 17, 17),
+            tooltip_bg: argb(255, 17, 17, 17),
+            tooltip_text: argb(255, 255, 255, 255),
+            ring_track: argb(32, 17, 17, 17),
+            highlight: argb(120, 255, 255, 255),
+        },
+        Theme::Dark => Palette {
+            body: (26, 26, 28),
+            border: argb(46, 255, 255, 255),
+            icon: argb(255, 245, 245, 247),
+            tooltip_bg: argb(255, 245, 245, 247),
+            tooltip_text: argb(255, 17, 17, 17),
+            ring_track: argb(32, 245, 245, 247),
+            highlight: argb(36, 255, 255, 255),
+        },
+    }
+}
+
+fn ball_frame(rect: PhysicalRect, _metrics: BallMetrics) -> VisualFrame {
+    VisualFrame {
+        rect,
+        radii: CornerRadii::capsule(rect.width as f32 / 2.0),
+        scale: 1.0,
+        opacity: BALL_OPACITY,
+        icon_alpha: 1.0,
+        icon_scale: 1.0,
+        grip_alpha: 0.0,
+        halo_alpha: 0.0,
+        tooltip_alpha: 0.0,
+    }
+}
+
+fn strip_frame(rect: PhysicalRect, edge: BallEdge, metrics: BallMetrics) -> VisualFrame {
+    VisualFrame {
+        rect,
+        radii: CornerRadii::docked_strip(edge, metrics.strip_thickness as f32),
+        scale: 1.0,
+        opacity: BALL_OPACITY * 0.85,
+        icon_alpha: 0.0,
+        icon_scale: 0.35,
+        grip_alpha: 0.42,
+        halo_alpha: 0.0,
+        tooltip_alpha: 0.0,
+    }
+}
+
+fn frame_for(state: &BallWindowState) -> VisualFrame {
+    let metrics = BallMetrics::new(state.base_size);
+    match state.machine.visual() {
+        BallVisual::Strip => strip_frame(
+            state.machine.strip_rect(),
+            state.machine.anchor().unwrap_or(BallEdge::Left),
+            metrics,
+        ),
+        _ => ball_frame(state.machine.current_rect(), metrics),
+    }
+}
+
+/// 从当前帧过渡到目标帧；拖入/拖动时叠加放大与光环。
+fn start_transition(hwnd: HWND, mut target: VisualFrame, duration_ms: u64, curve: Curve) {
+    let now = now_ms(hwnd);
+    let Some((from, drop_active, dragging)) = with_state(hwnd, |state| {
+        (state.frame, state.drop_active, state.drag.is_active())
+    }) else {
+        return;
+    };
+    if drop_active {
+        target.scale = DROP_SCALE;
+        target.halo_alpha = 1.0;
+        target.tooltip_alpha = 1.0;
+    } else if dragging {
+        target.scale = DRAG_SCALE;
+    }
+    let _ = with_state_mut(hwnd, |state| {
+        state.transition = Some(Transition {
+            from,
+            to: target,
+            start_ms: now,
+            duration_ms,
+            curve,
+        });
+    });
+    // SAFETY: `hwnd` 属于本线程；同一 id 重复 SetTimer 只保留最近一次。
+    unsafe {
+        SetTimer(Some(hwnd), TIMER_ANIM, 16, None);
+    }
+}
+
+fn advance_animation(hwnd: HWND) {
+    let now = now_ms(hwnd);
+    let keep = with_state_mut(hwnd, |state| {
+        if let Some(transition) = &state.transition {
+            let (frame, finished) = transition.sample(now);
+            state.frame = frame;
+            if finished {
+                state.transition = None;
+            }
+        }
+        state.transition.is_some()
+            || state.drop_active
+            || (state.feedback == FeedbackState::Busy && state.feedback_progress.is_none())
+    })
+    .unwrap_or(false);
+
+    render_current(hwnd);
+
+    if !keep {
+        // SAFETY: 与 `SetTimer(TIMER_ANIM)` 成对；没有动画/光环/不确定进度时停表。
+        unsafe {
+            let _ = KillTimer(Some(hwnd), TIMER_ANIM);
+        }
+    }
+}
+
+fn render_current(hwnd: HWND) {
+    let now = now_ms(hwnd);
+    let Some((
+        frame,
+        base_size,
+        theme,
+        feedback,
+        feedback_progress,
+        drop_active,
+        anchor,
+        cached_tooltip,
+    )) = with_state(hwnd, |state| {
+        (
+            state.frame,
+            state.base_size,
+            state.theme,
+            state.feedback,
+            state.feedback_progress,
+            state.drop_active,
+            state.machine.anchor(),
+            state.tooltip.clone(),
+        )
+    })
+    else {
+        return;
+    };
+    let metrics = BallMetrics::new(base_size);
+    let drop = with_state(hwnd, |state| {
+        state
+            .drop_visual
+            .lock()
+            .map(|visual| visual.clone())
+            .unwrap_or_default()
+    })
+    .unwrap_or_default();
+
+    let tooltip = if drop_active {
+        let text = if drop.active && !drop.label.is_empty() {
+            drop.label.clone()
+        } else {
+            "松开存入".to_string()
+        };
+        let tip = Some((text, drop.accepted));
+        let _ = with_state_mut(hwnd, |state| state.tooltip = tip.clone());
+        tip
+    } else {
+        cached_tooltip
+    };
+
+    // 气泡淡出期间继续保留顶部空间，否则窗口先缩小会把气泡裁掉。
+    let reserve_tip = drop_active || frame.tooltip_alpha > 0.01;
+    let mut window = window_rect(frame.rect, anchor, reserve_tip, metrics);
+    if reserve_tip {
+        if let Some((text, _)) = &tooltip {
+            let desired = tooltip_width(text.chars().count(), metrics) + metrics.shadow_margin * 2;
+            if desired > window.width {
+                let grow = (desired - window.width).div_ceil(2);
+                window = PhysicalRect::new(
+                    window.x - grow as i32,
+                    window.y,
+                    window.width + grow * 2,
+                    window.height,
+                );
+            }
+        }
+    }
+    let icon = if feedback == FeedbackState::Success {
+        IconKind::Check
+    } else if drop_active {
+        IconKind::Drop
+    } else {
+        IconKind::Default
+    };
+    let (progress, indeterminate, failed) = match feedback {
+        FeedbackState::Busy => (
+            feedback_progress.map(|value| f32::from(value.min(99)) / 100.0),
+            feedback_progress.is_none(),
+            false,
+        ),
+        FeedbackState::Failure => (Some(1.0), false, true),
+        FeedbackState::Idle | FeedbackState::Success => (None, false, false),
+    };
+    let elapsed = now as f32;
+    let halo_rotation = (elapsed % 8000.0) / 8000.0 * std::f32::consts::TAU;
+    let halo_breath =
+        0.45 + 0.5 * (0.5 + 0.5 * (elapsed % 1600.0 / 1600.0 * std::f32::consts::TAU).sin());
+
+    let payload = PaintPayload {
+        icon,
+        progress,
+        indeterminate,
+        failed,
+        accepted: drop.accepted,
+        halo_rotation,
+        halo_breath,
+        ring_rotation: (elapsed % 1200.0) / 1200.0 * std::f32::consts::TAU,
+        tooltip,
+    };
+    if let Err(err) = render_ball(hwnd, window, &frame, &payload, theme, metrics) {
+        warn!(error = %err, "failed to render the floating ball");
+    }
+}
+
+fn apply_feedback(hwnd: HWND, feedback: BallFeedback) {
+    let now = now_ms(hwnd);
+    match feedback {
+        BallFeedback::Busy { progress } => {
+            let _ = with_state_mut(hwnd, |state| {
+                state.feedback = FeedbackState::Busy;
+                state.feedback_progress = progress;
+                state.feedback_until = None;
+            });
+        }
+        BallFeedback::Success => {
+            let _ = with_state_mut(hwnd, |state| {
+                state.feedback = FeedbackState::Success;
+                state.feedback_progress = None;
+                state.feedback_until = Some(now + SUCCESS_MS);
+            });
+            // SAFETY: 同一 id 重复 SetTimer 只保留最近一次。
+            unsafe {
+                SetTimer(
+                    Some(hwnd),
+                    TIMER_FEEDBACK,
+                    SUCCESS_MS.min(u64::from(u32::MAX)) as u32,
+                    None,
+                );
+            }
+        }
+        BallFeedback::Failure => {
+            let _ = with_state_mut(hwnd, |state| {
+                state.feedback = FeedbackState::Failure;
+                state.feedback_progress = None;
+                state.feedback_until = Some(now + FAILURE_MS);
+            });
+            // SAFETY: 同上。
+            unsafe {
+                SetTimer(
+                    Some(hwnd),
+                    TIMER_FEEDBACK,
+                    FAILURE_MS.min(u64::from(u32::MAX)) as u32,
+                    None,
+                );
+            }
+        }
+    }
+    // 让绘制立即反映新状态；动画定时器会在无持续动画时自行停表。
+    // SAFETY: 同上。
+    unsafe {
+        SetTimer(Some(hwnd), TIMER_ANIM, 16, None);
+    }
+    render_current(hwnd);
+}
+
+fn reset_feedback(hwnd: HWND) {
+    let _ = with_state_mut(hwnd, |state| {
+        state.feedback = FeedbackState::Idle;
+        state.feedback_progress = None;
+        state.feedback_until = None;
+    });
+    // SAFETY: 与 SetTimer(TIMER_FEEDBACK) 成对。
+    unsafe {
+        let _ = KillTimer(Some(hwnd), TIMER_FEEDBACK);
+    }
+    render_current(hwnd);
+}
+
 /// 把状态机产出的动作落到窗口上。
 fn apply_actions(hwnd: HWND, actions: Vec<BallAction>) {
     for action in actions {
         match action {
             BallAction::Show { rect } => {
-                if let Err(err) = render_ball(hwnd, rect, None, true) {
-                    warn!(error = %err, "failed to render the floating ball");
-                    continue;
+                let target = with_state_mut(hwnd, |state| {
+                    state.position = PhysicalPoint {
+                        x: rect.x,
+                        y: rect.y,
+                    };
+                    state.size = state.base_size;
+                    frame_for(state)
+                });
+                if let Some(target) = target {
+                    start_transition(hwnd, target, MORPH_MS, Curve::Spring);
                 }
-                move_resize(hwnd, rect);
                 // 长条/球都在「用户希望可见」时才显示；捕获会话期间由可见性开关兜住。
                 if with_state(hwnd, |state| state.visible.load(Ordering::SeqCst)).unwrap_or(false) {
                     // SAFETY: `hwnd` 属于本线程；显示不激活窗口。
@@ -700,22 +1209,22 @@ fn apply_actions(hwnd: HWND, actions: Vec<BallAction>) {
                         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                     }
                 }
-                let _ = with_state_mut(hwnd, |state| {
-                    state.position = PhysicalPoint {
-                        x: rect.x,
-                        y: rect.y,
-                    };
-                    state.size = rect.width;
-                });
+                render_current(hwnd);
             }
             BallAction::Hide => {
                 // SAFETY: `hwnd` 属于本线程。
                 unsafe {
                     let _ = ShowWindow(hwnd, SW_HIDE);
+                    let _ = KillTimer(Some(hwnd), TIMER_ANIM);
                 }
             }
-            // 尺寸变化已经体现在 `Show` 的矩形里，单靠 Resize 不重绘。
-            BallAction::Resize { .. } => {}
+            // 尺寸先同步到绘制参数，随后同批次的 `Show` 会按新尺寸重算目标帧。
+            BallAction::Resize { size, .. } => {
+                let _ = with_state_mut(hwnd, |state| {
+                    state.base_size = size;
+                    state.size = size;
+                });
+            }
             BallAction::ScheduleTimer { after_ms } => {
                 // SAFETY: 同一个 id 重复 SetTimer 会覆盖上一个超时，正是「只保留最近一次」的语义。
                 unsafe {
@@ -731,24 +1240,6 @@ fn apply_actions(hwnd: HWND, actions: Vec<BallAction>) {
     }
 }
 
-/// 移动并按需改变窗口尺寸（不激活、不改 Z 序）。
-fn move_resize(hwnd: HWND, rect: PhysicalRect) {
-    // SAFETY: `hwnd` 属于本线程。
-    if let Err(err) = unsafe {
-        SetWindowPos(
-            hwnd,
-            None,
-            rect.x,
-            rect.y,
-            rect.width.max(1) as i32,
-            rect.height.max(1) as i32,
-            SWP_NOZORDER | SWP_NOACTIVATE,
-        )
-    } {
-        warn!(error = %err, "failed to resize the floating ball window");
-    }
-}
-
 /// 推进状态机一次并落地动作；`now_ms` 由线程起始时刻换算。
 fn advance(hwnd: HWND, event: BallEvent) {
     let actions = with_state_mut(hwnd, |state| state.machine.handle(event)).unwrap_or_default();
@@ -757,11 +1248,11 @@ fn advance(hwnd: HWND, event: BallEvent) {
 
 /// 窗口消息处理所需的状态；只在悬浮球线程访问，每次消息短借用（见 [`with_state`]）。
 struct BallWindowState {
-    /// 配置的球体边长（拖入时按 1.15× 放大，离开后恢复）。
+    /// 配置的球体边长（不随动画变化）。
     base_size: u32,
-    /// 当前绘制边长（拖动视觉可临时放大）。
+    /// 当前逻辑球径（与 `base_size` 同步，拖入不再改它）。
     size: u32,
-    /// 当前左上角（全局物理像素）。
+    /// 当前视觉左上角（全局物理像素）。
     position: PhysicalPoint,
     events: Sender<ShellEvent>,
     visible: Arc<AtomicBool>,
@@ -781,6 +1272,16 @@ struct BallWindowState {
     fullscreen: bool,
     /// 鼠标是否已向系统注册了 `WM_MOUSELEAVE`（避免每次移动都重复注册）。
     tracking_leave: bool,
+    theme: Theme,
+    /// 当前绘制的视觉帧（动画采样结果）。
+    frame: VisualFrame,
+    transition: Option<Transition>,
+    feedback: FeedbackState,
+    feedback_progress: Option<u8>,
+    feedback_until: Option<u64>,
+    drop_active: bool,
+    /// 最近一次拖入气泡文案；拖入结束时保留到淡出完成。
+    tooltip: Option<(String, bool)>,
 }
 
 /// 拖动进度。
@@ -907,6 +1408,34 @@ fn with_state_mut<R>(hwnd: HWND, f: impl FnOnce(&mut BallWindowState) -> R) -> O
     Some(f(&mut state))
 }
 
+/// `WM_NCHITTEST`：只让球体/胶囊（含贴边留白）接收鼠标，其余透明区域穿透。
+fn hit_test(hwnd: HWND) -> isize {
+    let mut point = POINT::default();
+    // SAFETY: 输出指针指向栈上 `POINT`。
+    if unsafe { GetCursorPos(&mut point) }.is_err() {
+        return HTCLIENT as isize;
+    }
+    let Some((visual, anchor, size)) = with_state(hwnd, |state| {
+        (state.frame.rect, state.machine.anchor(), state.base_size)
+    }) else {
+        return HTTRANSPARENT as isize;
+    };
+    let metrics = BallMetrics::new(size);
+    if hits_visual(
+        visual,
+        anchor,
+        metrics,
+        PhysicalPoint {
+            x: point.x,
+            y: point.y,
+        },
+    ) {
+        HTCLIENT as isize
+    } else {
+        HTTRANSPARENT as isize
+    }
+}
+
 unsafe extern "system" fn ball_window_proc(
     hwnd: HWND,
     message: u32,
@@ -942,6 +1471,17 @@ unsafe extern "system" fn ball_window_proc(
         }
         WM_BALL_APPLY_SETTINGS => {
             apply_settings_message(hwnd, wparam.0);
+            LRESULT(0)
+        }
+        WM_BALL_FEEDBACK => {
+            apply_feedback(hwnd, BallFeedback::unpack(wparam.0));
+            LRESULT(0)
+        }
+        WM_NCHITTEST => LRESULT(hit_test(hwnd)),
+        WM_SETTINGCHANGE => {
+            let theme = system_theme();
+            let _ = with_state_mut(hwnd, |state| state.theme = theme);
+            render_current(hwnd);
             LRESULT(0)
         }
         WM_TIMER => {
@@ -992,6 +1532,12 @@ unsafe extern "system" fn ball_window_proc(
 
 /// 按下：记录拖动起点并捕获鼠标；尚未移动，松开即单击。
 fn press_ball(hwnd: HWND) {
+    // 收起态按下先展开：既方便拖动，也让单击时的视觉反馈完整。
+    if with_state(hwnd, |state| state.machine.visual() == BallVisual::Strip).unwrap_or(false) {
+        let now = now_ms(hwnd);
+        advance(hwnd, BallEvent::CursorEnter { now_ms: now });
+    }
+
     let mut cursor = POINT::default();
     // SAFETY: 输出指针指向栈上 `POINT`。
     if let Err(err) = unsafe { GetCursorPos(&mut cursor) } {
@@ -1003,7 +1549,12 @@ fn press_ball(hwnd: HWND) {
     // SAFETY: `hwnd` 属于本线程；捕获鼠标让窗口外的移动/松开仍然送达。
     unsafe { SetCapture(hwnd) };
     let _ = with_state_mut(hwnd, |state| {
-        let origin = state.position;
+        let rect = state.machine.current_rect();
+        let origin = PhysicalPoint {
+            x: rect.x,
+            y: rect.y,
+        };
+        state.position = origin;
         state.drag.begin((cursor.x, cursor.y), origin);
     });
 }
@@ -1025,28 +1576,53 @@ fn drag_ball(hwnd: HWND) {
     let pressed = unsafe { GetKeyState(VK_LBUTTON.0 as i32) } < 0;
 
     // 借用只覆盖纯逻辑推进；下面的窗口 API 调用不再持有引用（M-7）。
-    let Some((update, size)) = with_state_mut(hwnd, |state| {
-        let update = state.drag.on_move((cursor.x, cursor.y), pressed);
-        (update, state.size)
+    let Some(update) = with_state_mut(hwnd, |state| {
+        state.drag.on_move((cursor.x, cursor.y), pressed)
     }) else {
         return;
     };
 
     match update {
         DragUpdate::Move(target) => {
-            if move_window(hwnd, target, size) {
-                let _ = with_state_mut(hwnd, |state| {
-                    state.position = target;
-                    // 拖动过程中同步中心点：松手时状态机拿到的位置才是最后的落点。
-                    state
-                        .machine
-                        .handle(BallEvent::Dragged { position: target });
-                });
+            // 首次越过阈值且仍贴边：脱锚，回到自由球形态，后续完全跟手。
+            let undock =
+                with_state(hwnd, |state| state.machine.anchor().is_some()).unwrap_or(false);
+            let _ = with_state_mut(hwnd, |state| {
+                if undock {
+                    state.machine.handle(BallEvent::DragStarted);
+                    state.transition = None;
+                }
+                state.position = target;
+                state.frame.rect =
+                    PhysicalRect::new(target.x, target.y, state.base_size, state.base_size);
+                state.frame.radii = CornerRadii::capsule(state.base_size as f32 / 2.0);
+                state.frame.scale = DRAG_SCALE;
+                state.frame.icon_alpha = 1.0;
+                state.frame.icon_scale = 1.0;
+                state.frame.grip_alpha = 0.0;
+                state
+                    .machine
+                    .handle(BallEvent::Dragged { position: target });
+            });
+            if undock {
+                // SAFETY: 与 SetTimer(TIMER_ANIM) 成对；拖动期间不需要逐帧插值。
+                unsafe {
+                    let _ = KillTimer(Some(hwnd), TIMER_ANIM);
+                }
             }
+            render_current(hwnd);
         }
         DragUpdate::Cancelled => {
             debug!("floating ball drag cancelled: left button released without WM_LBUTTONUP");
             release_capture();
+            let target = with_state(hwnd, |state| {
+                let mut frame = frame_for(state);
+                frame.scale = 1.0;
+                frame
+            });
+            if let Some(target) = target {
+                start_transition(hwnd, target, SCALE_MS, Curve::Spring);
+            }
         }
         DragUpdate::Ignore | DragUpdate::Pending => {}
     }
@@ -1064,6 +1640,14 @@ fn cancel_drag(hwnd: HWND) {
             y = position.y,
             "floating ball lost the mouse capture mid-drag; ball stays where it is"
         );
+        let target = with_state(hwnd, |state| {
+            let mut frame = frame_for(state);
+            frame.scale = 1.0;
+            frame
+        });
+        if let Some(target) = target {
+            start_transition(hwnd, target, SCALE_MS, Curve::Spring);
+        }
     } else {
         // 正常松开（`release_ball` 里的 ReleaseCapture）也会走到这里，此时拖动已结束。
         trace!("floating ball lost the mouse capture; no drag to cancel");
@@ -1086,6 +1670,15 @@ fn release_ball(hwnd: HWND) {
     release_capture();
 
     if !moved {
+        // 单击：缩放回常态（随后抓帧会隐藏球）。
+        let target = with_state(hwnd, |state| {
+            let mut frame = frame_for(state);
+            frame.scale = 1.0;
+            frame
+        });
+        if let Some(target) = target {
+            start_transition(hwnd, target, SCALE_MS, Curve::Spring);
+        }
         send_event(
             &events,
             ShellEvent::CaptureRequest(CaptureTrigger::BallClick),
@@ -1102,9 +1695,12 @@ fn release_ball(hwnd: HWND) {
     };
 
     let clamped = clamp_ball_position(&displays, position, size);
-    if clamped != position && move_window(hwnd, clamped, size) {
+    if clamped != position {
         position = clamped;
-        let _ = with_state_mut(hwnd, |state| state.position = clamped);
+        let _ = with_state_mut(hwnd, |state| {
+            state.position = clamped;
+            state.frame.rect = PhysicalRect::new(clamped.x, clamped.y, size, size);
+        });
     }
 
     let center = PhysicalPoint {
@@ -1257,6 +1853,17 @@ fn on_timer(hwnd: HWND, timer_id: usize) {
                 },
             );
         }
+        TIMER_ANIM => advance_animation(hwnd),
+        TIMER_FEEDBACK => {
+            let expired = with_state(hwnd, |state| {
+                state.feedback != FeedbackState::Idle
+                    && state.feedback_until.is_some_and(|until| now >= until)
+            })
+            .unwrap_or(false);
+            if expired {
+                reset_feedback(hwnd);
+            }
+        }
         _ => {}
     }
 }
@@ -1284,103 +1891,55 @@ fn on_mouse_move(hwnd: HWND) {
     advance(hwnd, BallEvent::CursorEnter { now_ms: now });
 }
 
-/// 拖入时球体放大倍数（design §9.1）。
-const DROP_SCALE: f32 = 1.15;
-
-/// 应用 OLE 拖入视觉：可接受时放大到 1.15× 并绘制动作文案，拒绝时显示灰色提示。
+/// 应用 OLE 拖入视觉：放大 + 光环 + 气泡，离开后还原。
 ///
-/// 由 `WM_BALL_DROP_VISUAL` 触发；视觉状态来自共享的 [`DropVisual`]，本函数只读快照，
-/// 不持有互斥锁调用窗口 API。
-///
-/// C1：缩放锚点是**当前**窗口中心（`state.position` + `state.size`），不是启动时冻结的
-/// 位置——用户拖动过球之后，每次 DragEnter 都不能把球移回初始位置。
+/// 视觉状态来自共享的 [`DropVisual`]，本函数只读快照（不持锁调用窗口 API），
+/// 位置/尺寸由视觉帧驱动，不再改写 `state.position` / `state.size`。
 fn refresh_drop_visual(hwnd: HWND) {
-    let Some((visual, base_size, size, position)) = with_state(hwnd, |state| {
-        let visual = state
+    let active = with_state(hwnd, |state| {
+        state
             .drop_visual
             .lock()
-            .map(|slot| slot.clone())
-            .unwrap_or_default();
-        (visual, state.base_size, state.size, state.position)
+            .map(|slot| slot.active)
+            .unwrap_or(false)
+    })
+    .unwrap_or(false);
+
+    // 收起状态下开始拖入：先弹性展开，与原型「拖拽开始即弹出迎接」一致。
+    if active
+        && with_state(hwnd, |state| state.machine.visual() == BallVisual::Strip).unwrap_or(false)
+    {
+        let now = now_ms(hwnd);
+        advance(hwnd, BallEvent::CursorEnter { now_ms: now });
+    }
+    let _ = with_state_mut(hwnd, |state| state.drop_active = active);
+
+    let Some(target) = with_state(hwnd, |state| {
+        let base = frame_for(state);
+        if active {
+            VisualFrame {
+                scale: DROP_SCALE,
+                halo_alpha: 1.0,
+                tooltip_alpha: 1.0,
+                ..base
+            }
+        } else {
+            VisualFrame {
+                scale: if state.drag.is_active() {
+                    DRAG_SCALE
+                } else {
+                    1.0
+                },
+                halo_alpha: 0.0,
+                tooltip_alpha: 0.0,
+                ..base
+            }
+        }
     }) else {
         return;
     };
-
-    let (target_size, target_position) =
-        drop_visual_bounds(position, size, base_size, visual.active);
-    let label = if visual.active && !visual.label.is_empty() {
-        Some(visual.label.as_str())
-    } else {
-        None
-    };
-
-    if let Err(err) = render_ball(
-        hwnd,
-        PhysicalRect::new(
-            target_position.x,
-            target_position.y,
-            target_size,
-            target_size,
-        ),
-        label,
-        visual.accepted,
-    ) {
-        warn!(error = %err, "failed to render the drop visual");
-        return;
-    }
-    let _ = with_state_mut(hwnd, |state| {
-        state.size = target_size;
-        state.position = target_position;
-    });
-}
-
-/// 拖入视觉的目标尺寸与左上角（纯函数，便于回归测试）。
-///
-/// 以 `position` + `size`（当前显示的窗口框）的中心为锚点：激活时放大到
-/// `base_size × DROP_SCALE`，未激活时还原到 `base_size`。两种情形都不改变球的中心，
-/// 也不依赖任何「启动位置」，因此拖动过的球不会被拖入事件拉回原位。
-fn drop_visual_bounds(
-    position: PhysicalPoint,
-    size: u32,
-    base_size: u32,
-    active: bool,
-) -> (u32, PhysicalPoint) {
-    let target_size = if active {
-        ((base_size as f32 * DROP_SCALE).round() as u32).max(1)
-    } else {
-        base_size
-    };
-    let center = PhysicalPoint {
-        x: position.x + size as i32 / 2,
-        y: position.y + size as i32 / 2,
-    };
-    let target_position = PhysicalPoint {
-        x: center.x - target_size as i32 / 2,
-        y: center.y - target_size as i32 / 2,
-    };
-    (target_size, target_position)
-}
-
-/// 移动窗口（不改变尺寸/Z 序、不激活）；返回是否成功。
-fn move_window(hwnd: HWND, position: PhysicalPoint, size: u32) -> bool {
-    // SAFETY: `hwnd` 属于本线程；忽略 Z 序与尺寸。
-    match unsafe {
-        SetWindowPos(
-            hwnd,
-            None,
-            position.x,
-            position.y,
-            size as i32,
-            size as i32,
-            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-        )
-    } {
-        Ok(()) => true,
-        Err(err) => {
-            warn!(error = %err, "failed to move the floating ball window");
-            false
-        }
-    }
+    start_transition(hwnd, target, SCALE_MS, Curve::Spring);
+    render_current(hwnd);
 }
 
 fn register_ball_class(instance: HINSTANCE) -> Result<bool, AppError> {
@@ -1456,15 +2015,14 @@ fn create_ball_window(
     })
 }
 
-/// 画一次球并用 `UpdateLayeredWindow` 呈现；绘制资源在返回前全部释放。
-///
-/// `label` 非空时在球内绘制拖放动作文案（如「存为图片」）；`accepted == false`
-/// 时球体转灰，提示这次拖放不会被接受。
+/// 画一次悬浮球并用 `UpdateLayeredWindow` 呈现；绘制资源在返回前全部释放。
 fn render_ball(
     hwnd: HWND,
     rect: PhysicalRect,
-    label: Option<&str>,
-    accepted: bool,
+    frame: &VisualFrame,
+    payload: &PaintPayload,
+    theme: Theme,
+    metrics: BallMetrics,
 ) -> Result<(), AppError> {
     // SAFETY: `GetDC(None)` 返回屏幕 DC；失败时为空句柄。
     let screen = unsafe { GetDC(None) };
@@ -1474,7 +2032,7 @@ fn render_ball(
             WinError::from_thread()
         )));
     }
-    let result = render_with_screen(hwnd, rect, screen, label, accepted);
+    let result = render_with_screen(hwnd, rect, screen, frame, payload, theme, metrics);
     // SAFETY: 与 `GetDC` 成对调用。
     unsafe { ReleaseDC(None, screen) };
     result
@@ -1484,8 +2042,10 @@ fn render_with_screen(
     hwnd: HWND,
     rect: PhysicalRect,
     screen: HDC,
-    label: Option<&str>,
-    accepted: bool,
+    frame: &VisualFrame,
+    payload: &PaintPayload,
+    theme: Theme,
+    metrics: BallMetrics,
 ) -> Result<(), AppError> {
     // SAFETY: `screen` 有效；失败时为空句柄。
     let memory = unsafe { CreateCompatibleDC(Some(screen)) };
@@ -1563,7 +2123,7 @@ fn render_with_screen(
         )));
     }
 
-    let rendered = draw_ball(bits, rect, label, accepted)
+    let rendered = draw_ball(bits, rect, frame, payload, theme, metrics)
         .and_then(|()| present_layered(hwnd, screen, memory, rect));
 
     // SAFETY: 释放顺序为「恢复原对象 → 删除位图 → 删除内存 DC」。
@@ -1575,14 +2135,14 @@ fn render_with_screen(
     rendered
 }
 
-/// 用 GDI+ 在 DIB 上画圆底、阴影与简单镜头图标（预乘 alpha，透明背景）。
-///
-/// 有 `label` 时改为绘制动作文案（拖放反馈）；`accepted == false` 用灰色球体。
+/// 用 GDI+ 在 DIB 上绘制球体/胶囊、图标与反馈（预乘 alpha，透明背景）。
 fn draw_ball(
     bits: *mut c_void,
     rect: PhysicalRect,
-    label: Option<&str>,
-    accepted: bool,
+    frame: &VisualFrame,
+    payload: &PaintPayload,
+    theme: Theme,
+    metrics: BallMetrics,
 ) -> Result<(), AppError> {
     let width = rect.width.max(1) as i32;
     let height = rect.height.max(1) as i32;
@@ -1607,128 +2167,429 @@ fn draw_ball(
         )));
     }
 
-    let painted = paint_ball(bitmap, width, height, label, accepted);
+    let painted = paint_ball(bitmap, rect, frame, payload, theme, metrics);
     // SAFETY: 位图由上面的调用创建，图形上下文已在 `paint_ball` 内释放。
     unsafe { GdipDisposeImage(bitmap.cast::<GpImage>()) };
     painted
 }
 
-/// 实际的绘制步骤；GDI+ 对象都在本函数内创建并释放。
-fn paint_ball(
-    bitmap: *mut GpBitmap,
-    width: i32,
-    height: i32,
-    label: Option<&str>,
-    accepted: bool,
-) -> Result<(), AppError> {
-    let mut graphics: *mut GpGraphics = null_mut();
-    // SAFETY: `bitmap` 有效且未被释放。
-    let status = unsafe { GdipGetImageGraphicsContext(bitmap.cast::<GpImage>(), &mut graphics) };
-    if status.0 != 0 || graphics.is_null() {
-        return Err(AppError::Internal(format!(
-            "GdipGetImageGraphicsContext failed: status {}",
-            status.0
-        )));
+fn scaled_rect(rect: PhysicalRect, scale: f32) -> PhysicalRect {
+    if (scale - 1.0).abs() < f32::EPSILON {
+        return rect;
     }
-
-    // 方形 = 球；薄边 = 长条。用宽高比判定形态，渲染层不必知道状态机。
-    let vertical_strip = width < height
-        && u32::try_from(width).unwrap_or(0) <= STRIP_THICKNESS + STRIP_HIT_PADDING * 2;
-    let horizontal_strip = height < width
-        && u32::try_from(height).unwrap_or(0) <= STRIP_THICKNESS + STRIP_HIT_PADDING * 2;
-    let edge = width.min(height) as f32;
-    // 拖入反馈：拒绝时球体转灰；接受时保持品牌蓝（放大由窗口尺寸负责）。
-    let (body, border) = if accepted {
-        (argb(255, 59, 130, 246), argb(255, 37, 99, 235))
-    } else {
-        (argb(255, 107, 114, 128), argb(255, 75, 85, 99))
-    };
-
-    // SAFETY: `graphics` 有效；每个 GDI+ 对象都在使用后立即释放。
-    unsafe {
-        // 清成全透明，否则 UpdateLayeredWindow 会把未初始化像素算进 alpha。
-        GdipGraphicsClear(graphics, argb(0, 0, 0, 0));
-        GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias);
-
-        if vertical_strip || horizontal_strip {
-            // 长条：5px 厚 + 1px 描边，画在窗口留白之内（留白只用于命中）。
-            let pad = STRIP_HIT_PADDING as f32;
-            let thickness = STRIP_THICKNESS as f32;
-            let (x, y, w, h) = if vertical_strip {
-                (pad, pad, thickness, height as f32 - pad * 2.0)
-            } else {
-                (pad, pad, width as f32 - pad * 2.0, thickness)
-            };
-            fill_rect(graphics, body, x, y, w, h);
-            stroke_rect(graphics, border, 1.0, x, y, w, h);
-            GdipDeleteGraphics(graphics);
-            return Ok(());
-        }
-
-        // 阴影：略微下移的半透明黑圆。
-        fill_ellipse(
-            graphics,
-            argb(70, 0, 0, 0),
-            0.10 * edge,
-            0.16 * edge,
-            0.80 * edge,
-            0.80 * edge,
-        );
-        // 球体：品牌蓝圆底（拖入反馈可换成灰色）。
-        fill_ellipse(
-            graphics,
-            body,
-            0.08 * edge,
-            0.06 * edge,
-            0.84 * edge,
-            0.84 * edge,
-        );
-        // 描边：更深的同色系，界定边界。
-        stroke_ellipse(
-            graphics,
-            border,
-            0.05 * edge,
-            0.08 * edge,
-            0.06 * edge,
-            0.84 * edge,
-            0.84 * edge,
-        );
-
-        match label {
-            Some(label) => draw_label(graphics, edge, label),
-            None => {
-                // 图标：白色镜头环 + 中心点（阶段 01 的占位图形）。
-                stroke_ellipse(
-                    graphics,
-                    argb(255, 255, 255, 255),
-                    0.075 * edge,
-                    0.30 * edge,
-                    0.28 * edge,
-                    0.40 * edge,
-                    0.40 * edge,
-                );
-                fill_ellipse(
-                    graphics,
-                    argb(255, 255, 255, 255),
-                    0.45 * edge,
-                    0.43 * edge,
-                    0.10 * edge,
-                    0.10 * edge,
-                );
-            }
-        }
-
-        GdipDeleteGraphics(graphics);
-    }
-    Ok(())
+    let width = (rect.width as f32 * scale).round().max(1.0) as u32;
+    let height = (rect.height as f32 * scale).round().max(1.0) as u32;
+    PhysicalRect::new(
+        rect.x + (rect.width as i32 - width as i32) / 2,
+        rect.y + (rect.height as i32 - height as i32) / 2,
+        width,
+        height,
+    )
 }
 
-/// 在球体中央绘制拖放动作文案（白色、居中、自动换行）。
-///
-/// 任一步 GDI+ 创建失败都静默跳过：文案只是反馈，不能影响拖放本身。
-fn draw_label(graphics: *mut GpGraphics, edge: f32, label: &str) {
-    let family_name = wide("Microsoft YaHei");
-    let text = wide(label);
+fn with_alpha(color: u32, alpha: f32) -> u32 {
+    let alpha = ((color >> 24) as f32 * alpha.clamp(0.0, 1.0)) as u8;
+    (color & 0x00FF_FFFF) | (u32::from(alpha) << 24)
+}
+
+unsafe fn rounded_rect_path(
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    radii: CornerRadii,
+) -> *mut GpPath {
+    let mut path: *mut GpPath = null_mut();
+    // SAFETY: 输出指针指向栈上；所有 GDI+ 调用在同一线程。
+    if unsafe { GdipCreatePath(FillModeAlternate, &mut path) }.0 != 0 || path.is_null() {
+        return null_mut();
+    }
+    let limit = width.min(height) / 2.0;
+    let tl = radii.tl.clamp(0.0, limit);
+    let tr = radii.tr.clamp(0.0, limit);
+    let br = radii.br.clamp(0.0, limit);
+    let bl = radii.bl.clamp(0.0, limit);
+
+    // SAFETY: `path` 由上面的调用创建；失败时仍可安全调用后续 Path API。
+    unsafe {
+        if tl > 0.01 {
+            GdipAddPathArc(path, x, y, tl * 2.0, tl * 2.0, 180.0, 90.0);
+        }
+        GdipAddPathLine(path, x + tl, y, x + width - tr, y);
+        if tr > 0.01 {
+            GdipAddPathArc(
+                path,
+                x + width - tr * 2.0,
+                y,
+                tr * 2.0,
+                tr * 2.0,
+                270.0,
+                90.0,
+            );
+        }
+        GdipAddPathLine(path, x + width, y + tr, x + width, y + height - br);
+        if br > 0.01 {
+            GdipAddPathArc(
+                path,
+                x + width - br * 2.0,
+                y + height - br * 2.0,
+                br * 2.0,
+                br * 2.0,
+                0.0,
+                90.0,
+            );
+        }
+        GdipAddPathLine(path, x + width - br, y + height, x + bl, y + height);
+        if bl > 0.01 {
+            GdipAddPathArc(
+                path,
+                x,
+                y + height - bl * 2.0,
+                bl * 2.0,
+                bl * 2.0,
+                90.0,
+                90.0,
+            );
+        }
+        GdipAddPathLine(path, x, y + height - bl, x, y + tl);
+        GdipClosePathFigure(path);
+    }
+    path
+}
+
+fn fill_path(graphics: *mut GpGraphics, color: u32, path: *mut GpPath) {
+    let mut brush: *mut GpSolidFill = null_mut();
+    // SAFETY: `graphics`/`path` 有效；刷子使用后立即删除。
+    unsafe {
+        if GdipCreateSolidFill(color, &mut brush).0 == 0 && !brush.is_null() {
+            GdipFillPath(graphics, brush.cast::<GpBrush>(), path);
+            GdipDeleteBrush(brush.cast::<GpBrush>());
+        }
+    }
+}
+
+fn stroke_path(graphics: *mut GpGraphics, color: u32, width: f32, path: *mut GpPath) {
+    let mut pen: *mut GpPen = null_mut();
+    // SAFETY: `graphics`/`path` 有效；画笔使用后立即删除。
+    unsafe {
+        if GdipCreatePen1(color, width, UnitPixel, &mut pen).0 == 0 && !pen.is_null() {
+            GdipDrawPath(graphics, pen, path);
+            GdipDeletePen(pen);
+        }
+    }
+}
+
+fn stroke_line(
+    graphics: *mut GpGraphics,
+    color: u32,
+    width: f32,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+) {
+    let mut pen: *mut GpPen = null_mut();
+    // SAFETY: `graphics` 有效；画笔使用后立即删除。
+    unsafe {
+        if GdipCreatePen1(color, width, UnitPixel, &mut pen).0 != 0 || pen.is_null() {
+            return;
+        }
+        GdipSetPenLineCap197819(pen, LineCapRound, LineCapRound, DashCapFlat);
+        GdipDrawLine(graphics, pen, x1, y1, x2, y2);
+        GdipDeletePen(pen);
+    }
+}
+
+fn stroke_arc(
+    graphics: *mut GpGraphics,
+    color: u32,
+    width: f32,
+    center: (f32, f32),
+    radius: f32,
+    start_deg: f32,
+    sweep_deg: f32,
+) {
+    let mut pen: *mut GpPen = null_mut();
+    // SAFETY: `graphics` 有效；画笔使用后立即删除。
+    unsafe {
+        if GdipCreatePen1(color, width, UnitPixel, &mut pen).0 != 0 || pen.is_null() {
+            return;
+        }
+        GdipSetPenLineCap197819(pen, LineCapRound, LineCapRound, DashCapFlat);
+        GdipDrawArc(
+            graphics,
+            pen,
+            center.0 - radius,
+            center.1 - radius,
+            radius * 2.0,
+            radius * 2.0,
+            start_deg,
+            sweep_deg,
+        );
+        GdipDeletePen(pen);
+    }
+}
+
+fn draw_icon(
+    graphics: *mut GpGraphics,
+    color: u32,
+    kind: IconKind,
+    cx: f32,
+    cy: f32,
+    extent: f32,
+    alpha: f32,
+) {
+    let color = with_alpha(color, alpha);
+    let stroke = (extent * 0.085).max(1.4);
+    match kind {
+        IconKind::Default => {
+            let side = extent * 0.92;
+            // SAFETY: 路径在本函数内创建并释放。
+            unsafe {
+                let path = rounded_rect_path(
+                    cx - side / 2.0,
+                    cy - side / 2.0,
+                    side,
+                    side,
+                    CornerRadii::capsule(side * 0.28),
+                );
+                if !path.is_null() {
+                    stroke_path(graphics, color, stroke, path);
+                    GdipDeletePath(path);
+                }
+            }
+            stroke_line(
+                graphics,
+                color,
+                stroke,
+                cx,
+                cy - side * 0.26,
+                cx,
+                cy + side * 0.26,
+            );
+            stroke_line(
+                graphics,
+                color,
+                stroke,
+                cx - side * 0.26,
+                cy,
+                cx + side * 0.26,
+                cy,
+            );
+        }
+        IconKind::Drop => {
+            stroke_line(
+                graphics,
+                color,
+                stroke,
+                cx,
+                cy - extent * 0.44,
+                cx,
+                cy + extent * 0.26,
+            );
+            stroke_line(
+                graphics,
+                color,
+                stroke,
+                cx - extent * 0.26,
+                cy + extent * 0.02,
+                cx,
+                cy + extent * 0.28,
+            );
+            stroke_line(
+                graphics,
+                color,
+                stroke,
+                cx + extent * 0.26,
+                cy + extent * 0.02,
+                cx,
+                cy + extent * 0.28,
+            );
+            stroke_line(
+                graphics,
+                color,
+                stroke,
+                cx - extent * 0.4,
+                cy + extent * 0.46,
+                cx + extent * 0.4,
+                cy + extent * 0.46,
+            );
+        }
+        IconKind::Check => {
+            stroke_line(
+                graphics,
+                color,
+                stroke,
+                cx - extent * 0.42,
+                cy,
+                cx - extent * 0.1,
+                cy + extent * 0.3,
+            );
+            stroke_line(
+                graphics,
+                color,
+                stroke,
+                cx - extent * 0.1,
+                cy + extent * 0.3,
+                cx + extent * 0.46,
+                cy - extent * 0.3,
+            );
+        }
+    }
+}
+
+fn draw_grip(
+    graphics: *mut GpGraphics,
+    color: u32,
+    frame: &VisualFrame,
+    window: PhysicalRect,
+    metrics: BallMetrics,
+) {
+    let factor = metrics.factor();
+    let visual = scaled_rect(frame.rect, frame.scale);
+    let cx = (visual.x - window.x) as f32 + visual.width as f32 / 2.0;
+    let cy = (visual.y - window.y) as f32 + visual.height as f32 / 2.0;
+    let length = (visual.width.max(visual.height) as f32 * 0.39).max(6.0);
+    let alpha = with_alpha(color, 0.42 * frame.grip_alpha);
+    let stroke = (2.0 * factor).max(1.2);
+    if visual.height >= visual.width {
+        stroke_line(
+            graphics,
+            alpha,
+            stroke,
+            cx,
+            cy - length / 2.0,
+            cx,
+            cy + length / 2.0,
+        );
+    } else {
+        stroke_line(
+            graphics,
+            alpha,
+            stroke,
+            cx - length / 2.0,
+            cy,
+            cx + length / 2.0,
+            cy,
+        );
+    }
+}
+
+fn draw_ring(
+    graphics: *mut GpGraphics,
+    palette: &Palette,
+    payload: &PaintPayload,
+    frame: &VisualFrame,
+    window: PhysicalRect,
+    metrics: BallMetrics,
+) {
+    let factor = metrics.factor();
+    let visual = scaled_rect(frame.rect, frame.scale);
+    let diameter = visual.width.min(visual.height) as f32;
+    let cx = (visual.x - window.x) as f32 + visual.width as f32 / 2.0;
+    let cy = (visual.y - window.y) as f32 + visual.height as f32 / 2.0;
+    let radius = (diameter / 2.0 - 4.0 * factor).max(2.0);
+
+    stroke_arc(
+        graphics,
+        palette.ring_track,
+        2.0 * factor,
+        (cx, cy),
+        radius,
+        0.0,
+        359.9,
+    );
+
+    let color = if payload.failed {
+        argb(255, 107, 114, 128)
+    } else {
+        palette.icon
+    };
+    let rotation = payload.ring_rotation.to_degrees();
+    if let Some(progress) = payload.progress {
+        stroke_arc(
+            graphics,
+            color,
+            2.2 * factor,
+            (cx, cy),
+            radius,
+            -90.0,
+            (progress * 359.9).max(2.0),
+        );
+    } else if payload.indeterminate {
+        stroke_arc(
+            graphics,
+            color,
+            2.2 * factor,
+            (cx, cy),
+            radius,
+            -90.0 + rotation,
+            72.0,
+        );
+    }
+}
+
+fn draw_halo(
+    graphics: *mut GpGraphics,
+    color: u32,
+    payload: &PaintPayload,
+    frame: &VisualFrame,
+    window: PhysicalRect,
+    metrics: BallMetrics,
+) {
+    let factor = metrics.factor();
+    let visual = scaled_rect(frame.rect, frame.scale);
+    let diameter = visual.width.min(visual.height) as f32;
+    let cx = (visual.x - window.x) as f32 + visual.width as f32 / 2.0;
+    let cy = (visual.y - window.y) as f32 + visual.height as f32 / 2.0;
+    let radius = diameter / 2.0 + 10.0 * factor;
+    let alpha = frame.halo_alpha * payload.halo_breath;
+    let color = with_alpha(color, alpha);
+    let stroke = (1.5 * factor).max(1.0);
+    let base = payload.halo_rotation.to_degrees();
+    for index in 0..16 {
+        stroke_arc(
+            graphics,
+            color,
+            stroke,
+            (cx, cy),
+            radius,
+            base + index as f32 * 22.5,
+            11.0,
+        );
+    }
+}
+
+fn draw_tooltip(
+    graphics: *mut GpGraphics,
+    palette: &Palette,
+    metrics: BallMetrics,
+    window: PhysicalRect,
+    frame: &VisualFrame,
+    text: &str,
+    alpha: f32,
+) {
+    if alpha <= 0.01 {
+        return;
+    }
+    let visual = scaled_rect(frame.rect, frame.scale);
+    let rect = tooltip_rect(text.chars().count(), metrics, visual, window);
+    let x = (rect.x - window.x) as f32;
+    let y = (rect.y - window.y) as f32;
+    let width = rect.width as f32;
+    let height = rect.height as f32;
+
+    // SAFETY: 路径在本函数内创建并释放。
+    unsafe {
+        let path = rounded_rect_path(x, y, width, height, CornerRadii::capsule(height / 2.0));
+        if !path.is_null() {
+            fill_path(graphics, with_alpha(palette.tooltip_bg, alpha), path);
+            GdipDeletePath(path);
+        }
+    }
+
+    let family_name = wide("Microsoft YaHei UI");
+    let text = wide(text);
     let mut family: *mut GpFontFamily = null_mut();
     // SAFETY: 名称/文案以 NUL 结尾且在调用期间存活；每个对象使用后立即释放。
     unsafe {
@@ -1738,36 +2599,30 @@ fn draw_label(graphics: *mut GpGraphics, edge: f32, label: &str) {
         {
             return;
         }
-
-        let chars = label.chars().count() as f32;
-        let em = if chars <= 5.0 {
-            edge * 0.16
-        } else {
-            edge * 0.125
-        };
         let mut font: *mut GpFont = null_mut();
-        let mut format: *mut GpStringFormat = null_mut();
+        let em = (11.0 * metrics.factor()).max(9.0);
         if GdipCreateFont(family, em, 0, UnitPixel, &mut font).0 != 0 || font.is_null() {
             GdipDeleteFontFamily(family);
             return;
         }
+        let mut format: *mut GpStringFormat = null_mut();
         if GdipCreateStringFormat(0, 0, &mut format).0 != 0 || format.is_null() {
             GdipDeleteFont(font);
             GdipDeleteFontFamily(family);
             return;
         }
-
         GdipSetStringFormatAlign(format, StringAlignmentCenter);
         GdipSetStringFormatLineAlign(format, StringAlignmentCenter);
-        let inset = edge * 0.12;
         let layout = RectF {
-            X: inset,
-            Y: inset,
-            Width: edge - inset * 2.0,
-            Height: edge - inset * 2.0,
+            X: x,
+            Y: y,
+            Width: width,
+            Height: height,
         };
         let mut brush: *mut GpSolidFill = null_mut();
-        if GdipCreateSolidFill(argb(255, 255, 255, 255), &mut brush).0 == 0 && !brush.is_null() {
+        if GdipCreateSolidFill(with_alpha(palette.tooltip_text, alpha), &mut brush).0 == 0
+            && !brush.is_null()
+        {
             GdipDrawString(
                 graphics,
                 PCWSTR(text.as_ptr()),
@@ -1779,79 +2634,139 @@ fn draw_label(graphics: *mut GpGraphics, edge: f32, label: &str) {
             );
             GdipDeleteBrush(brush.cast::<GpBrush>());
         }
-
         GdipDeleteStringFormat(format);
         GdipDeleteFont(font);
         GdipDeleteFontFamily(family);
     }
 }
 
-/// 填充椭圆；创建刷子失败时跳过该图元（不阻断整体绘制）。
-fn fill_ellipse(graphics: *mut GpGraphics, color: u32, x: f32, y: f32, width: f32, height: f32) {
-    let mut brush: *mut GpSolidFill = null_mut();
-    // SAFETY: `graphics` 有效；刷子使用后立即删除。
-    unsafe {
-        if GdipCreateSolidFill(color, &mut brush).0 != 0 || brush.is_null() {
-            return;
-        }
-        GdipFillEllipse(graphics, brush.cast::<GpBrush>(), x, y, width, height);
-        GdipDeleteBrush(brush.cast::<GpBrush>());
+/// 实际的绘制步骤；GDI+ 对象都在本函数内创建并释放。
+fn paint_ball(
+    bitmap: *mut GpBitmap,
+    window: PhysicalRect,
+    frame: &VisualFrame,
+    payload: &PaintPayload,
+    theme: Theme,
+    metrics: BallMetrics,
+) -> Result<(), AppError> {
+    let mut graphics: *mut GpGraphics = null_mut();
+    // SAFETY: `bitmap` 有效且未被释放。
+    let status = unsafe { GdipGetImageGraphicsContext(bitmap.cast::<GpImage>(), &mut graphics) };
+    if status.0 != 0 || graphics.is_null() {
+        return Err(AppError::Internal(format!(
+            "GdipGetImageGraphicsContext failed: status {}",
+            status.0
+        )));
     }
-}
 
-/// 填充矩形（长条形态）；创建刷子失败时跳过该图元。
-fn fill_rect(graphics: *mut GpGraphics, color: u32, x: f32, y: f32, width: f32, height: f32) {
-    let mut brush: *mut GpSolidFill = null_mut();
-    // SAFETY: `graphics` 有效；刷子使用后立即删除。
-    unsafe {
-        if GdipCreateSolidFill(color, &mut brush).0 != 0 || brush.is_null() {
-            return;
-        }
-        GdipFillRectangle(graphics, brush.cast::<GpBrush>(), x, y, width, height);
-        GdipDeleteBrush(brush.cast::<GpBrush>());
-    }
-}
+    let palette = palette(theme, payload.accepted);
+    let visual = scaled_rect(frame.rect, frame.scale);
+    let x = (visual.x - window.x) as f32;
+    let y = (visual.y - window.y) as f32;
+    let w = visual.width as f32;
+    let h = visual.height as f32;
+    let factor = metrics.factor();
+    let radii = CornerRadii {
+        tl: frame.radii.tl * frame.scale,
+        tr: frame.radii.tr * frame.scale,
+        br: frame.radii.br * frame.scale,
+        bl: frame.radii.bl * frame.scale,
+    };
 
-/// 描边矩形（长条形态的 1px 边框）；创建画笔失败时跳过该图元。
-fn stroke_rect(
-    graphics: *mut GpGraphics,
-    color: u32,
-    stroke: f32,
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
-) {
-    let mut pen: *mut GpPen = null_mut();
-    // SAFETY: `graphics` 有效；画笔使用后立即删除。
+    // SAFETY: `graphics` 有效；每个 GDI+ 对象都在使用后立即释放。
     unsafe {
-        if GdipCreatePen1(color, stroke, UnitPixel, &mut pen).0 != 0 || pen.is_null() {
-            return;
-        }
-        GdipDrawRectangle(graphics, pen, x, y, width, height);
-        GdipDeletePen(pen);
-    }
-}
+        // 清成全透明，否则 UpdateLayeredWindow 会把未初始化像素算进 alpha。
+        GdipGraphicsClear(graphics, argb(0, 0, 0, 0));
+        GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias);
+        GdipSetTextRenderingHint(graphics, TextRenderingHintAntiAlias);
 
-/// 描边椭圆；创建画笔失败时跳过该图元。
-fn stroke_ellipse(
-    graphics: *mut GpGraphics,
-    color: u32,
-    stroke: f32,
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
-) {
-    let mut pen: *mut GpPen = null_mut();
-    // SAFETY: `graphics` 有效；画笔使用后立即删除。
-    unsafe {
-        if GdipCreatePen1(color, stroke, UnitPixel, &mut pen).0 != 0 || pen.is_null() {
-            return;
+        // 球体 / 胶囊条（不绘制投影）。
+        let body = argb(
+            (frame.opacity.clamp(0.0, 1.0) * 255.0) as u8,
+            palette.body.0,
+            palette.body.1,
+            palette.body.2,
+        );
+        let path = rounded_rect_path(x, y, w, h, radii);
+        if !path.is_null() {
+            fill_path(graphics, body, path);
+            stroke_path(graphics, palette.border, 1.0, path);
+            // 顶部内高光：上半圆弧，贴近描边内侧。
+            let inset = 1.5 * factor;
+            GdipDeletePath(path);
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            let radius = (w.min(h) / 2.0 - inset).max(1.0);
+            if w > h * 1.2 || h > w * 1.2 {
+                stroke_line(
+                    graphics,
+                    palette.highlight,
+                    1.0,
+                    x + radii.tl.max(2.0),
+                    y + inset,
+                    x + w - radii.tr.max(2.0),
+                    y + inset,
+                );
+            } else {
+                stroke_arc(
+                    graphics,
+                    palette.highlight,
+                    1.0,
+                    (cx, cy),
+                    radius,
+                    180.0,
+                    180.0,
+                );
+            }
         }
-        GdipDrawEllipse(graphics, pen, x, y, width, height);
-        GdipDeletePen(pen);
+
+        // 图标。
+        if frame.icon_alpha > 0.01 {
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            let extent = w.min(h) * 0.38 * frame.icon_scale;
+            draw_icon(
+                graphics,
+                palette.icon,
+                payload.icon,
+                cx,
+                cy,
+                extent,
+                frame.icon_alpha,
+            );
+        }
+
+        // 收起态指示线。
+        if frame.grip_alpha > 0.01 {
+            draw_grip(graphics, palette.icon, frame, window, metrics);
+        }
+
+        // 导入进度环 / 对勾背景。
+        if payload.progress.is_some() || payload.indeterminate {
+            draw_ring(graphics, &palette, payload, frame, window, metrics);
+        }
+
+        // 拖入光环（离开时按 halo_alpha 淡出）。
+        if frame.halo_alpha > 0.01 {
+            draw_halo(graphics, palette.icon, payload, frame, window, metrics);
+        }
+
+        // 气泡。
+        if let Some((text, _accepted)) = &payload.tooltip {
+            draw_tooltip(
+                graphics,
+                &palette,
+                metrics,
+                window,
+                frame,
+                text,
+                frame.tooltip_alpha,
+            );
+        }
+
+        GdipDeleteGraphics(graphics);
     }
+    Ok(())
 }
 
 /// ARGB（GDI+ `Color` 的 32 位表示）。
@@ -2230,54 +3145,20 @@ mod tests {
         assert!(!drag.is_active());
     }
 
-    /// C1 回归：用户把球拖到别处后，未激活的拖入视觉刷新不能改变窗口位置。
-    ///
-    /// 旧实现用启动时冻结的 `base_position` 做锚点，每次 DragEnter 都会把球移回初始位置。
+    /// 拖入/拖动缩放以当前视觉中心为锚，不会把球拉回启动位置。
     #[test]
-    fn drop_visual_refresh_keeps_the_current_position_when_inactive() {
-        let start = point(2000, 1000);
-        let moved = point(500, 400);
-        let base_size = 48;
+    fn scaled_rect_keeps_the_current_center() {
+        let original = PhysicalRect::new(500, 400, 48, 48);
+        let scaled = scaled_rect(original, DROP_SCALE);
 
-        // 未激活（DragLeave / Drop 之后的还原）：位置与尺寸都保持当前值。
-        assert_eq!(
-            drop_visual_bounds(moved, base_size, base_size, false),
-            (base_size, moved)
-        );
-        // 连续多次刷新也不漂移。
-        let (size, position) = drop_visual_bounds(moved, base_size, base_size, false);
-        assert_eq!(
-            drop_visual_bounds(position, size, base_size, false),
-            (base_size, moved)
-        );
-        // 与启动位置无关：锚点来自传入的当前位置。
-        assert_ne!(moved, start);
-    }
+        assert_eq!(scaled.width, 55);
+        assert_eq!(scaled.x + scaled.width as i32 / 2, 524);
+        assert_eq!(scaled.y + scaled.height as i32 / 2, 424);
+        assert!(scaled.x < original.x);
 
-    /// C1 回归：激活拖入视觉只围绕**当前**位置缩放，中心不变、左上角随放大内缩。
-    #[test]
-    fn drop_visual_scales_around_the_current_center() {
-        let base_size = 48;
-        let moved = point(500, 400);
-        let (scaled, scaled_position) = drop_visual_bounds(moved, base_size, base_size, true);
-
-        assert_eq!(scaled, (base_size as f32 * DROP_SCALE).round() as u32);
-        assert!(scaled > base_size);
-        // 中心不变：放大只让窗口向四周各扩一点。
-        assert_eq!(
-            scaled_position.x + scaled as i32 / 2,
-            moved.x + base_size as i32 / 2
-        );
-        assert_eq!(
-            scaled_position.y + scaled as i32 / 2,
-            moved.y + base_size as i32 / 2
-        );
-        assert!(scaled_position.x < moved.x && scaled_position.y < moved.y);
-
-        // 还原回到放大前的位置（往返无漂移）。
-        assert_eq!(
-            drop_visual_bounds(scaled_position, scaled, base_size, false),
-            (base_size, moved)
-        );
+        let restored = scaled_rect(scaled, 1.0 / DROP_SCALE);
+        assert_eq!(restored.width, 48);
+        assert_eq!(restored.x + restored.width as i32 / 2, 524);
+        assert_eq!(restored.y + restored.height as i32 / 2, 424);
     }
 }

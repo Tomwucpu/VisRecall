@@ -1307,10 +1307,7 @@ mod tests {
     }
 
     /// 同时提供 HGLOBAL 条目与 GDI 位图的源（浏览器「文字 + 图片」拖拽的形状）。
-    fn data_object_with(
-        entries: Vec<(u16, Vec<u8>)>,
-        gdi: Vec<(u16, HBITMAP)>,
-    ) -> IDataObject {
+    fn data_object_with(entries: Vec<(u16, Vec<u8>)>, gdi: Vec<(u16, HBITMAP)>) -> IDataObject {
         ComObject::new(TestDataObject { entries, gdi }).into_interface::<IDataObject>()
     }
 
@@ -1697,7 +1694,10 @@ mod tests {
     fn cf_bitmap_drop_is_decoded_as_an_image() {
         let data = gdi_data_object(CF_BITMAP.0, test_bitmap());
 
-        assert!(available_formats(&data).bitmap, "CF_BITMAP must be detected");
+        assert!(
+            available_formats(&data).bitmap,
+            "CF_BITMAP must be detected"
+        );
         match read_content(&data).unwrap() {
             DropContent::ImageDib { width, height, .. } => assert_eq!((width, height), (2, 1)),
             other => panic!("expected ImageDib, got {other:?}"),

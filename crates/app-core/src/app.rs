@@ -21,7 +21,8 @@ use visrecall_domain::{now_millis, AppError, ItemKind};
 use visrecall_library::paths::AppPaths;
 use visrecall_library::{AppConfig, Library, ModelConfig};
 use visrecall_shell::ball::{
-    spawn_ball_thread, BallConfig, BallHandle, BallSettings, BALL_SIZE_OPTIONS,
+    spawn_ball_thread, BallConfig, BallFeedback, BallFeedbackHandle, BallHandle, BallSettings,
+    BALL_MAX_SIZE, BALL_MIN_SIZE,
 };
 use visrecall_shell::hotkey::{spawn_hotkey_thread, HotkeyHandle, HotkeySpec};
 use visrecall_shell::overlay::{spawn_overlay_thread, OverlayHandle};
@@ -429,6 +430,7 @@ impl AppCore {
             },
             shell_tx.clone(),
         );
+        let ball_feedback = ball.feedback_handle();
         *self.lock_ball() = Some(ball);
         self.apply_ball_visibility(config.ball.enabled);
 
@@ -473,6 +475,7 @@ impl AppCore {
             overlay_rx,
             Arc::clone(&self.config),
             self.paths.config_file.clone(),
+            Some(ball_feedback),
         )?;
 
         *self.lock_runtime() = Some(CaptureRuntime {
@@ -1114,9 +1117,9 @@ impl AppCore {
             None => None,
         };
         if let Some(size) = patch.ball_size {
-            if !BALL_SIZE_OPTIONS.contains(&size) {
+            if !(BALL_MIN_SIZE..=BALL_MAX_SIZE).contains(&size) {
                 return Err(AppError::InvalidInput(format!(
-                    "ball size must be one of {BALL_SIZE_OPTIONS:?}"
+                    "ball size must be between {BALL_MIN_SIZE} and {BALL_MAX_SIZE}"
                 )));
             }
         }
@@ -1575,14 +1578,38 @@ enum CaptureStep {
 /// 捕获循环只调用本函数派发，不等待导入完成：链接标题抓取（最长 5s）与批量图片转码
 /// 都在工作线程里跑，捕获请求/覆盖层事件因此不会排队。失败不会让进程退出；`ingest`
 /// 自己会发 `capture_failed`，成功的素材在这里补 `item_created`。
-fn spawn_import(import: Arc<ImportFlow>, content: DropContent) -> Result<(), AppError> {
+fn spawn_import(
+    import: Arc<ImportFlow>,
+    content: DropContent,
+    feedback: Option<BallFeedbackHandle>,
+) -> Result<(), AppError> {
     let spawned = thread::Builder::new()
         .name("visrecall-import".into())
-        .spawn(move || match import.ingest(content) {
-            Ok(items) => import.emit_created(&items),
-            Err(err) => {
-                // `ingest` 已经发出 `capture_failed`，这里只记日志。
-                tracing::warn!(error = %err, "drop import failed");
+        .spawn(move || {
+            let mut report = |done: u32, total: u32| {
+                if let Some(handle) = &feedback {
+                    let progress = if total == 0 {
+                        None
+                    } else {
+                        Some(((done as f32 / total as f32) * 99.0).round() as u8)
+                    };
+                    handle.send(BallFeedback::Busy { progress });
+                }
+            };
+            match import.ingest_with_progress(content, &mut report) {
+                Ok(items) => {
+                    import.emit_created(&items);
+                    if let Some(handle) = &feedback {
+                        handle.send(BallFeedback::Success);
+                    }
+                }
+                Err(err) => {
+                    // `ingest` 已经发出 `capture_failed`，这里只记日志并复位悬浮球。
+                    tracing::warn!(error = %err, "drop import failed");
+                    if let Some(handle) = &feedback {
+                        handle.send(BallFeedback::Failure);
+                    }
+                }
             }
         });
 
@@ -1605,6 +1632,7 @@ pub fn handle_shell_event(
     gate: &AtomicU8,
     config: &Mutex<AppConfig>,
     config_file: &Path,
+    feedback: Option<&BallFeedbackHandle>,
     event: ShellEvent,
 ) {
     match event {
@@ -1640,19 +1668,31 @@ pub fn handle_shell_event(
                 tracing::warn!(error = %err, "drop rejected by the gate");
                 // 导入流程没有 `AppError` 通道，按错误码直传；与 `Busy` 的映射保持一致。
                 import.emit_failed("BUSY", &err.to_string());
+                if let Some(handle) = feedback {
+                    handle.send(BallFeedback::Failure);
+                }
                 return;
             }
             // I3：导入（落盘/转码/URL 标题 5s 超时）跑在独立的导入
             // 工作线程上，捕获/覆盖层事件不会排队。这里只负责派发。
             tracing::info!("drop content received");
-            if let Err(err) = spawn_import(Arc::clone(&import), content) {
+            if let Some(handle) = feedback {
+                handle.send(BallFeedback::Busy { progress: None });
+            }
+            if let Err(err) = spawn_import(Arc::clone(&import), content, feedback.cloned()) {
                 tracing::warn!(error = %err, "failed to start the drop import");
                 import.emit_failed("INTERNAL", &err.to_string());
+                if let Some(handle) = feedback {
+                    handle.send(BallFeedback::Failure);
+                }
             }
         }
         ShellEvent::DropRejected(message) => {
             tracing::warn!(message = %message, "drop rejected by the shell");
             import.emit_rejected(&message);
+            if let Some(handle) = feedback {
+                handle.send(BallFeedback::Failure);
+            }
         }
     }
 }
@@ -1667,6 +1707,8 @@ pub fn handle_shell_event(
 ///
 /// 每步都包在 [`guard_session`] 里：某一步 panic 时记录 error、恢复自有窗口
 /// （否则主窗口可能永久隐藏），然后继续等后续事件；通道断开的正常退出不受影响。
+// 捕获循环的输入由启动流程逐项拼装；再抽一层结构体只会增加间接层。
+#[allow(clippy::too_many_arguments)]
 fn spawn_capture_loop(
     coordinator: CaptureCoordinator,
     import: Arc<ImportFlow>,
@@ -1675,6 +1717,7 @@ fn spawn_capture_loop(
     overlay: Receiver<OverlayEvent>,
     config: Arc<Mutex<AppConfig>>,
     config_file: PathBuf,
+    feedback: Option<BallFeedbackHandle>,
 ) -> Result<(), AppError> {
     let spawned = thread::Builder::new()
         .name("visrecall-capture-loop".into())
@@ -1690,6 +1733,7 @@ fn spawn_capture_loop(
                                     &gate,
                                     &config,
                                     &config_file,
+                                    feedback.as_ref(),
                                     event,
                                 );
                                 CaptureStep::Continue
@@ -1897,14 +1941,14 @@ mod tests {
         assert_eq!(updated.ball.size, 56);
     }
 
-    /// `ball_size` 只接受三档（P2-R10）；其他值整体拒绝且不落盘。
+    /// `ball_size` 只接受 50..=150；越界值整体拒绝且不落盘。
     #[test]
-    fn update_settings_rejects_unsupported_ball_size() {
+    fn update_settings_enforces_the_ball_size_range() {
         let dir = tempfile::tempdir().unwrap();
         let (core, _sink) = open(dir.path());
         let before = core.config();
 
-        for size in [0, 1, 16, 41, 256, 4096] {
+        for size in [0, 1, 16, 49, 151, 256, 4096] {
             let err = core
                 .update_settings(SettingsPatchInput {
                     ball_size: Some(size),
@@ -1922,8 +1966,7 @@ mod tests {
         let reloaded = AppConfig::load_or_default(&core.paths().config_file);
         assert_eq!(reloaded.ball.size, before.ball.size);
 
-        // 三档都可用。
-        for size in BALL_SIZE_OPTIONS {
+        for size in [BALL_MIN_SIZE, 100, BALL_MAX_SIZE] {
             let updated = core
                 .update_settings(SettingsPatchInput {
                     ball_size: Some(size),
@@ -2158,6 +2201,7 @@ mod tests {
             overlay_rx,
             Arc::new(Mutex::new(AppConfig::default())),
             dir.path().join("config.json"),
+            None,
         )
         .expect("spawn capture loop");
 
@@ -2260,6 +2304,7 @@ mod tests {
                 plain: "后台线程导入".into(),
                 html: None,
             },
+            None,
         )
         .expect("spawn import worker");
         assert!(
@@ -2355,10 +2400,7 @@ mod tests {
         core.delete_item(&item.id).unwrap();
 
         assert!(library.get_item(&item.id).unwrap().is_none());
-        assert!(library
-            .external_asset_for_item(&item.id)
-            .unwrap()
-            .is_none());
+        assert!(library.external_asset_for_item(&item.id).unwrap().is_none());
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "外部原文");
 
         // 旧实现会在这里写入排除记录，导致重扫 total_count 为 0。

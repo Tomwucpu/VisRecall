@@ -372,6 +372,7 @@ fn capture_is_rejected_while_a_restart_is_pending() {
         &gate,
         &config,
         &fixture.config_file,
+        None,
         ShellEvent::CaptureRequest(CaptureTrigger::Hotkey),
     );
 
@@ -414,6 +415,7 @@ fn drop_is_rejected_while_a_restart_is_pending() {
         &gate,
         &config,
         &fixture.config_file,
+        None,
         ShellEvent::Drop(DropContent::Text {
             plain: "拖进来的文字".into(),
             html: None,

@@ -13,30 +13,23 @@
 
 use visrecall_domain::geometry::{PhysicalPoint, PhysicalRect};
 
-/// 长条形态的厚度（逻辑像素）。
-pub const STRIP_THICKNESS: u32 = 5;
+use crate::ball::anim::BallMetrics;
 
-/// 长条两侧的透明留白：窗口按「长条 + 两侧留白」创建，命中区由窗口矩形覆盖，
-/// 因此不需要 `SetWindowRgn`（它会同时裁掉绘制与命中）。
-pub const STRIP_HIT_PADDING: u32 = 6;
+/// 原型 56px 基准下的距边阈值；实际值由 [`BallMetrics`] 按尺寸缩放。
+pub const EDGE_SNAP_PX: i32 = 64;
 
-/// 距工作区边缘多少像素内松手视为「贴边」。
-pub const EDGE_SNAP_PX: i32 = 12;
-
-/// 松手后静置多久收成长条。
+/// 松手后静置多久收成胶囊条。
 pub const COLLAPSE_DELAY_MS: u64 = 800;
 
-/// 鼠标进入热区后多久展开。
-pub const EXPAND_DELAY_MS: u64 = 150;
-
 /// 鼠标离开后多久回缩。
-pub const RETRACT_DELAY_MS: u64 = 600;
+pub const RETRACT_DELAY_MS: u64 = 800;
 
 /// 全屏检测连续命中多少次才隐藏。
 pub const FULLSCREEN_TICKS: u8 = 3;
 
-/// 尺寸三档（逻辑像素）。
-pub const BALL_SIZE_OPTIONS: [u32; 3] = [40, 48, 56];
+/// 悬浮球尺寸范围（逻辑像素）；设置页滑动条与配置校验共用这一口径。
+pub const BALL_MIN_SIZE: u32 = 50;
+pub const BALL_MAX_SIZE: u32 = 150;
 
 /// 显示形态。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,6 +76,8 @@ impl Default for BallSettings {
 /// 输入事件。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BallEvent {
+    /// 越过拖动阈值：脱锚，回到自由球形态（点击不触发）。
+    DragStarted,
     /// 拖动中：球当前左上角。
     Dragged { position: PhysicalPoint },
     /// 松手：位置 + 所在显示器工作区。
@@ -128,7 +123,6 @@ pub struct BallStateMachine {
     hover: bool,
     session_hidden: bool,
     collapse_at: Option<u64>,
-    expand_at: Option<u64>,
     retract_at: Option<u64>,
     fullscreen_streak: u8,
 }
@@ -151,7 +145,6 @@ impl BallStateMachine {
             hover: false,
             session_hidden: false,
             collapse_at: None,
-            expand_at: None,
             retract_at: None,
             fullscreen_streak: 0,
         };
@@ -185,15 +178,16 @@ impl BallStateMachine {
         self.anchor
     }
 
-    /// 当前形态对应的窗口矩形（长条形态含两侧留白）。
+    /// 当前形态对应的视觉矩形（不含窗口阴影/命中留白）。
     pub fn current_rect(&self) -> PhysicalRect {
         match self.visual {
-            BallVisual::Ball | BallVisual::Hidden => self.ball_rect(),
             BallVisual::Strip => self.strip_rect(),
+            BallVisual::Ball if self.anchor.is_some() => self.docked_ball_rect(),
+            BallVisual::Ball | BallVisual::Hidden => self.ball_rect(),
         }
     }
 
-    /// 球形态的矩形（以中心点为锚）。
+    /// 自由球形态的矩形（以中心点为锚）。
     pub fn ball_rect(&self) -> PhysicalRect {
         let size = self.settings.size;
         PhysicalRect::new(
@@ -204,28 +198,60 @@ impl BallStateMachine {
         )
     }
 
-    /// 长条形态的窗口矩形：5px 厚 + 两侧各 6px 透明留白，靠边贴住工作区。
+    /// 贴边展开态：球心向内让出 12px，避免贴死在边缘。
+    pub fn docked_ball_rect(&self) -> PhysicalRect {
+        let metrics = BallMetrics::new(self.settings.size);
+        let size = metrics.size as i32;
+        let offset = metrics.edge_offset as i32;
+        let (x, y) = match self.anchor {
+            Some(BallEdge::Left) => (self.work_area.x + offset, self.center.y - size / 2),
+            Some(BallEdge::Right) => (
+                self.work_area.right() - offset - size,
+                self.center.y - size / 2,
+            ),
+            Some(BallEdge::Top) => (self.center.x - size / 2, self.work_area.y + offset),
+            Some(BallEdge::Bottom) => (
+                self.center.x - size / 2,
+                self.work_area.bottom() - offset - size,
+            ),
+            None => return self.ball_rect(),
+        };
+        // 工作区比球还小时，`max` 兜底保证 clamp 的上下界有序。
+        let max_x = (self.work_area.right() - size).max(self.work_area.x);
+        let max_y = (self.work_area.bottom() - size).max(self.work_area.y);
+        PhysicalRect::new(
+            x.clamp(self.work_area.x, max_x),
+            y.clamp(self.work_area.y, max_y),
+            metrics.size,
+            metrics.size,
+        )
+    }
+
+    /// 收起胶囊的视觉矩形：10px 厚、球径 + 6 长，贴住工作区边缘。
     pub fn strip_rect(&self) -> PhysicalRect {
-        let size = self.settings.size;
-        let padding = STRIP_HIT_PADDING;
+        let metrics = BallMetrics::new(self.settings.size);
+        let thickness = metrics.strip_thickness;
+        let length = metrics.strip_length;
         match self.anchor {
             Some(edge) if edge.is_vertical() => {
-                let width = STRIP_THICKNESS + padding * 2;
                 let x = match edge {
                     BallEdge::Left => self.work_area.x,
-                    _ => self.work_area.right() - width as i32,
+                    _ => self.work_area.right() - thickness as i32,
                 };
-                PhysicalRect::new(x, self.center.y - size as i32 / 2, width, size)
+                let max_y = (self.work_area.bottom() - length as i32).max(self.work_area.y);
+                let y = (self.center.y - length as i32 / 2).clamp(self.work_area.y, max_y);
+                PhysicalRect::new(x, y, thickness, length)
             }
             Some(edge) => {
-                let height = STRIP_THICKNESS + padding * 2;
                 let y = match edge {
                     BallEdge::Top => self.work_area.y,
-                    _ => self.work_area.bottom() - height as i32,
+                    _ => self.work_area.bottom() - thickness as i32,
                 };
-                PhysicalRect::new(self.center.x - size as i32 / 2, y, size, height)
+                let max_x = (self.work_area.right() - length as i32).max(self.work_area.x);
+                let x = (self.center.x - length as i32 / 2).clamp(self.work_area.x, max_x);
+                PhysicalRect::new(x, y, length, thickness)
             }
-            // 没有贴边锚点时不存在长条形态；退回球矩形保持几何自洽。
+            // 没有贴边锚点时不存在胶囊形态；退回球矩形保持几何自洽。
             None => self.ball_rect(),
         }
     }
@@ -233,6 +259,17 @@ impl BallStateMachine {
     /// 推进一个事件，返回需要执行的动作。
     pub fn handle(&mut self, event: BallEvent) -> Vec<BallAction> {
         match event {
+            BallEvent::DragStarted => {
+                self.anchor = None;
+                self.collapse_at = None;
+                self.retract_at = None;
+                if self.visual == BallVisual::Strip {
+                    self.visual = BallVisual::Ball;
+                }
+                vec![BallAction::Show {
+                    rect: self.current_rect(),
+                }]
+            }
             BallEvent::Dragged { position } => {
                 // 拖动中只更新中心点，不改形态（长条在拖动中不该出现）。
                 self.center = PhysicalPoint {
@@ -293,6 +330,8 @@ impl BallStateMachine {
         match edge {
             Some(edge) => {
                 self.anchor = Some(edge);
+                // 贴边后的中心点是内缩 12px 的展开位置，避免拖拽起点与绘制位置不一致。
+                self.center = self.docked_center(edge);
                 // 已有形态是长条时（贴边状态下重新拖到边上）直接从长条算起。
                 self.collapse_at = Some(now_ms + COLLAPSE_DELAY_MS);
                 actions.push(BallAction::ScheduleTimer {
@@ -315,22 +354,49 @@ impl BallStateMachine {
         actions
     }
 
-    fn on_cursor_enter(&mut self, now_ms: u64) -> Vec<BallAction> {
+    fn on_cursor_enter(&mut self, _now_ms: u64) -> Vec<BallAction> {
         self.hover = true;
         // 悬停会取消待执行的收起：用户显然还想用它。
         self.collapse_at = None;
         if self.visual == BallVisual::Strip {
-            self.expand_at = Some(now_ms + EXPAND_DELAY_MS);
-            return vec![BallAction::ScheduleTimer {
-                after_ms: EXPAND_DELAY_MS,
+            self.visual = BallVisual::Ball;
+            if let Some(edge) = self.anchor {
+                self.center = self.docked_center(edge);
+            }
+            return vec![BallAction::Show {
+                rect: self.current_rect(),
             }];
         }
         Vec::new()
     }
 
+    /// 贴边展开态的中心点：距工作区边缘 `edge_offset` 再加半个球。
+    fn docked_center(&self, edge: BallEdge) -> PhysicalPoint {
+        let metrics = BallMetrics::new(self.settings.size);
+        let half = metrics.size as i32 / 2;
+        let offset = metrics.edge_offset as i32;
+        match edge {
+            BallEdge::Left => PhysicalPoint {
+                x: self.work_area.x + offset + half,
+                y: self.center.y,
+            },
+            BallEdge::Right => PhysicalPoint {
+                x: self.work_area.right() - offset - half,
+                y: self.center.y,
+            },
+            BallEdge::Top => PhysicalPoint {
+                x: self.center.x,
+                y: self.work_area.y + offset + half,
+            },
+            BallEdge::Bottom => PhysicalPoint {
+                x: self.center.x,
+                y: self.work_area.bottom() - offset - half,
+            },
+        }
+    }
+
     fn on_cursor_leave(&mut self, now_ms: u64) -> Vec<BallAction> {
         self.hover = false;
-        self.expand_at = None;
         if self.visual == BallVisual::Ball && self.anchor.is_some() {
             self.retract_at = Some(now_ms + RETRACT_DELAY_MS);
             return vec![BallAction::ScheduleTimer {
@@ -379,20 +445,7 @@ impl BallStateMachine {
             }
         }
 
-        // 展开：长条被悬停 150ms。
-        if let Some(deadline) = self.expand_at {
-            if now_ms >= deadline {
-                self.expand_at = None;
-                if self.visual == BallVisual::Strip {
-                    self.visual = BallVisual::Ball;
-                    return vec![BallAction::Show {
-                        rect: self.ball_rect(),
-                    }];
-                }
-            }
-        }
-
-        // 回缩：鼠标离开 600ms 且仍贴边。
+        // 回缩：鼠标离开 800ms 且仍贴边。
         if let Some(deadline) = self.retract_at {
             if now_ms >= deadline {
                 self.retract_at = None;
@@ -471,21 +524,18 @@ impl BallStateMachine {
     }
 }
 
-/// 尺寸只接受三档；其他值夹到最近的档位（配置被手改坏时的兜底）。
+/// 尺寸夹到 50..=150（配置被手改坏时的兜底）。
 pub fn clamp_size(size: u32) -> u32 {
-    BALL_SIZE_OPTIONS
-        .iter()
-        .copied()
-        .min_by_key(|option| option.abs_diff(size))
-        .unwrap_or(48)
+    size.clamp(BALL_MIN_SIZE, BALL_MAX_SIZE)
 }
 
-/// 松手位置距哪条边在 [`EDGE_SNAP_PX`] 以内；同时贴近两条边时取更近的一条。
+/// 松手位置距哪条边在阈值以内；同时贴近两条边时取更近的一条。
 pub fn nearest_edge(
     position: PhysicalPoint,
     work_area: PhysicalRect,
     size: u32,
 ) -> Option<BallEdge> {
+    let threshold = BallMetrics::new(size).threshold;
     let left = position.x - work_area.x;
     let right = work_area.right() - (position.x + size as i32);
     let top = position.y - work_area.y;
@@ -501,7 +551,7 @@ pub fn nearest_edge(
     candidates
         .into_iter()
         // 距离为负说明球已经越出工作区（拖动中可能短暂出现），不算贴边。
-        .filter(|(_, distance)| (0..=EDGE_SNAP_PX).contains(distance))
+        .filter(|(_, distance)| (0..=threshold).contains(distance))
         .min_by_key(|(_, distance)| *distance)
         .map(|(edge, _)| edge)
 }

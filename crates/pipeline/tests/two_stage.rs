@@ -901,7 +901,11 @@ fn vlm_does_not_overwrite_user_edited_summary() {
 
     let insight = harness.library.insight_get(&item).unwrap().unwrap();
     assert_eq!(insight.summary.as_deref(), Some("我自己写的描述"));
-    assert_eq!(insight.summary_source, SummarySource::None, "来源标记不被改写");
+    assert_eq!(
+        insight.summary_source,
+        SummarySource::None,
+        "来源标记不被改写"
+    );
     assert!(insight.summary_user_edited);
     assert_eq!(
         insight.primary_color.as_deref(),

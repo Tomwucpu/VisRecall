@@ -81,10 +81,7 @@ impl ProviderRegistry {
     }
 }
 
-fn build_provider(
-    slot: &'static str,
-    entry: Option<&ModelEntry>,
-) -> Option<Arc<OpenAiCompatible>> {
+fn build_provider(slot: &'static str, entry: Option<&ModelEntry>) -> Option<Arc<OpenAiCompatible>> {
     let entry = entry?;
     if entry.validate().is_err() {
         tracing::warn!(slot, base_url = %entry.base_url, "model entry is invalid; ignored");

@@ -17,7 +17,10 @@ use crate::paths;
 /// 默认全局捕获快捷键。
 pub const DEFAULT_CAPTURE_HOTKEY: &str = "Ctrl+Shift+S";
 /// 悬浮球默认边长（逻辑像素）。
-pub const DEFAULT_BALL_SIZE: u32 = 48;
+pub const DEFAULT_BALL_SIZE: u32 = 56;
+/// 悬浮球尺寸范围；与壳层的 `BALL_MIN_SIZE` / `BALL_MAX_SIZE` 保持一致。
+pub const BALL_MIN_SIZE: u32 = 50;
+pub const BALL_MAX_SIZE: u32 = 150;
 /// 支持的通信协议标识（与原型 `PROTOS` 及 `Protocol::parse` 同口径）。
 pub const MODEL_PROTOCOLS: [&str; 4] = ["openai", "anthropic", "ollama", "rest"];
 
@@ -65,7 +68,8 @@ impl ModelConfig {
         }
         if self.entries.is_empty() {
             if let Some(entry) = self.primary.take() {
-                self.entries.push(ModelEntry::from_legacy("primary", "主模型", entry));
+                self.entries
+                    .push(ModelEntry::from_legacy("primary", "主模型", entry));
             }
             if let Some(entry) = self.backup.take() {
                 self.entries
@@ -278,6 +282,8 @@ impl AppConfig {
         match serde_json::from_str::<AppConfig>(&text) {
             Ok(mut config) => {
                 config.models.normalize();
+                // 旧配置可能保存了 40/48：加载时夹到新范围，不额外写回磁盘。
+                config.ball.size = config.ball.size.clamp(BALL_MIN_SIZE, BALL_MAX_SIZE);
                 config
             }
             Err(err) => {

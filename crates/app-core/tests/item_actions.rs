@@ -112,7 +112,9 @@ fn delete_items_is_idempotent_and_emits_one_batch_event() {
         .collect();
     assert_eq!(batch, vec![(3, 0)], "批量删除只发一次汇总事件");
     assert!(
-        !events.iter().any(|event| matches!(event, AppEvent::ItemDeleted(_))),
+        !events
+            .iter()
+            .any(|event| matches!(event, AppEvent::ItemDeleted(_))),
         "批量路径不应逐条发 item_deleted"
     );
 }

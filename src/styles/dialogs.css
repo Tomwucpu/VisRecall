@@ -225,6 +225,53 @@
   cursor: default;
 }
 
+.ball-size {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+input[type="range"].mono-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 120px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--line-2);
+  outline: none;
+  cursor: pointer;
+}
+
+input[type="range"].mono-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--ink);
+  border: 2px solid var(--surface);
+  box-shadow: none;
+  transition: transform 0.15s var(--ease);
+}
+
+input[type="range"].mono-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+
+input[type="range"].mono-slider:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.ball-size-value {
+  min-width: 3ch;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+
 .row-r .mini-btn:not(:disabled) {
   color: var(--ink-2);
   border: 1px solid var(--line);

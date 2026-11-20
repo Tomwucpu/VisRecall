@@ -76,22 +76,53 @@ impl ImportFlow {
     ///
     /// 单项失败只发 `capture_failed` 并继续；全部失败时返回第一个错误。
     pub fn ingest(&self, content: DropContent) -> Result<Vec<Item>, AppError> {
+        self.ingest_with_progress(content, &mut |_, _| {})
+    }
+
+    /// 同 [`Self::ingest`]，但按文件上报 `(done, total)`，用于悬浮球进度环。
+    ///
+    /// 多文件按处理完的顺序逐次上报；文本/链接/位图等单项导入上报 `(0, 1)`，
+    /// 成功后补 `(1, 1)`。失败不补完成值。
+    pub fn ingest_with_progress(
+        &self,
+        content: DropContent,
+        progress: &mut dyn FnMut(u32, u32),
+    ) -> Result<Vec<Item>, AppError> {
         let started = Instant::now();
         let source = self.foreground_source();
         let result = match content {
-            DropContent::Files(files) => self.import_files(&files, None, &source),
+            DropContent::Files(files) => self.import_files(&files, None, &source, progress),
             DropContent::FilesWithNote { files, note } => {
-                self.import_files(&files, Some(note.as_str()), &source)
+                self.import_files(&files, Some(note.as_str()), &source, progress)
             }
             DropContent::Text { plain, html } => {
-                self.import_text_snippet(&plain, html.as_deref(), &source)
+                progress(0, 1);
+                let result = self.import_text_snippet(&plain, html.as_deref(), &source);
+                if result.is_ok() {
+                    progress(1, 1);
+                }
+                result
             }
-            DropContent::Url { url } => self.import_link(&url, &source),
+            DropContent::Url { url } => {
+                progress(0, 1);
+                let result = self.import_link(&url, &source);
+                if result.is_ok() {
+                    progress(1, 1);
+                }
+                result
+            }
             DropContent::ImageDib {
                 width,
                 height,
                 bgra,
-            } => self.import_dib(width, height, bgra, &source),
+            } => {
+                progress(0, 1);
+                let result = self.import_dib(width, height, bgra, &source);
+                if result.is_ok() {
+                    progress(1, 1);
+                }
+                result
+            }
         };
         match &result {
             Ok(items) => info!(
@@ -226,6 +257,7 @@ impl ImportFlow {
         files: &[PathBuf],
         note: Option<&str>,
         source: &Source,
+        progress: &mut dyn FnMut(u32, u32),
     ) -> Result<Vec<Item>, AppError> {
         if files.is_empty() {
             return Err(self.fail(ImportFailure::invalid("empty drop: no files")));
@@ -239,7 +271,8 @@ impl ImportFlow {
 
         let mut items = Vec::new();
         let mut first_error: Option<AppError> = None;
-        for path in files {
+        let total = files.len() as u32;
+        for (index, path) in files.iter().enumerate() {
             let outcome = match FileKind::of(path) {
                 Ok(FileKind::Image) => self.import_image_file(path, source, note),
                 Ok(FileKind::Text) => self.import_text_file(path, source),
@@ -255,6 +288,7 @@ impl ImportFlow {
                     }
                 }
             }
+            progress(index as u32 + 1, total);
         }
 
         match (items.is_empty(), first_error) {
@@ -950,6 +984,26 @@ mod tests {
         assert!(fixture.sink.events().is_empty());
     }
 
+    #[test]
+    fn progress_reports_every_file() {
+        let fixture = fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        fs::write(&a, "alpha").unwrap();
+        fs::write(&b, "beta").unwrap();
+
+        let mut seen = Vec::new();
+        fixture
+            .flow
+            .ingest_with_progress(DropContent::Files(vec![a, b]), &mut |done, total| {
+                seen.push((done, total))
+            })
+            .unwrap();
+
+        assert_eq!(seen, vec![(1, 2), (2, 2)]);
+    }
+
     /// 拖入文本的云端解析由「上传云端解析」开关控制（默认关闭）。
     #[test]
     fn dropped_text_only_queues_cloud_analysis_when_enabled() {
@@ -1014,7 +1068,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            fixture.library.get_snippet_html(&items[0].id).unwrap().as_deref(),
+            fixture
+                .library
+                .get_snippet_html(&items[0].id)
+                .unwrap()
+                .as_deref(),
             Some(html)
         );
         // 检索用的正文仍然是纯文本，HTML 不参与索引。
@@ -1036,7 +1094,10 @@ mod tests {
                 html: None,
             })
             .unwrap();
-        assert_eq!(fixture.library.get_snippet_html(&items[0].id).unwrap(), None);
+        assert_eq!(
+            fixture.library.get_snippet_html(&items[0].id).unwrap(),
+            None
+        );
     }
 
     #[test]

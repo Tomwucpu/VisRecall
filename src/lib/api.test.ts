@@ -17,7 +17,7 @@ const commands = vi.hoisted(() => ({
     libraryPath: "D:\\VisRecall\\library",
     captureHotkey: "Ctrl+Shift+S",
     ballEnabled: true,
-    ballSize: 48,
+    ballSize: 56,
   })),
   getItemExt: vi.fn(async (id: string) => ({
     item: { id },

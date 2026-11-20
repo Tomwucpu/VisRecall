@@ -158,7 +158,10 @@ mod tests {
 
         let probe = first_opaque(&normal);
         assert!(alert.rgba()[probe] > alert.rgba()[probe + 2]);
-        assert_ne!(&alert.rgba()[probe..probe + 4], &normal.rgba()[probe..probe + 4]);
+        assert_ne!(
+            &alert.rgba()[probe..probe + 4],
+            &normal.rgba()[probe..probe + 4]
+        );
         assert_eq!(&alert.rgba()[0..4], &[0, 0, 0, 0]);
     }
 }

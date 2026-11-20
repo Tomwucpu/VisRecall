@@ -9,7 +9,7 @@ const commands = vi.hoisted(() => ({
     libraryPath: "D:\\VisRecall\\library",
     captureHotkey: "Ctrl+Shift+S",
     ballEnabled: true,
-    ballSize: 48,
+    ballSize: 56,
     ballEdgeHide: true,
     hideInFullscreen: true,
     capacityGb: 50,
@@ -21,7 +21,7 @@ const commands = vi.hoisted(() => ({
     libraryPath: "D:\\VisRecall\\library",
     captureHotkey: (patch.captureHotkey as string | undefined) ?? "Ctrl+Shift+S",
     ballEnabled: true,
-    ballSize: (patch.ballSize as number | undefined) ?? 48,
+    ballSize: (patch.ballSize as number | undefined) ?? 56,
     ballEdgeHide: true,
     hideInFullscreen: true,
     capacityGb: 50,
@@ -86,8 +86,8 @@ test("reflects the real hotkey and ball configuration read from settings", async
   expect(screen.getByText("Shift")).toBeInTheDocument();
   expect(screen.getByText("S")).toBeInTheDocument();
 
-  const ballList = screen.getByRole("group", { name: "悬浮球直径" });
-  expect(ballList).toHaveTextContent("48");
+  const ballSlider = screen.getByRole("slider", { name: "悬浮球直径" });
+  expect(ballSlider).toHaveValue("56");
   expect(screen.getByRole("switch", { name: "悬浮球显示" })).toHaveAttribute(
     "aria-checked",
     "true",
@@ -105,11 +105,11 @@ test("reflects the real hotkey and ball configuration read from settings", async
 test("changes the ball size through update_settings", async () => {
   renderDialog();
 
-  const size40 = await screen.findByRole("button", { name: "40" });
-  fireEvent.click(size40);
+  const slider = await screen.findByRole("slider", { name: "悬浮球直径" });
+  fireEvent.change(slider, { target: { value: "100" } });
 
   await waitFor(() => {
-    expect(commands.updateSettings).toHaveBeenCalledWith({ ballSize: 40 });
+    expect(commands.updateSettings).toHaveBeenCalledWith({ ballSize: 100 });
   });
 });
 

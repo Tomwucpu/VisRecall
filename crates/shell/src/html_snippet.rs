@@ -55,11 +55,7 @@ pub fn sanitize(raw: &str) -> Option<String> {
     }
 
     let base = source_url_of(raw).and_then(|url| url::Url::parse(url).ok());
-    let cleaned = remove_elements(
-        fragment,
-        &["script", "style", "iframe", "object"],
-        true,
-    );
+    let cleaned = remove_elements(fragment, &["script", "style", "iframe", "object"], true);
     let cleaned = remove_tags(&cleaned, &["link", "meta", "base", "embed"]);
     let html = absolutize(&cleaned, base.as_ref());
 
@@ -75,15 +71,13 @@ pub fn sanitize(raw: &str) -> Option<String> {
 /// 具体数值无关，可以先用占位值量出长度再回填。`<!--StartFragment-->` 标记同时保留：
 /// 只认标记的应用（部分 Office 版本）也能定位片段。
 pub fn cf_html_bytes(fragment: &str) -> Vec<u8> {
-    let header = |start_html: usize,
-                  end_html: usize,
-                  start_fragment: usize,
-                  end_fragment: usize| {
-        format!(
-            "Version:0.9\r\nStartHTML:{start_html:010}\r\nEndHTML:{end_html:010}\r\n\
+    let header =
+        |start_html: usize, end_html: usize, start_fragment: usize, end_fragment: usize| {
+            format!(
+                "Version:0.9\r\nStartHTML:{start_html:010}\r\nEndHTML:{end_html:010}\r\n\
              StartFragment:{start_fragment:010}\r\nEndFragment:{end_fragment:010}\r\n"
-        )
-    };
+            )
+        };
 
     const PREFIX: &str = "<html><body>\r\n<!--StartFragment-->";
     const SUFFIX: &str = "<!--EndFragment-->\r\n</body></html>";
@@ -309,9 +303,15 @@ mod tests {
         );
         let html = sanitize(&raw).unwrap();
         assert!(!html.contains("script"), "script must be removed: {html}");
-        assert!(!html.contains("alert"), "script body must be removed: {html}");
+        assert!(
+            !html.contains("alert"),
+            "script body must be removed: {html}"
+        );
         assert!(!html.contains("color:red"), "style must be removed: {html}");
-        assert!(html.contains(r#"<img src="https://example.com/a.png">"#), "{html}");
+        assert!(
+            html.contains(r#"<img src="https://example.com/a.png">"#),
+            "{html}"
+        );
     }
 
     #[test]
@@ -322,9 +322,17 @@ mod tests {
              SourceURL:https://example.com/post/1\r\n{body}"
         );
         let header_len = raw.len() - body.len();
-        let raw = raw.replacen("StartFragment:0000000000", &format!("StartFragment:{header_len:010}"), 1);
+        let raw = raw.replacen(
+            "StartFragment:0000000000",
+            &format!("StartFragment:{header_len:010}"),
+            1,
+        );
         let end = header_len + body.len();
-        let raw = raw.replacen("EndFragment:0000000000", &format!("EndFragment:{end:010}"), 1);
+        let raw = raw.replacen(
+            "EndFragment:0000000000",
+            &format!("EndFragment:{end:010}"),
+            1,
+        );
 
         let html = sanitize(&raw).unwrap();
         assert!(
@@ -344,7 +352,10 @@ mod tests {
         assert!(!html.contains("javascript:"), "{html}");
 
         let big = format!("<p>{}</p>", "x".repeat(MAX_FRAGMENT_BYTES));
-        assert!(sanitize(&payload(&big)).is_none(), "oversized snippet is dropped");
+        assert!(
+            sanitize(&payload(&big)).is_none(),
+            "oversized snippet is dropped"
+        );
     }
 
     #[test]

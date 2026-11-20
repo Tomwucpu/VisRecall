@@ -91,7 +91,9 @@ impl ItemStatus {
     /// 解析 SQL 值；未知值返回 `None`（IPC 层据此忽略非法输入，而不是整体报错）。
     pub fn parse(raw: &str) -> Option<Self> {
         let lower = raw.trim().to_ascii_lowercase();
-        Self::ALL.into_iter().find(|status| status.as_str() == lower)
+        Self::ALL
+            .into_iter()
+            .find(|status| status.as_str() == lower)
     }
 
     /// 中文展示名（筛选标签与 chips 用）；与前端 `statusLabel` 保持一致。

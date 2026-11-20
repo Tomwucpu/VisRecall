@@ -104,7 +104,10 @@ fn task_entries_page_and_discard_unfinished() {
         .update_import_task_entry(page[0].rowid, "failed", None, Some("IO"), Some("失败"))
         .unwrap();
     assert_eq!(
-        library.failed_import_task_entries(&task.id, 10).unwrap().len(),
+        library
+            .failed_import_task_entries(&task.id, 10)
+            .unwrap()
+            .len(),
         1
     );
     library.request_import_task_cancel(&task.id).unwrap();
@@ -151,7 +154,10 @@ fn deleting_an_import_task_drops_its_entries() {
 
     library.delete_import_task(&task.id).unwrap();
     assert!(library.get_import_task(&task.id).unwrap().is_none());
-    assert!(library.import_task_entry_paths(&task.id).unwrap().is_empty());
+    assert!(library
+        .import_task_entry_paths(&task.id)
+        .unwrap()
+        .is_empty());
 }
 
 /// 目录来源按不带 `\\?\` 前缀的完整路径入库。
@@ -189,12 +195,11 @@ fn import_source_reuses_source_for_trailing_separator() {
         include_text: true,
     };
 
-    let first = library.create_import_source(new_source(plain.clone())).unwrap();
+    let first = library
+        .create_import_source(new_source(plain.clone()))
+        .unwrap();
     let second = library
-        .create_import_source(new_source(format!(
-            "{plain}{}",
-            std::path::MAIN_SEPARATOR
-        )))
+        .create_import_source(new_source(format!("{plain}{}", std::path::MAIN_SEPARATOR)))
         .unwrap();
     assert_eq!(second.id, first.id);
     assert_eq!(second.root_path, plain);

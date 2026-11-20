@@ -501,16 +501,22 @@ where
                     if should_fail {
                         let _ = library.set_import_task_error(&task_id, &err.message);
                     }
-                    visrecall_app_core::finish_import_task(&library, core.sink().as_ref(), &task_id);
+                    visrecall_app_core::finish_import_task(
+                        &library,
+                        core.sink().as_ref(),
+                        &task_id,
+                    );
                 }
                 // 库都打不开时任务行不存在；仍要发终态事件，避免前端一直等。
-                Err(_) => core.sink().emit(visrecall_app_core::AppEvent::ImportTaskFinished(
-                    visrecall_app_core::ImportTaskFinishedEvent {
-                        id: task_id.clone(),
-                        task: None,
-                        failures: Vec::new(),
-                    },
-                )),
+                Err(_) => core
+                    .sink()
+                    .emit(visrecall_app_core::AppEvent::ImportTaskFinished(
+                        visrecall_app_core::ImportTaskFinishedEvent {
+                            id: task_id.clone(),
+                            task: None,
+                            failures: Vec::new(),
+                        },
+                    )),
             }
         }
     });

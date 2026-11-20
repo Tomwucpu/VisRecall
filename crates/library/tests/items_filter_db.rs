@@ -106,7 +106,8 @@ fn filter_by_statuses_uses_or_within_group() {
     let ready = lib.insert_item(new_item(1, ItemKind::Image)).unwrap();
     let failed = lib.insert_item(new_item(2, ItemKind::Image)).unwrap();
     let pending = lib.insert_item(new_item(3, ItemKind::Image)).unwrap();
-    lib.update_status(&ready.id, ItemStatus::Ready, None).unwrap();
+    lib.update_status(&ready.id, ItemStatus::Ready, None)
+        .unwrap();
     lib.update_status(&failed.id, ItemStatus::Failed, None)
         .unwrap();
 

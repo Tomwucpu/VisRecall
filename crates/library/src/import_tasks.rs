@@ -411,7 +411,9 @@ impl Library {
         let mut stmt = conn
             .prepare("SELECT relative_path FROM import_task_entries WHERE task_id = ?1")
             .map_err(db_error)?;
-        let rows = stmt.query_map([task_id], |row| row.get(0)).map_err(db_error)?;
+        let rows = stmt
+            .query_map([task_id], |row| row.get(0))
+            .map_err(db_error)?;
         rows.map(|row| row.map_err(db_error)).collect()
     }
 

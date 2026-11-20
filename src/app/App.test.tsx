@@ -48,7 +48,7 @@ const commands = vi.hoisted(() => ({
       libraryPath: "D:\\VisRecall\\library",
       captureHotkey: "Ctrl+Shift+S",
       ballEnabled: true,
-      ballSize: 48,
+      ballSize: 56,
     })),
     openLibraryFolder: vi.fn(async () => null),
     // 详情面板接入真实命令后需要的读接口（阶段 02 Task 12 之前保持空实现）。

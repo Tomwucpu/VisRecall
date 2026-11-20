@@ -456,7 +456,16 @@ impl DirectoryImportService {
                             "目录深度超过 {MAX_DIRECTORY_DEPTH}，请缩小范围"
                         )));
                     }
-                    self.walk(root, &path, depth + 1, options, task, existing, output, stats)?;
+                    self.walk(
+                        root,
+                        &path,
+                        depth + 1,
+                        options,
+                        task,
+                        existing,
+                        output,
+                        stats,
+                    )?;
                 }
                 continue;
             }
@@ -1072,7 +1081,10 @@ mod tests {
         assert_eq!(again.source_id, first.source_id);
         // 父子目录仍拒绝，避免同一文件被两个来源各收录一次。
         assert!(service
-            .scan(&source_dir.path().join("nested"), DirectoryScanOptions::default())
+            .scan(
+                &source_dir.path().join("nested"),
+                DirectoryScanOptions::default()
+            )
             .is_err());
     }
 
