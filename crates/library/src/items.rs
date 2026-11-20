@@ -31,6 +31,14 @@ pub const MAX_BODY_CHARS: usize = 20_000;
 /// 「全选当前筛选」一次最多返回的 id 数：防止把超大数组塞进 UI 状态与事件载荷。
 pub const MAX_FILTERED_IDS: u32 = 2_000;
 
+/// 一条待迁移的旧格式缩略图。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LegacyThumb {
+    pub id: String,
+    pub thumb_path: String,
+    pub revision: i64,
+}
+
 impl Library {
     /// 插入新素材：生成 id 与时间戳，初始 `status = parsing`，`note` 为空。
     pub fn insert_item(&self, new: NewItem) -> Result<Item, AppError> {
@@ -192,6 +200,36 @@ impl Library {
         )
         .optional()
         .map_err(db_error)
+    }
+
+    /// 列出 `thumb_path` 以 `.png` 结尾的素材（缩略图格式迁移用）。
+    ///
+    /// 用 `substr` 而不是 `LIKE '%.png'`：后者里的 `.` 会匹配任意字符。
+    /// 按新到旧排序，迁移中途中断时用户最可能看到的素材优先完成。
+    pub fn legacy_png_thumbs(&self) -> Result<Vec<LegacyThumb>, AppError> {
+        let conn = self.conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, thumb_path, revision FROM items
+                 WHERE thumb_path IS NOT NULL AND substr(thumb_path, -4) = '.png'
+                 ORDER BY captured_at DESC, rowid DESC",
+            )
+            .map_err(db_error)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(LegacyThumb {
+                    id: row.get(0)?,
+                    thumb_path: row.get(1)?,
+                    revision: row.get(2)?,
+                })
+            })
+            .map_err(db_error)?;
+
+        let mut thumbs = Vec::new();
+        for row in rows {
+            thumbs.push(row.map_err(db_error)?);
+        }
+        Ok(thumbs)
     }
 
     /// 更新状态；`thumb` 为 `Some` 时同时写入缩略图路径，`None` 保留原值。
@@ -787,6 +825,24 @@ mod tests {
         });
         assert!(result.is_err());
         assert_eq!(lib.get_item(&item.id).unwrap().unwrap().revision, 1);
+    }
+
+    #[test]
+    fn legacy_png_thumbs_lists_only_png_paths() {
+        let (_dir, lib) = test_library();
+        let png = lib.insert_item(image_item()).unwrap();
+        lib.update_status(&png.id, ItemStatus::Ready, Some("thumbs/png.png"))
+            .unwrap();
+        let webp = lib.insert_item(image_item()).unwrap();
+        lib.update_status(&webp.id, ItemStatus::Ready, Some("thumbs/webp.webp"))
+            .unwrap();
+        let _none = lib.insert_item(image_item()).unwrap();
+
+        let legacy = lib.legacy_png_thumbs().unwrap();
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0].id, png.id);
+        assert_eq!(legacy[0].thumb_path, "thumbs/png.png");
+        assert_eq!(legacy[0].revision, 0);
     }
 
     #[test]
