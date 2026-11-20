@@ -482,6 +482,8 @@ impl AppCore {
         tracing::info!("capture runtime started");
         // 保留策略在绑定启动之后跑一次：清理失败只记 warn，不阻止启动（P2-R08）。
         self.spawn_startup_prune();
+        // 旧 PNG 缩略图在后台迁移为 WebP：幂等，失败不影响启动。
+        self.spawn_legacy_thumb_migration();
         Ok(())
     }
 
@@ -947,6 +949,17 @@ impl AppCore {
             });
         if let Err(err) = spawned {
             tracing::warn!(error = %err, "failed to spawn startup retention prune");
+        }
+    }
+
+    /// 缩略图格式迁移：绑定启动完成后在后台线程跑一次（幂等，失败只记 warn）。
+    fn spawn_legacy_thumb_migration(&self) {
+        let library = match &self.library {
+            Ok(library) => Arc::clone(library),
+            Err(_) => return,
+        };
+        if let Err(err) = crate::thumbnail::spawn_legacy_thumb_migration(library) {
+            tracing::warn!(error = %err, "failed to spawn legacy thumbnail migration");
         }
     }
 

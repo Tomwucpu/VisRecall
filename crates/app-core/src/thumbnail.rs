@@ -21,6 +21,7 @@ use image::imageops::FilterType;
 use tracing::{error, info, warn};
 use visrecall_domain::item::{ItemKind, ItemStatus};
 use visrecall_domain::AppError;
+use visrecall_library::items::LegacyThumb;
 use visrecall_library::Library;
 use webp::Encoder;
 
@@ -430,6 +431,90 @@ fn build_thumbnail(
     Ok(relative)
 }
 
+/// 起一个后台线程，把旧 PNG 缩略图迁移为 WebP；处理完即退出。
+///
+/// 失败只返回线程创建错误（调用方记录 warn），迁移条目本身的失败在内部计数。
+pub fn spawn_legacy_thumb_migration(library: Arc<Library>) -> Result<(), AppError> {
+    thread::Builder::new()
+        .name("visrecall-thumb-migrate".into())
+        .spawn(move || migrate_legacy_thumbs(&library))
+        .map(|_| ())
+        .map_err(|err| AppError::Internal(format!("spawn thumbnail migration thread: {err}")))
+}
+
+/// 同步迁移全部旧 PNG 缩略图（测试与排障直接调用；生产走 [`spawn_legacy_thumb_migration`]）。
+pub(crate) fn migrate_legacy_thumbs(library: &Library) {
+    let entries = match library.legacy_png_thumbs() {
+        Ok(entries) => entries,
+        Err(err) => {
+            warn!(error = %err, "failed to list legacy png thumbs");
+            return;
+        }
+    };
+    if entries.is_empty() {
+        return;
+    }
+    let total = entries.len();
+    let mut failed = 0;
+    for entry in &entries {
+        if let Err(err) = migrate_legacy_thumb(library, entry) {
+            failed += 1;
+            warn!(
+                id = %entry.id,
+                path = %entry.thumb_path,
+                error = %err,
+                "legacy thumb migration failed"
+            );
+        }
+    }
+    info!(total, failed, "legacy png thumb migration finished");
+}
+
+/// 迁移一条：解码 PNG → 编码 WebP → 原子写 → 换库路径 → 删旧文件。
+///
+/// `Ok(())` 包含「已迁移」与「安全跳过」（素材已变、旧文件缺失）。
+/// 已存在 `.webp`（上次崩在写库之前）时跳过重编码，直接补写库路径。
+pub(crate) fn migrate_legacy_thumb(
+    library: &Library,
+    entry: &LegacyThumb,
+) -> Result<(), AppError> {
+    // 复核：迁移期间素材可能被刷新/重新链接，旧任务不得覆盖新状态。
+    let Some(item) = library.get_item(&entry.id)? else {
+        return Ok(());
+    };
+    if item.revision != entry.revision
+        || item.thumb_path.as_deref() != Some(entry.thumb_path.as_str())
+    {
+        return Ok(());
+    }
+
+    let png_path = library.relative_to_root(&entry.thumb_path)?;
+    if !png_path.is_file() {
+        return Ok(());
+    }
+
+    let webp_relative = thumb_relative_path(&entry.id);
+    let webp_path = library.root().join(&webp_relative);
+    if !webp_path.is_file() {
+        let image = image::open(&png_path)
+            .map_err(|err| AppError::Io(format!("open {}: {err}", png_path.display())))?;
+        let rgba = image.to_rgba8();
+        let (width, height) = rgba.dimensions();
+        let webp = encode_webp_rgba(width, height, rgba.as_raw())?;
+        let parent = webp_path.parent().unwrap_or_else(|| Path::new("."));
+        write_bytes_atomic_in(parent, &entry.id, &webp_path, &webp)?;
+    }
+
+    // 保留原状态（迁移不是修复失败素材的时机）。
+    library.update_status(&entry.id, item.status, Some(&webp_relative))?;
+
+    // 库已指向新文件；删除失败只留下一个孤儿 png，不影响正确性。
+    if let Err(err) = fs::remove_file(&png_path) {
+        warn!(path = %entry.thumb_path, error = %err, "failed to remove migrated png thumb");
+    }
+    Ok(())
+}
+
 /// 发 `item_updated`；字段名与前端 DTO 一致（`status` / `thumbUrl`）。
 fn emit_updated(sink: &dyn EventSink, item_id: &str) {
     sink.emit(AppEvent::ItemUpdated(ItemUpdatedEvent {
@@ -768,5 +853,104 @@ mod tests {
 
         let stored = library.get_item(id).unwrap().unwrap();
         assert_eq!(stored.status, ItemStatus::Failed);
+    }
+
+    /// 旧 PNG 缩略图迁移为 WebP：换库路径、删旧文件、输出可解码。
+    #[test]
+    fn migrates_legacy_png_thumbs_to_webp() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = Library::open(dir.path().join("library")).unwrap();
+        let id = "legacy-1";
+        insert_image(&library, id, "originals/images/2026/01/legacy-1.png");
+        let png_rel = format!("thumbs/{id}.png");
+        let png_path = library.root().join(&png_rel);
+        fs::create_dir_all(png_path.parent().unwrap()).unwrap();
+        write_png(&png_path, 100, 50);
+        library
+            .update_status(id, ItemStatus::Ready, Some(&png_rel))
+            .unwrap();
+
+        migrate_legacy_thumbs(&library);
+
+        let stored = library.get_item(id).unwrap().unwrap();
+        assert_eq!(stored.thumb_path.as_deref(), Some("thumbs/legacy-1.webp"));
+        assert!(!png_path.exists());
+        let bytes = fs::read(library.root().join("thumbs/legacy-1.webp")).unwrap();
+        assert_eq!(
+            image::guess_format(&bytes).unwrap(),
+            image::ImageFormat::WebP
+        );
+        assert!(library.legacy_png_thumbs().unwrap().is_empty());
+    }
+
+    /// 迁移不得把 `failed` 素材改成 `ready`。
+    #[test]
+    fn migration_keeps_failed_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = Library::open(dir.path().join("library")).unwrap();
+        let id = "legacy-failed";
+        insert_image(&library, id, "originals/images/2026/01/legacy-failed.png");
+        let png_rel = format!("thumbs/{id}.png");
+        let png_path = library.root().join(&png_rel);
+        fs::create_dir_all(png_path.parent().unwrap()).unwrap();
+        write_png(&png_path, 100, 50);
+        library
+            .update_status(id, ItemStatus::Failed, Some(&png_rel))
+            .unwrap();
+
+        migrate_legacy_thumbs(&library);
+
+        let stored = library.get_item(id).unwrap().unwrap();
+        assert_eq!(stored.status, ItemStatus::Failed);
+        assert_eq!(
+            stored.thumb_path.as_deref(),
+            Some("thumbs/legacy-failed.webp")
+        );
+    }
+
+    /// 旧文件缺失：跳过，不改库，也不产生新文件。
+    #[test]
+    fn migration_skips_missing_legacy_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = Library::open(dir.path().join("library")).unwrap();
+        let id = "legacy-missing";
+        insert_image(&library, id, "originals/images/2026/01/legacy-missing.png");
+        let png_rel = format!("thumbs/{id}.png");
+        library
+            .update_status(id, ItemStatus::Ready, Some(&png_rel))
+            .unwrap();
+
+        migrate_legacy_thumbs(&library);
+
+        let stored = library.get_item(id).unwrap().unwrap();
+        assert_eq!(stored.thumb_path.as_deref(), Some(png_rel.as_str()));
+        assert!(!library.root().join("thumbs/legacy-missing.webp").exists());
+    }
+
+    /// 扫描后、逐条处理前素材被更新（thumb_path 变了）：该条跳过，旧文件保留。
+    #[test]
+    fn migration_skips_entries_whose_thumb_changed_after_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = Library::open(dir.path().join("library")).unwrap();
+        let id = "legacy-changed";
+        insert_image(&library, id, "originals/images/2026/01/legacy-changed.png");
+        let png_rel = format!("thumbs/{id}.png");
+        let png_path = library.root().join(&png_rel);
+        fs::create_dir_all(png_path.parent().unwrap()).unwrap();
+        write_png(&png_path, 100, 50);
+        library
+            .update_status(id, ItemStatus::Ready, Some(&png_rel))
+            .unwrap();
+        let entries = library.legacy_png_thumbs().unwrap();
+        assert_eq!(entries.len(), 1);
+
+        library
+            .update_status(id, ItemStatus::Ready, Some("thumbs/other.webp"))
+            .unwrap();
+        migrate_legacy_thumb(&library, &entries[0]).unwrap();
+
+        let stored = library.get_item(id).unwrap().unwrap();
+        assert_eq!(stored.thumb_path.as_deref(), Some("thumbs/other.webp"));
+        assert!(png_path.exists());
     }
 }
