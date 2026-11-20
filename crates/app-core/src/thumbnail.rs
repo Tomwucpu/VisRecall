@@ -474,10 +474,7 @@ pub(crate) fn migrate_legacy_thumbs(library: &Library) {
 ///
 /// `Ok(())` 包含「已迁移」与「安全跳过」（素材已变、旧文件缺失）。
 /// 已存在 `.webp`（上次崩在写库之前）时跳过重编码，直接补写库路径。
-pub(crate) fn migrate_legacy_thumb(
-    library: &Library,
-    entry: &LegacyThumb,
-) -> Result<(), AppError> {
+pub(crate) fn migrate_legacy_thumb(library: &Library, entry: &LegacyThumb) -> Result<(), AppError> {
     // 复核：迁移期间素材可能被刷新/重新链接，旧任务不得覆盖新状态。
     let Some(item) = library.get_item(&entry.id)? else {
         return Ok(());
