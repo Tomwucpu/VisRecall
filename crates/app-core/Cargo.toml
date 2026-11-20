@@ -19,6 +19,9 @@ tracing = { workspace = true }
 crossbeam-channel = "0.5"
 encoding_rs = "0.8"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+# 缩略图有损 WebP 编码：libwebp 绑定（构建期自带 C 源码，MSVC 工具链即可）。
+# 关闭默认 `img` feature，避免 WebP 侧再拉一份 `image`。
+webp = { version = "0.3", default-features = false }
 sha2 = "0.10"
 time = { version = "0.3", features = ["local-offset"] }
 # 链接标题抓取：阻塞客户端 + rustls（关闭默认 aws-lc 后端，改用 ring，避免 C 工具链依赖）。

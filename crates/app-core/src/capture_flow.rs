@@ -1,7 +1,7 @@
 //! 捕获编排与落盘：快捷键/托盘触发 → 记录来源 → 隐藏自有窗口 → 抓帧 → 覆盖层，
 //! 以及覆盖层提交后的 PNG 编码、临时文件 → `rename` → 入库（design §5、§10.2）。
 //!
-//! 入库并发 `item_created` 之后，缩略图（`thumbs/<id>.png`）派发到有界缩略图 worker
+//! 入库并发 `item_created` 之后，缩略图（`thumbs/<id>.webp`）派发到有界缩略图 worker
 //! （[`crate::thumbnail`]，全局队列 + 固定线程数），捕获循环不等它完成。
 //!
 //! 线程模型（design §3）：本模块的方法在 app-core 的捕获循环线程上同步执行；
@@ -1356,7 +1356,7 @@ mod tests {
         assert!(items[0].original_path.starts_with("originals/images/"));
         assert!(Path::new(&items[0].original_path).is_relative());
 
-        // 缩略图线程在 5s 内把素材转 `ready` 并写入 `thumbs/<id>.png`。
+        // 缩略图线程在 5s 内把素材转 `ready` 并写入 `thumbs/<id>.webp`。
         let id = items[0].id.clone();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let stored = loop {
@@ -1370,7 +1370,7 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         };
-        let thumb = format!("thumbs/{id}.png");
+        let thumb = format!("thumbs/{id}.webp");
         assert_eq!(stored.thumb_path.as_deref(), Some(thumb.as_str()));
         assert!(library.root().join(&thumb).exists());
 

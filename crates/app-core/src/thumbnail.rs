@@ -1,4 +1,4 @@
-//! 缩略图（design §10.2）：长边 480px 的 `thumbs/<id>.png`，捕获/导入提交后异步生成。
+//! 缩略图（design §10.2）：长边 480px 的有损 WebP `thumbs/<id>.webp`，捕获/导入提交后异步生成。
 //!
 //! 线程模型（review I1）：一次拖放最多 20 张、每张都要 `image::open` 全量解码，逐张起线程
 //! 会让峰值内存随批量线性增长（20 张 8000px 可到数 GB）。这里改为**有界并发**：全局队列
@@ -22,12 +22,18 @@ use tracing::{error, info, warn};
 use visrecall_domain::item::{ItemKind, ItemStatus};
 use visrecall_domain::AppError;
 use visrecall_library::Library;
+use webp::Encoder;
 
-use crate::capture_flow::{encode_rgba_png, write_bytes_atomic_in};
+use crate::capture_flow::write_bytes_atomic_in;
 use crate::events::{AppEvent, CaptureFailedEvent, EventSink, ItemUpdatedEvent};
 
 /// 缩略图长边上限（design §10.2）。
 pub const THUMB_MAX_EDGE: u32 = 480;
+
+/// 缩略图编码质量（有损 WebP，0–100）。
+///
+/// q85 在 228px 卡片上文字伪影不可见；本机实测体积约为同尺寸 PNG 的 12%。
+pub const THUMB_WEBP_QUALITY: f32 = 85.0;
 
 /// 缩略图目录（相对库根）；`Library` 打开时已建好。
 pub const THUMB_DIR: &str = "thumbs";
@@ -46,7 +52,7 @@ pub const THUMBNAIL_FAILED_CODE: &str = "THUMBNAIL_FAILED";
 
 /// 素材缩略图的库内相对路径。
 pub fn thumb_relative_path(item_id: &str) -> String {
-    format!("{THUMB_DIR}/{item_id}.png")
+    format!("{THUMB_DIR}/{item_id}.webp")
 }
 
 /// `thumb_path` 是否指向 `thumbs/` 下的文件（纵深防御：库被改坏也不读 `texts/` 等）。
@@ -61,7 +67,13 @@ fn is_under_dir(path: &str, dir: &str) -> bool {
         .is_some_and(|name| !name.is_empty() && !name.contains('\\'))
 }
 
-/// 把 `src` 缩到长边 `max_edge` 并保存为 PNG 到 `dst`。
+/// 把 RGBA 像素编码为有损 WebP；全不透明图会自动省略 alpha 通道。
+fn encode_webp_rgba(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, AppError> {
+    let encoder = Encoder::from_rgba(rgba, width, height);
+    Ok(encoder.encode(THUMB_WEBP_QUALITY).to_vec())
+}
+
+/// 把 `src` 缩到长边 `max_edge` 并保存为 WebP 到 `dst`。
 ///
 /// - 保持宽高比；原图长边不超过 `max_edge` 时不放大（缩略图只缩小）。
 /// - 建父目录；先写同目录临时文件再 `rename`，失败清理临时文件（design §10.2）。
@@ -90,7 +102,7 @@ pub fn generate_thumbnail(src: &Path, dst: &Path, max_edge: u32) -> Result<(), A
 
     let rgba = scaled.to_rgba8();
     let (width, height) = rgba.dimensions();
-    let png = encode_rgba_png(width, height, rgba.as_raw())?;
+    let webp = encode_webp_rgba(width, height, rgba.as_raw())?;
 
     // 临时文件与目标同目录：缩略图不参与 `tmp/` 的启动清理策略。
     let parent = dst.parent().unwrap_or_else(|| Path::new("."));
@@ -98,7 +110,7 @@ pub fn generate_thumbnail(src: &Path, dst: &Path, max_edge: u32) -> Result<(), A
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_else(|| "thumbnail".to_string());
-    write_bytes_atomic_in(parent, &tmp_id, dst, &png)
+    write_bytes_atomic_in(parent, &tmp_id, dst, &webp)
 }
 
 /// 读取素材缩略图的字节（资源协议用）。
@@ -315,7 +327,7 @@ fn run_job(job: &ThumbnailJob) {
 
 /// 同步生成一张缩略图并写回状态（测试与排障直接调用；生产走 [`spawn_thumbnail`]）。
 ///
-/// - 成功：`thumbs/<id>.png` + `update_status(Ready, Some(相对路径))` +
+/// - 成功：`thumbs/<id>.webp` + `update_status(Ready, Some(相对路径))` +
 ///   `item_updated { fields: ["status", "thumbUrl"] }`。
 /// - 失败：`update_status(Failed, None)` + 同样字段的 `item_updated`；原图保留，卡片显示占位。
 pub fn generate_for_item(library: &Library, sink: &dyn EventSink, item_id: &str) {
@@ -394,7 +406,7 @@ fn report_status_failure(sink: &dyn EventSink, item_id: &str, action: &str, err:
     emit_updated(sink, item_id);
 }
 
-/// 读原图 → 写 `thumbs/<id>.png`，返回缩略图的库内相对路径。
+/// 读原图 → 写 `thumbs/<id>.webp`，返回缩略图的库内相对路径。
 fn build_thumbnail(
     library: &Library,
     item_id: &str,
@@ -567,8 +579,8 @@ mod tests {
 
         let stored = library.get_item(id).unwrap().unwrap();
         assert_eq!(stored.status, ItemStatus::Ready);
-        assert_eq!(stored.thumb_path.as_deref(), Some("thumbs/item-1.png"));
-        assert!(library.root().join("thumbs/item-1.png").exists());
+        assert_eq!(stored.thumb_path.as_deref(), Some("thumbs/item-1.webp"));
+        assert!(library.root().join("thumbs/item-1.webp").exists());
         assert!(!library.root().join("thumbs/item-1.tmp").exists());
 
         let updates = updated_events(&sink);
@@ -602,7 +614,7 @@ mod tests {
     fn small_images_are_not_upscaled() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("small.png");
-        let dst = dir.path().join("thumbs/small.png");
+        let dst = dir.path().join("thumbs/small.webp");
         write_png(&src, 40, 20);
 
         generate_thumbnail(&src, &dst, THUMB_MAX_EDGE).unwrap();
@@ -636,7 +648,7 @@ mod tests {
         loop {
             let stored = library.get_item(id).unwrap().unwrap();
             if stored.status == ItemStatus::Ready {
-                assert_eq!(stored.thumb_path.as_deref(), Some("thumbs/item-bg.png"));
+                assert_eq!(stored.thumb_path.as_deref(), Some("thumbs/item-bg.webp"));
                 break;
             }
             assert!(

@@ -13,7 +13,7 @@ use visrecall_library::Library;
 fn thumbnail_long_edge_is_480() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src.png");
-    let dst = dir.path().join("dst.png");
+    let dst = dir.path().join("dst.webp");
     let img = RgbaImage::from_pixel(1000, 500, Rgba([255, 0, 0, 255]));
     img.save(&src).unwrap();
 
@@ -21,6 +21,25 @@ fn thumbnail_long_edge_is_480() {
     let out = image::open(&dst).unwrap();
     assert_eq!(out.width(), 480);
     assert_eq!(out.height(), 240);
+}
+
+/// 输出必须是 WebP，不是改了扩展名的 PNG。
+#[test]
+fn thumbnail_output_is_webp() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.png");
+    let dst = dir.path().join("thumb.webp");
+    RgbaImage::from_pixel(1000, 500, Rgba([255, 0, 0, 255]))
+        .save(&src)
+        .unwrap();
+
+    generate_thumbnail(&src, &dst, THUMB_MAX_EDGE).unwrap();
+
+    let bytes = fs::read(&dst).unwrap();
+    assert_eq!(
+        image::guess_format(&bytes).unwrap(),
+        image::ImageFormat::WebP
+    );
 }
 
 /// 生成缩略图时父目录不存在也要建好，且不留临时文件。
@@ -32,7 +51,7 @@ fn thumbnail_creates_the_parent_directory() {
         .save(&src)
         .unwrap();
 
-    let dst = dir.path().join("thumbs/nested/out.png");
+    let dst = dir.path().join("thumbs/nested/out.webp");
     generate_thumbnail(&src, &dst, THUMB_MAX_EDGE).unwrap();
 
     assert!(dst.exists());
@@ -64,7 +83,7 @@ fn image_with_thumb(dir: &Path) -> (Library, String) {
     let library = open_library(dir);
     let id = "thumb-item".to_string();
     let original = format!("originals/images/2026/01/{id}.png");
-    let rel_thumb = format!("thumbs/{id}.png");
+    let rel_thumb = format!("thumbs/{id}.webp");
 
     library
         .insert_item_with_id(
@@ -100,15 +119,15 @@ fn image_with_thumb(dir: &Path) -> (Library, String) {
 }
 
 #[test]
-fn load_thumb_bytes_returns_the_png() {
+fn load_thumb_bytes_returns_the_webp() {
     let dir = tempfile::tempdir().unwrap();
     let (library, id) = image_with_thumb(dir.path());
 
     let bytes = load_thumb_bytes(&library, &id).expect("read thumbnail");
-    assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+    assert_eq!(&bytes[..4], b"RIFF");
     assert_eq!(
         bytes,
-        fs::read(dir.path().join(format!("thumbs/{id}.png"))).unwrap()
+        fs::read(dir.path().join(format!("thumbs/{id}.webp"))).unwrap()
     );
 }
 
@@ -156,7 +175,7 @@ fn load_thumb_bytes_reports_items_without_a_thumb() {
 fn load_thumb_bytes_reports_missing_files() {
     let dir = tempfile::tempdir().unwrap();
     let (library, id) = image_with_thumb(dir.path());
-    fs::remove_file(dir.path().join(format!("thumbs/{id}.png"))).unwrap();
+    fs::remove_file(dir.path().join(format!("thumbs/{id}.webp"))).unwrap();
 
     let err = load_thumb_bytes(&library, &id).unwrap_err();
     assert!(

@@ -110,7 +110,7 @@ impl ImportFlow {
 
     /// 导入成功后由核心循环调用：为每个新素材发 `item_created`。
     ///
-    /// 发完 `item_created` 再派发图片缩略图任务（有界 worker 队列，`thumbs/<id>.png`），
+    /// 发完 `item_created` 再派发图片缩略图任务（有界 worker 队列，`thumbs/<id>.webp`），
     /// 保证前端先拿到素材、后收到 `item_updated`；文本/链接没有缩略图，跳过。
     /// 派发失败上报 `capture_failed { THUMBNAIL_FAILED }`，不让素材静默停在 `parsing`。
     pub fn emit_created(&self, items: &[Item]) {
@@ -1080,7 +1080,7 @@ mod tests {
         );
     }
 
-    /// Task 17：图片导入后 `emit_created` 派发缩略图，最终转 `ready` 并带 `thumbs/<id>.png`。
+    /// Task 17：图片导入后 `emit_created` 派发缩略图，最终转 `ready` 并带 `thumbs/<id>.webp`。
     #[test]
     fn imported_image_gets_a_thumbnail_after_item_created() {
         let fixture = fixture();
@@ -1096,7 +1096,7 @@ mod tests {
         assert_eq!(fixture.sink.events()[0].name(), "item_created");
 
         let id = items[0].id.clone();
-        let thumb = format!("thumbs/{id}.png");
+        let thumb = format!("thumbs/{id}.webp");
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let stored = fixture.library.get_item(&id).unwrap().unwrap();
