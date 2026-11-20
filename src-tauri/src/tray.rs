@@ -1,7 +1,7 @@
 //! 托盘图标与菜单。
 //!
 //! 冷启动不创建主窗口（架构 §3.3），托盘是唯一入口：左键或菜单「打开主窗口」。
-//! 图标用代码生成的 32×32 RGBA 占位，避免阶段 01 引入图片资源。
+//! 图标内嵌 `icons/64x64.png`，异常态保留图标形状并整体映射为告警红。
 
 use tauri::image::Image;
 use tauri::menu::MenuBuilder;
@@ -34,10 +34,16 @@ pub fn create(app: &App, library_ok: bool) -> tauri::Result<()> {
         .text(MENU_QUIT, "退出")
         .build()?;
 
-    let (icon, tooltip) = if library_ok {
-        (placeholder_icon(), TOOLTIP_OK)
+    let normal = tray_icon();
+    let icon = if library_ok {
+        normal
     } else {
-        (library_unavailable_icon(), TOOLTIP_UNAVAILABLE)
+        library_unavailable_icon(&normal)
+    };
+    let tooltip = if library_ok {
+        TOOLTIP_OK
+    } else {
+        TOOLTIP_UNAVAILABLE
     };
 
     TrayIconBuilder::with_id(TRAY_ID)
@@ -91,98 +97,68 @@ pub fn create(app: &App, library_ok: bool) -> tauri::Result<()> {
     Ok(())
 }
 
-/// 图标配色：正常态品牌蓝，异常态告警红。
-#[derive(Clone, Copy)]
-enum Palette {
-    Normal,
-    Unavailable,
+/// 内嵌托盘图标（64×64，紧凑裁切，与应用图标同源）。
+const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray-64.png");
+
+/// 正常态：直接使用应用图标。
+fn tray_icon() -> Image<'static> {
+    Image::from_bytes(TRAY_ICON_PNG).expect("bundled tray icon is a valid PNG")
 }
 
-impl Palette {
-    /// (外圈边框色, 圆底色)；中间记录块始终为白色。
-    fn colors(self) -> ([u8; 4], [u8; 4]) {
-        match self {
-            Palette::Normal => ([37, 99, 235, 255], [59, 130, 246, 255]),
-            Palette::Unavailable => ([153, 27, 27, 255], [220, 38, 38, 255]),
+/// 异常态：保留图标形状与明暗，整体映射到告警红。
+fn library_unavailable_icon(normal: &Image<'_>) -> Image<'static> {
+    let mut rgba = normal.rgba().to_vec();
+    for pixel in rgba.chunks_exact_mut(4) {
+        if pixel[3] == 0 {
+            continue;
         }
+        let luma = (pixel[0] as u32 * 30 + pixel[1] as u32 * 59 + pixel[2] as u32 * 11) / 100;
+        pixel[0] = (40 + luma * 84 / 100) as u8;
+        pixel[1] = (10 + luma * 25 / 100) as u8;
+        pixel[2] = (12 + luma * 22 / 100) as u8;
     }
-}
-
-/// 托盘正常态图标。
-fn placeholder_icon() -> Image<'static> {
-    tray_icon(Palette::Normal)
-}
-
-/// 托盘异常态图标：库打不开时使用，形状与正常态一致，只是换成告警红。
-fn library_unavailable_icon() -> Image<'static> {
-    tray_icon(Palette::Unavailable)
-}
-
-/// 32×32 RGBA 占位图标：圆底 + 白色记录块。正式图标在阶段 04 替换。
-fn tray_icon(palette: Palette) -> Image<'static> {
-    const SIZE: u32 = 32;
-    const CENTER: f32 = 16.0;
-    const RADIUS: f32 = 15.0;
-    const BORDER: f32 = 13.5;
-
-    let (border, fill) = palette.colors();
-
-    let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let dx = x as f32 + 0.5 - CENTER;
-            let dy = y as f32 + 0.5 - CENTER;
-            if dx * dx + dy * dy > RADIUS * RADIUS {
-                continue;
-            }
-            let index = ((y * SIZE + x) * 4) as usize;
-            let color = if dx * dx + dy * dy > BORDER * BORDER {
-                border
-            } else {
-                fill
-            };
-            rgba[index..index + 4].copy_from_slice(&color);
-
-            if (12..20).contains(&x) && (12..20).contains(&y) {
-                rgba[index..index + 4].copy_from_slice(&[255, 255, 255, 255]);
-            }
-        }
-    }
-    Image::new_owned(rgba, SIZE, SIZE)
+    Image::new_owned(rgba, normal.width(), normal.height())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// 圆底内侧、白色记录块之外的探针像素。
-    const PROBE: usize = ((16 * 32) + 5) * 4;
-
     fn assert_shape(icon: &Image<'_>) {
-        assert_eq!(icon.width(), 32);
-        assert_eq!(icon.height(), 32);
-        assert_eq!(icon.rgba().len(), 32 * 32 * 4);
-        // 中心像素是白色记录块，角落保持透明。
-        let center = ((16 * 32) + 16) as usize * 4;
-        assert_eq!(&icon.rgba()[center..center + 4], &[255, 255, 255, 255]);
+        assert_eq!(icon.width(), 64);
+        assert_eq!(icon.height(), 64);
+        assert_eq!(icon.rgba().len(), 64 * 64 * 4);
+        // 圆角外保持透明。
         assert_eq!(&icon.rgba()[0..4], &[0, 0, 0, 0]);
     }
 
-    #[test]
-    fn placeholder_icon_is_opaque_32_square() {
-        let icon = placeholder_icon();
-        assert_shape(&icon);
-        assert_eq!(&icon.rgba()[PROBE..PROBE + 4], &[59, 130, 246, 255]);
+    /// 第一个完全不透明的像素下标；用实际图形做探针，避免依赖中心位置。
+    fn first_opaque(icon: &Image<'_>) -> usize {
+        icon.rgba()
+            .chunks_exact(4)
+            .position(|pixel| pixel[3] == 255)
+            .expect("icon should contain opaque pixels")
+            * 4
     }
 
-    /// 异常态与正常态形状一致，但圆底换成告警红（红 > 蓝）。
     #[test]
-    fn unavailable_icon_uses_alert_red() {
-        let icon = library_unavailable_icon();
+    fn bundled_icon_decodes_to_64_square() {
+        let icon = tray_icon();
         assert_shape(&icon);
+        let visible = icon.rgba().chunks_exact(4).filter(|p| p[3] > 200).count();
+        assert!(visible > 1000);
+    }
 
-        let pixel = &icon.rgba()[PROBE..PROBE + 4];
-        assert_eq!(pixel, &[220, 38, 38, 255]);
-        assert_ne!(pixel, &placeholder_icon().rgba()[PROBE..PROBE + 4]);
+    /// 异常态保持形状与透明度，但图形换成告警红（红 > 蓝）。
+    #[test]
+    fn unavailable_icon_maps_to_alert_red() {
+        let normal = tray_icon();
+        let alert = library_unavailable_icon(&normal);
+        assert_shape(&alert);
+
+        let probe = first_opaque(&normal);
+        assert!(alert.rgba()[probe] > alert.rgba()[probe + 2]);
+        assert_ne!(&alert.rgba()[probe..probe + 4], &normal.rgba()[probe..probe + 4]);
+        assert_eq!(&alert.rgba()[0..4], &[0, 0, 0, 0]);
     }
 }

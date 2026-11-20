@@ -7,7 +7,7 @@ edition.workspace = true
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "specta"] }
+tauri = { version = "2", features = ["tray-icon", "specta", "image-png"] }
 visrecall-app-core = { path = "../crates/app-core" }
 visrecall-capture = { path = "../crates/capture" }
 visrecall-domain = { path = "../crates/domain" }
