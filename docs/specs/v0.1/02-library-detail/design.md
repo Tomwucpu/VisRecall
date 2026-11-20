@@ -43,7 +43,7 @@
 | 缩略图协议 `visrecall://thumb/<id>`（路径校验、immutable 缓存、GET/HEAD） | `src-tauri/src/protocol.rs` |
 | 原子写、可用空间查询、损坏备份 | `crates/library/src/files.rs` |
 | 开库 → PRAGMA → 迁移 → 启动清理 | `crates/library/src/db.rs` |
-| 缩略图生成（PNG 480px，有界并发 2 worker） | `crates/app-core/src/thumbnail.rs` |
+| 缩略图生成（WebP q85，480px，有界并发 2 worker） | `crates/app-core/src/thumbnail.rs` |
 | 事件总线（`EventSink` + `RecordingSink`） | `crates/app-core/src/events.rs` |
 | 抓帧前最低空间门禁（<2GB → `STORAGE_FULL`） | `crates/app-core/src/capture_flow.rs:248` |
 | 悬浮球窗口、拖动、位置记忆、拖放接收 | `crates/shell/src/ball.rs` |

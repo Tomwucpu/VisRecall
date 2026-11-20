@@ -15,7 +15,7 @@
 | 抓帧 | GDI BitBlt → D3D11 纹理 | 静态画面可靠；CPU 位图上传后立即释放 |
 | 选区几何 | 纯函数状态机，物理像素坐标 | 可单测、可 proptest、避免 DPI 偏移 |
 | 存储 | SQLite bundled + WAL | 单文件、事务、可搬移 |
-| 缩略图 | 阶段 01 先用 PNG（480px 长边） | `image` 内置编码，避免引入 libwebp 构建链；阶段 04 再评估 WebP |
+| 缩略图 | 有损 WebP q85（480px 长边，libwebp）；阶段 01 曾用 PNG，2026-11-20 完成切换与存量迁移 | `image` 解码 + `webp` 编码，体积约为 PNG 的 12% |
 | 前端 IPC | `tauri-specta` 生成 TypeScript | 不手写 DTO；阶段 01 命令少，先建立生成链路 |
 | 任务队列 | 阶段 01 只建 `jobs` 表与恢复骨架 | 真实 OCR/VLM 任务在阶段 03 接入 |
 
@@ -573,7 +573,7 @@ CREATE INDEX idx_jobs_due ON jobs(state, next_run_at, priority);
 - 文本：`texts/<uuid>.txt`，UTF-8；同样走临时文件 + rename。
 - 路径存相对库根目录；读取时拼接并 `canonicalize` 校验仍在库内。
 - 启动时清空 `tmp/` 下的临时文件（原子写残留不会被数据库引用，可直接删除，满足 P1-R06 的强杀恢复）；扫描 `originals/` 与 `texts/` 中数据库不存在的孤儿文件，记录日志但不自动删除（阶段 02 提供清理入口）。
-- 缩略图：`thumbs/<uuid>.png`，长边 480px；生成失败不阻塞列表。
+- 缩略图：`thumbs/<uuid>.webp`，长边 480px、有损 WebP q85；生成失败不阻塞列表。
 
 ### 10.3 配置
 
