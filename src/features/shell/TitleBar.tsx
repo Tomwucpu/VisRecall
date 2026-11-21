@@ -5,16 +5,12 @@ import { useTheme } from "../../lib/theme";
  * 自绘标题栏（D-UI-1）。
  *
  * 拖拽只挂在非交互容器上：Tauri 在 `mousedown` 时只检查事件目标自身是否带
- * `data-tauri-drag-region`，所以中间的文本行、品牌区都要各自带上，否则从文字上
- * 按下无法移动窗口。按钮一律不带该属性，否则点击会被系统当成拖拽吞掉。
+ * `data-tauri-drag-region`，所以品牌区及其文字都要各自带上，否则从文字上按下
+ * 无法移动窗口。按钮一律不带该属性，否则点击会被系统当成拖拽吞掉。
  * 双击最大化由拖拽区自动处理，无需额外绑定。
  */
 
 type Props = {
-  /** 库状态的一句话描述，与状态栏共用同一份文案。 */
-  status: string;
-  /** 已加载素材数；`null` 表示列表尚未就绪。 */
-  itemCount: number | null;
   /** 打开设置弹窗（T5）。 */
   onOpenSettings: () => void;
 };
@@ -30,33 +26,15 @@ async function runWindowAction(action: WindowAction): Promise<void> {
   }
 }
 
-export function TitleBar({ status, itemCount, onOpenSettings }: Props) {
+export function TitleBar({ onOpenSettings }: Props) {
   const { theme, toggle } = useTheme();
-  const countText = itemCount === null ? "素材读取中" : `${itemCount} 条素材`;
 
   return (
     <header className="titlebar" data-tauri-drag-region="">
       <div className="brand" data-tauri-drag-region="">
-        <span className="brand-mark" data-tauri-drag-region="">
-          目
+        <span className="brand-word" data-tauri-drag-region="">
+          VISRECALL
         </span>
-        <span className="brand-name" data-tauri-drag-region="">
-          目记
-          <span className="brand-latin" data-tauri-drag-region="">
-            VisRecall
-          </span>
-        </span>
-      </div>
-
-      <div className="titlebar-mid" data-tauri-drag-region="">
-        <span className="dot" data-tauri-drag-region="">
-          ·
-        </span>
-        <span data-tauri-drag-region="">{status}</span>
-        <span className="dot" data-tauri-drag-region="">
-          ·
-        </span>
-        <span data-tauri-drag-region="">{countText}</span>
       </div>
 
       <div className="titlebar-right">

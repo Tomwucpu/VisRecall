@@ -18,26 +18,22 @@ afterEach(() => {
   delete document.documentElement.dataset.theme;
 });
 
-test("shows the library status and item count", () => {
-  render(<TitleBar status="本地索引已就绪" itemCount={42} onOpenSettings={() => {}} />);
-  expect(screen.getByText("本地索引已就绪")).toBeInTheDocument();
-  expect(screen.getByText("42 条素材")).toBeInTheDocument();
-});
-
-test("shows a loading hint instead of a count before the list is ready", () => {
-  render(<TitleBar status="正在读取库状态" itemCount={null} onOpenSettings={() => {}} />);
-  expect(screen.getByText("素材读取中")).toBeInTheDocument();
+test("shows only the VISRECALL wordmark in the top-left brand area", () => {
+  render(<TitleBar onOpenSettings={() => {}} />);
+  const brand = document.querySelector(".brand");
+  expect(brand).toHaveTextContent("VISRECALL");
+  expect(brand).not.toHaveTextContent("目记");
 });
 
 test("marks only non-interactive containers as drag regions", () => {
-  render(<TitleBar status="本地索引已就绪" itemCount={0} onOpenSettings={() => {}} />);
+  render(<TitleBar onOpenSettings={() => {}} />);
 
   const header = document.querySelector(".titlebar");
   expect(header).toHaveAttribute("data-tauri-drag-region");
 
-  // 中间那行文字整体是拖动区，否则从文字上按下拖不动窗口。
-  const midSpans = document.querySelectorAll(".titlebar-mid > span[data-tauri-drag-region]");
-  expect(midSpans.length).toBeGreaterThan(0);
+  // 字标本身是拖动区，否则从文字上按下拖不动窗口。
+  const brandParts = document.querySelectorAll(".brand > span[data-tauri-drag-region]");
+  expect(brandParts.length).toBe(1);
 
   // 按钮绝不能带拖拽属性，否则点击会被当成拖动。
   for (const name of ["切换主题", "设置", "最小化", "最大化", "关闭"]) {
@@ -47,14 +43,14 @@ test("marks only non-interactive containers as drag regions", () => {
 
 test("opens settings through the title bar entry", () => {
   const onOpenSettings = vi.fn();
-  render(<TitleBar status="本地索引已就绪" itemCount={0} onOpenSettings={onOpenSettings} />);
+  render(<TitleBar onOpenSettings={onOpenSettings} />);
 
   fireEvent.click(screen.getByRole("button", { name: "设置" }));
   expect(onOpenSettings).toHaveBeenCalledTimes(1);
 });
 
 test("routes the window buttons to the current window API", async () => {
-  render(<TitleBar status="本地索引已就绪" itemCount={0} onOpenSettings={() => {}} />);
+  render(<TitleBar onOpenSettings={() => {}} />);
 
   fireEvent.click(screen.getByRole("button", { name: "最小化" }));
   fireEvent.click(screen.getByRole("button", { name: "最大化" }));
@@ -68,7 +64,7 @@ test("routes the window buttons to the current window API", async () => {
 });
 
 test("toggles the theme and persists the choice", () => {
-  render(<TitleBar status="本地索引已就绪" itemCount={0} onOpenSettings={() => {}} />);
+  render(<TitleBar onOpenSettings={() => {}} />);
 
   const before = document.documentElement.dataset.theme;
   fireEvent.click(screen.getByRole("button", { name: "切换主题" }));

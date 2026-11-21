@@ -27,58 +27,21 @@
 .brand {
   display: flex;
   align-items: center;
-  gap: 9px;
+  flex: 0 0 auto;
 }
 
-.brand-mark {
-  width: 22px;
-  height: 22px;
-  border: 1px solid var(--ink);
-  border-radius: 6px;
-  display: grid;
-  place-items: center;
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0;
-}
-
-.brand-name {
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-}
-
-.brand-latin {
-  font-family: var(--mono);
-  font-size: 9.5px;
-  font-weight: 400;
-  letter-spacing: 0.13em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-  margin-left: 6px;
-}
-
-.titlebar-mid {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  gap: 10px;
+/* 报头式字标：等宽大写 + 宽字距，安静但有识别度。 */
+.brand-word {
   font-family: var(--mono);
   font-size: 10.5px;
-  color: var(--ink-3);
-  letter-spacing: 0.03em;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.3em;
+  /* 抵消末字母的字距，避免右侧视觉留白过大。 */
+  margin-right: -0.3em;
+  text-transform: uppercase;
+  color: var(--ink);
   white-space: nowrap;
-  overflow: hidden;
-}
-
-.titlebar-mid > span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.titlebar-mid .dot {
-  opacity: 0.5;
-  overflow: visible;
 }
 
 .titlebar-right {
@@ -86,6 +49,7 @@
   align-items: center;
   gap: 2px;
   align-self: stretch;
+  margin-left: auto;
 }
 
 .icon-btn {

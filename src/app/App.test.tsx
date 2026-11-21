@@ -176,7 +176,6 @@ test("shows the library total from usage instead of the loaded page", async () =
 
   // 列表只加载了 1 条，但计数取后端的库总量。
   expect(await screen.findByText("找到 42 项")).toBeInTheDocument();
-  expect(await screen.findByText("42 条素材")).toBeInTheDocument();
 });
 
 test("keeps the add entry beside search in the normal library", async () => {

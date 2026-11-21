@@ -393,11 +393,7 @@ export default function App() {
 
   return (
     <div className="app">
-      <TitleBar
-        status={status}
-        itemCount={shownCount}
-        onOpenSettings={() => setSettingsOpen(true)}
-      />
+      <TitleBar onOpenSettings={() => setSettingsOpen(true)} />
 
       {migration !== null && (
         <div className="migration-banner" role="status">
