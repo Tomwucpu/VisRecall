@@ -18,6 +18,7 @@ const EMPTY: ModelConfigDto = { entries: [], activeId: null };
 function settings(cloudTextAi: boolean, cloudImageAi = false): SettingsDto {
   return {
     libraryPath: "D:\\VisRecall\\library",
+    startupMode: "silent",
     captureHotkey: "Ctrl+Shift+S",
     ballEnabled: true,
     ballSize: 56,

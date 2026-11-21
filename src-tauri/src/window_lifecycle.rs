@@ -1,4 +1,4 @@
-//! 主窗口生命周期：冷启动不建窗口，按需创建；关闭后隐藏并在 60s 后销毁
+//! 主窗口生命周期：按启动偏好或用户唤醒创建；关闭后隐藏并在 60s 后销毁
 //! WebView2（需求 P1-R01，架构 §3.3）。
 //!
 //! 「隐藏 + 安排销毁」与「显示 + 按需重建」必须整体串行，否则旧计时器可能在
@@ -41,7 +41,7 @@ pub fn install(app: &App) {
     }
 }
 
-/// 显示主窗口；窗口已销毁则按需重建。单实例回调与托盘共用此入口。
+/// 显示主窗口；窗口不存在则按需创建。冷启动、单实例回调与托盘共用此入口。
 ///
 /// 统一切到主线程执行，使窗口操作与代号递增落在同一个线程，不与其他线程
 /// 的窗口调用互相等待（可从任意线程安全调用）。
@@ -69,9 +69,16 @@ fn show_main_window_on_main(app: &AppHandle) {
     match create_main_window(app) {
         Ok(window) => {
             attach_close_handler(&window);
-            let _ = window.show();
+            if let Err(err) = window.show() {
+                tracing::warn!(error = %err, "failed to show newly created main window");
+            } else if let Some(start) = crate::PROCESS_START.get() {
+                // 与托盘就绪分开打点；不要把 WebView2 初始化算进静默启动耗时。
+                tracing::info!(
+                    "process start to main window visible: {}ms",
+                    start.elapsed().as_millis()
+                );
+            }
             let _ = window.set_focus();
-            tracing::info!("main window created");
         }
         Err(err) => tracing::error!(error = %err, "failed to create main window"),
     }
@@ -81,7 +88,7 @@ fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     // 开发态由 Tauri 把 App("index.html") 解析到 devUrl，生产态解析到打包资源。
     //
     // 窗口形态是 D-UI-1 的一部分：主窗口由这里按需创建（`tauri.conf.json` 不声明
-    // `app.windows`，否则启动即建 WebView2，破坏「冷启动只驻留托盘」），所以
+    // `app.windows`，否则静默启动也会创建 WebView2），所以
     // `decorations/shadow/resizable` 只能落在 builder 上，改配置不生效。
     // 自绘标题栏需要无系统边框；阴影与缩放保留；Win10 无系统圆角，方角观感已接受。
     WebviewWindowBuilder::new(app, MAIN_LABEL, WebviewUrl::App("index.html".into()))

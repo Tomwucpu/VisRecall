@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
-use visrecall_app_core::{AppCore, AppError, EventSink, Library};
+use visrecall_app_core::{AppCore, AppError, EventSink, Library, StartupMode};
 use visrecall_domain::storage::{OrphanStats, PruneReport, RetentionPreview, StorageUsage};
 use visrecall_domain::tag::{ItemTag, TagSource};
 
@@ -321,10 +321,38 @@ pub struct AppStatus {
     pub restart_required: bool,
 }
 
+/// IPC 使用严格枚举；只有磁盘配置读取时才允许坏值回退。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum StartupModeDto {
+    Silent,
+    ShowWindow,
+}
+
+impl From<StartupMode> for StartupModeDto {
+    fn from(mode: StartupMode) -> Self {
+        match mode {
+            StartupMode::Silent => Self::Silent,
+            StartupMode::ShowWindow => Self::ShowWindow,
+        }
+    }
+}
+
+impl From<StartupModeDto> for StartupMode {
+    fn from(mode: StartupModeDto) -> Self {
+        match mode {
+            StartupModeDto::Silent => Self::Silent,
+            StartupModeDto::ShowWindow => Self::ShowWindow,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsDto {
     pub library_path: String,
+    /// 下次冷启动使用的窗口显示偏好。
+    pub startup_mode: StartupModeDto,
     pub capture_hotkey: String,
     pub ball_enabled: bool,
     pub ball_size: u32,
@@ -345,6 +373,8 @@ pub struct SettingsDto {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsPatch {
+    /// 缺省时保留原启动方式。
+    pub startup_mode: Option<StartupModeDto>,
     pub ball_enabled: Option<bool>,
     pub ball_size: Option<u32>,
     pub capture_hotkey: Option<String>,
@@ -371,6 +401,7 @@ impl SettingsDto {
 
         SettingsDto {
             library_path: config.library_path.display().to_string(),
+            startup_mode: config.startup_mode.into(),
             capture_hotkey: config.hotkeys.capture.clone(),
             ball_enabled: config.ball.enabled,
             ball_size: config.ball.size,
@@ -1503,6 +1534,7 @@ pub async fn update_settings(
     run_blocking(app, move |core| {
         let config = core
             .update_settings(visrecall_app_core::SettingsPatchInput {
+                startup_mode: patch.startup_mode.map(Into::into),
                 ball_enabled: patch.ball_enabled,
                 ball_size: patch.ball_size,
                 capture_hotkey: patch.capture_hotkey,
@@ -1560,6 +1592,32 @@ mod tests {
         let restart = ApiError::from(&AppError::InvalidInput("restart required".into()));
         assert_eq!(restart.code, "INVALID_INPUT");
         assert_eq!(restart.message, "restart required");
+    }
+
+    #[test]
+    fn startup_mode_uses_strict_ipc_values_and_works_without_a_library() {
+        for (mode, json_value) in [
+            (StartupMode::Silent, "silent"),
+            (StartupMode::ShowWindow, "show_window"),
+        ] {
+            let config = visrecall_app_core::AppConfig {
+                startup_mode: mode,
+                ..Default::default()
+            };
+            let dto = SettingsDto::from_config(&config, None);
+            assert_eq!(
+                serde_json::to_value(dto).unwrap()["startupMode"],
+                json_value
+            );
+            let patch: SettingsPatch =
+                serde_json::from_value(serde_json::json!({ "startupMode": json_value })).unwrap();
+            assert_eq!(patch.startup_mode.map(StartupMode::from), Some(mode));
+        }
+        let omitted: SettingsPatch = serde_json::from_str(r#"{"ballSize":80}"#).unwrap();
+        assert!(omitted.startup_mode.is_none());
+        for invalid in [r#"{"startupMode":"unknown"}"#, r#"{"startupMode":false}"#] {
+            assert!(serde_json::from_str::<SettingsPatch>(invalid).is_err());
+        }
     }
 
     /// 两个云端解析开关都来自库内策略：默认关闭，写入后随 SettingsDto 一起回前端。

@@ -24,11 +24,36 @@ pub const BALL_MAX_SIZE: u32 = 150;
 /// 支持的通信协议标识（与原型 `PROTOS` 及 `Protocol::parse` 同口径）。
 pub const MODEL_PROTOCOLS: [&str; 4] = ["openai", "anthropic", "ollama", "rest"];
 
+/// 应用冷启动时是否自动打开主窗口；不影响后台运行或手动唤醒。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartupMode {
+    #[default]
+    Silent,
+    ShowWindow,
+}
+
+/// 仅磁盘配置容忍未知值，避免一个启动偏好使其它配置整体回退。
+fn deserialize_startup_mode<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<StartupMode, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match StartupMode::deserialize(value) {
+        Ok(mode) => Ok(mode),
+        Err(_) => {
+            tracing::warn!("invalid startup_mode in config; using silent startup");
+            Ok(StartupMode::default())
+        }
+    }
+}
+
 /// 应用配置，字段见 design §10.3；缺失字段一律回落到 [`AppConfig::default`]。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     pub library_path: PathBuf,
+    #[serde(default, deserialize_with = "deserialize_startup_mode")]
+    pub startup_mode: StartupMode,
     pub hotkeys: HotkeyConfig,
     pub ball: BallConfig,
     pub capture: CaptureConfig,
@@ -226,6 +251,7 @@ impl Default for AppConfig {
             // `USERPROFILE` 缺失时退回相对路径；正常 Windows 会话不会走到这里。
             library_path: paths::default_library_root()
                 .unwrap_or_else(|_| PathBuf::from("VisRecall")),
+            startup_mode: StartupMode::default(),
             hotkeys: HotkeyConfig::default(),
             ball: BallConfig::default(),
             capture: CaptureConfig::default(),

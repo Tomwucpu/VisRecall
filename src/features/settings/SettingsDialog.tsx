@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type MigrationProgress, type SettingsPatch } from "../../lib/api";
+import { api, type MigrationProgress, type SettingsDto, type SettingsPatch } from "../../lib/api";
 import { formatBytes } from "../../lib/format";
 import { queryKeys } from "../../lib/queryClient";
 import { errorMessage } from "../../lib/errors";
@@ -8,14 +8,16 @@ import { pushToast } from "../../lib/toast";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { ModelSettingsPane } from "./ModelSettingsPane";
 import { ImportSourcesPane } from "./ImportSourcesPane";
+import { StartupSettingsPane } from "./StartupSettingsPane";
 
 type Props = {
   onClose: () => void;
 };
 
-type PaneId = "capture" | "sources" | "storage" | "models";
+type PaneId = "general" | "capture" | "sources" | "storage" | "models";
 
 const PANE_META: Record<PaneId, { title: string; sub: string }> = {
+  general: { title: "通用", sub: "应用启动" },
   capture: { title: "捕获", sub: "快捷键 · 悬浮球" },
   sources: { title: "导入目录", sub: "引用 · 同步 · 重新定位" },
   storage: { title: "存储", sub: "位置 · 容量 · 保留策略" },
@@ -111,12 +113,13 @@ function comboOf(event: React.KeyboardEvent): string | null {
 /**
  * 设置弹窗（T5 + 阶段 02 接线）。
  *
- * 两个 pane 的所有写控件都接真实命令：快捷键/悬浮球走 `update_settings`，
+ * 启动方式、快捷键和悬浮球走 `update_settings`，
  * 容量/保留走库内 `settings` 表，清空与孤儿清理是不可恢复操作，确认词判断都在 Rust 侧。
  * 写失败一律「提示 + 回滚显示值」，不留下「界面显示已保存、实际没落盘」的状态。
  */
 export function SettingsDialog({ onClose }: Props) {
   const [pane, setPane] = useState<PaneId>("capture");
+  const [savingStartupMode, setSavingStartupMode] = useState(false);
   const [opening, setOpening] = useState(false);
   const [capturing, setCapturing] = useState(false);
   const [hotkeyError, setHotkeyError] = useState<string | null>(null);
@@ -189,6 +192,16 @@ export function SettingsDialog({ onClose }: Props) {
       pushToast(`${what}失败：${errorMessage(error)}`, "error");
       void queryClient.invalidateQueries({ queryKey: queryKeys.settings });
       return false;
+    }
+  };
+
+  // 保存期间保留后端已确认的值，也不触发当前窗口的开关动作。
+  const changeStartupMode = async (startupMode: SettingsDto["startupMode"]) => {
+    setSavingStartupMode(true);
+    try {
+      await patchSettings({ startupMode }, "修改启动方式");
+    } finally {
+      setSavingStartupMode(false);
     }
   };
 
@@ -403,7 +416,15 @@ export function SettingsDialog({ onClose }: Props) {
           </div>
 
           <div className="modal-content">
-            {pane === "models" ? (
+            {pane === "general" ? (
+              <StartupSettingsPane
+                mode={settings.data?.startupMode}
+                reading={settings.isFetching}
+                saving={savingStartupMode}
+                onChange={(mode) => void changeStartupMode(mode)}
+                onRetry={() => void settings.refetch()}
+              />
+            ) : pane === "models" ? (
               <ModelSettingsPane />
             ) : pane === "sources" ? (
               <ImportSourcesPane />

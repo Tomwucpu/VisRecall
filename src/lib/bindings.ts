@@ -666,6 +666,8 @@ export type SettingsDto = SettingsDto_Serialize | SettingsDto_Deserialize;
 
 export type SettingsDto_Deserialize = {
 	libraryPath: string,
+	/**  下次冷启动使用的窗口显示偏好。 */
+	startupMode: StartupModeDto,
 	captureHotkey: string,
 	ballEnabled: boolean,
 	ballSize: number,
@@ -685,6 +687,8 @@ export type SettingsDto_Deserialize = {
 
 export type SettingsDto_Serialize = {
 	libraryPath: string,
+	/**  下次冷启动使用的窗口显示偏好。 */
+	startupMode: StartupModeDto,
 	captureHotkey: string,
 	ballEnabled: boolean,
 	ballSize: number,
@@ -705,6 +709,8 @@ export type SettingsDto_Serialize = {
 export type SettingsPatch = SettingsPatch_Serialize | SettingsPatch_Deserialize;
 
 export type SettingsPatch_Deserialize = {
+	/**  缺省时保留原启动方式。 */
+	startupMode?: StartupModeDto | null,
 	ballEnabled?: boolean | null,
 	ballSize?: number | null,
 	captureHotkey?: string | null,
@@ -715,6 +721,8 @@ export type SettingsPatch_Deserialize = {
 };
 
 export type SettingsPatch_Serialize = {
+	/**  缺省时保留原启动方式。 */
+	startupMode: StartupModeDto | null,
 	ballEnabled: boolean | null,
 	ballSize: number | null,
 	captureHotkey: string | null,
@@ -723,6 +731,9 @@ export type SettingsPatch_Serialize = {
 	/**  全屏自动隐藏；`None` 表示不改。 */
 	hideInFullscreen: boolean | null,
 };
+
+/**  IPC 使用严格枚举；只有磁盘配置读取时才允许坏值回退。 */
+export type StartupModeDto = "silent" | "show_window";
 
 /**  存储用量快照。 */
 export type StorageUsageDto = {

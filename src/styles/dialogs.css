@@ -149,6 +149,46 @@
   flex: 0 0 auto;
 }
 
+/* 启动方式沿用设置行的分隔与字号，保留原生单选的键盘交互。 */
+.startup-mode {
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.startup-mode-heading {
+  padding: 0;
+  font-weight: 600;
+}
+
+.startup-mode-option {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  justify-content: start;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.startup-mode-option input {
+  margin: 0;
+  accent-color: var(--ink);
+}
+
+.startup-mode:disabled .startup-mode-option {
+  cursor: default;
+}
+
+.startup-mode-copy,
+.startup-mode-copy .row-d {
+  display: block;
+}
+
+.startup-mode-hint {
+  margin-top: 12px;
+  color: var(--ink-2);
+}
+
 .switch {
   width: 36px;
   height: 20px;

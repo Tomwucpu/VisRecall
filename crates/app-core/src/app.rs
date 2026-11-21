@@ -18,6 +18,7 @@ use visrecall_domain::storage::{
 };
 use visrecall_domain::tag::ItemTag;
 use visrecall_domain::{now_millis, AppError, ItemKind};
+use visrecall_library::config::StartupMode;
 use visrecall_library::paths::AppPaths;
 use visrecall_library::{AppConfig, Library, ModelConfig};
 use visrecall_shell::ball::{
@@ -95,6 +96,7 @@ pub struct RelocateResult {
 /// （阶段 03 的模型配置），逐个位置参数化会让调用方难以看出漏了哪个字段。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SettingsPatchInput {
+    pub startup_mode: Option<StartupMode>,
     pub ball_enabled: Option<bool>,
     pub ball_size: Option<u32>,
     pub capture_hotkey: Option<String>,
@@ -1104,12 +1106,11 @@ impl AppCore {
 
     /// 应用设置补丁（design §6.11 的顺序即正确性）。
     ///
-    /// 1. 先校验（尺寸三档、快捷键 parse）——不落盘、不改内存；
+    /// 1. 先校验悬浮球尺寸和快捷键，不落盘、不改内存；
     /// 2. 若换键：**先起新线程**（注册失败 → `INVALID_INPUT`，旧句柄仍有效）；
-    /// 3. 落盘（失败 → 停掉新线程，返回 IO，内存不变）；
-    /// 4. 更新内存配置；
-    /// 5. 换键成功才停旧线程并存入新句柄，同时发 `HotkeyRestored` 清托盘冲突提示；
-    /// 6. 悬浮球：可见性、尺寸、贴边/全屏开关立即生效。
+    /// 3. 持配置锁合并补丁、落盘、更新内存（失败则不更新内存，并释放待切换的热键）；
+    /// 4. 换键成功才停旧线程并存入新句柄，同时发 `HotkeyRestored` 清托盘冲突提示；
+    /// 5. 悬浮球设置立即生效，启动方式只保存供下次冷启动使用。
     pub fn update_settings(&self, patch: SettingsPatchInput) -> Result<AppConfig, AppError> {
         // 1. 校验
         let new_spec = match patch.capture_hotkey.as_deref() {
@@ -1134,10 +1135,13 @@ impl AppCore {
             }
         }
 
-        // 3. 落盘：失败要把已经注册的新线程停掉，否则会留下一个「配置文件里没有」的热键。
-        let mut next = {
-            let guard = self.lock_config();
+        // 3. 合并、落盘和更新内存保持在同一次加锁内，避免并发写入覆盖其它设置。
+        let (previous, next) = {
+            let mut guard = self.lock_config();
             let mut next = guard.clone();
+            if let Some(mode) = patch.startup_mode {
+                next.startup_mode = mode;
+            }
             if let Some(enabled) = patch.ball_enabled {
                 next.ball.enabled = enabled;
             }
@@ -1158,29 +1162,19 @@ impl AppCore {
                     .unwrap_or_else(|| guard.hotkeys.capture.clone());
             }
 
-            if let Err(err) = next.save_atomic(&self.paths.config_file) {
-                drop(pending_hotkey);
-                return Err(err);
-            }
-            next
+            next.save_atomic(&self.paths.config_file)?;
+            let previous = std::mem::replace(&mut *guard, next.clone());
+            (previous, next)
         };
 
-        // 4. 更新内存（配置锁只在这段持有）
-        let previous = {
-            let mut guard = self.lock_config();
-            let previous = guard.clone();
-            *guard = next.clone();
-            previous
-        };
-
-        // 5. 换键：停旧线程、存新句柄。配置锁已释放，避免与捕获循环的落盘形成反向持锁。
+        // 4. 换键：停旧线程、存新句柄。配置锁已释放，避免与捕获循环的落盘形成反向持锁。
         if let Some(handle) = pending_hotkey {
             let old = self.lock_hotkey().replace(handle);
             drop(old);
             self.sink.emit(AppEvent::HotkeyRestored);
         }
 
-        // 6. 悬浮球：可见性、尺寸与显示开关都立即生效
+        // 5. 悬浮球：可见性、尺寸与显示开关都立即生效
         if next.ball.enabled != previous.ball.enabled {
             self.apply_ball_visibility(next.ball.enabled);
         }
@@ -1199,9 +1193,8 @@ impl AppCore {
         }
 
         tracing::info!(config = %self.paths.config_file.display(), "settings saved");
-        // `next` 在这里已经被克隆进内存；返回值用于命令层回填前端缓存。
-        next = self.config();
-        Ok(next)
+        // 返回最新配置快照，供命令层回填前端缓存。
+        Ok(self.config())
     }
 
     /// 测试/诊断：当前热键线程的组合键。
@@ -1880,6 +1873,56 @@ mod tests {
         assert!(matches!(core.library(), Err(AppError::Io(_))));
         // 库不可用时命令层仍能拿到路径用于展示。
         assert!(core.library_root().ends_with("blocked"));
+    }
+
+    #[test]
+    fn startup_mode_persists_even_when_library_is_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        // 用文件占住库路径，验证应用偏好不依赖素材库。
+        fs::write(&paths.default_library_root, b"blocked").unwrap();
+        seed_config(&paths);
+        let core = AppCore::open(paths, Arc::new(RecordingSink::default()));
+        assert!(!core.library_ok());
+        assert_eq!(core.config().startup_mode, StartupMode::Silent);
+
+        let updated = core
+            .update_settings(SettingsPatchInput {
+                startup_mode: Some(StartupMode::ShowWindow),
+                ..SettingsPatchInput::default()
+            })
+            .unwrap();
+        assert_eq!(updated.startup_mode, StartupMode::ShowWindow);
+        let other_update = core
+            .update_settings(SettingsPatchInput {
+                ball_size: Some(80),
+                ..SettingsPatchInput::default()
+            })
+            .unwrap();
+        assert_eq!(other_update.startup_mode, StartupMode::ShowWindow);
+        drop(core);
+
+        let reopened = AppCore::open(paths_in(dir.path()), Arc::new(RecordingSink::default()));
+        assert_eq!(reopened.config().startup_mode, StartupMode::ShowWindow);
+        assert_eq!(reopened.config().ball.size, 80);
+    }
+
+    #[test]
+    fn startup_mode_write_failure_keeps_old_memory_and_disk_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, _sink) = open(dir.path());
+        let path = &core.paths().config_file;
+        let old = fs::read(path).unwrap();
+        // 只阻断原子写入过程，不动原来的配置文件。
+        fs::create_dir(path.with_extension("json.tmp")).unwrap();
+
+        let result = core.update_settings(SettingsPatchInput {
+            startup_mode: Some(StartupMode::ShowWindow),
+            ..SettingsPatchInput::default()
+        });
+        assert!(matches!(result, Err(AppError::Io(_))));
+        assert_eq!(core.config().startup_mode, StartupMode::Silent);
+        assert_eq!(fs::read(path).unwrap(), old);
     }
 
     #[test]

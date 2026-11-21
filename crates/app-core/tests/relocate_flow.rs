@@ -16,7 +16,9 @@ use visrecall_app_core::capture_flow::{
     CaptureCoordinator, NoopWindowVisibility, OverlayPresenter,
 };
 use visrecall_app_core::events::{AppEvent, EventSink, RecordingSink};
-use visrecall_app_core::{handle_shell_event, AppCore, CaptureGate};
+use visrecall_app_core::{
+    handle_shell_event, AppCore, CaptureGate, SettingsPatchInput, StartupMode,
+};
 use visrecall_capture::{FrameGrabber, RawFrame, WindowProbe};
 use visrecall_domain::capture::{DisplayInfo, ForegroundInfo};
 use visrecall_domain::drop::DropContent;
@@ -279,6 +281,11 @@ fn successful_relocation_switches_config_and_requires_restart() {
     let fixture = fixture("Ctrl+Alt+Shift+F7");
     let sink = Arc::new(RecordingSink::default());
     let core = AppCore::open(paths(&fixture), sink.clone());
+    core.update_settings(SettingsPatchInput {
+        startup_mode: Some(StartupMode::ShowWindow),
+        ..SettingsPatchInput::default()
+    })
+    .unwrap();
 
     let result = core
         .relocate_library(fixture.target.clone())
@@ -301,6 +308,7 @@ fn successful_relocation_switches_config_and_requires_restart() {
     // config.json 已落盘（重启后据此打开新库）。
     let saved = AppConfig::load_or_default(&fixture.config_file);
     assert_eq!(saved.library_path, fixture.target);
+    assert_eq!(saved.startup_mode, StartupMode::ShowWindow);
 
     // 源目录不删：迁移是「复制 + 校验」，失败/重启前旧库仍是权威副本。
     assert!(fixture.library_root.join("visrecall.db").exists());

@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { SettingsDto } from "../../lib/api";
 import { resetToasts } from "../../lib/toast";
 import { ToastViewport } from "../shell/ToastViewport";
 import { SettingsDialog } from "./SettingsDialog";
@@ -7,6 +8,7 @@ import { SettingsDialog } from "./SettingsDialog";
 const commands = vi.hoisted(() => ({
   getSettings: vi.fn(async () => ({
     libraryPath: "D:\\VisRecall\\library",
+    startupMode: "silent" as SettingsDto["startupMode"],
     captureHotkey: "Ctrl+Shift+S",
     ballEnabled: true,
     ballSize: 56,
@@ -19,6 +21,7 @@ const commands = vi.hoisted(() => ({
   })),
   updateSettings: vi.fn(async (patch: Record<string, unknown>) => ({
     libraryPath: "D:\\VisRecall\\library",
+    startupMode: (patch.startupMode as SettingsDto["startupMode"] | undefined) ?? "silent",
     captureHotkey: (patch.captureHotkey as string | undefined) ?? "Ctrl+Shift+S",
     ballEnabled: true,
     ballSize: (patch.ballSize as number | undefined) ?? 56,
@@ -67,8 +70,10 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-test("shows the capture, storage and model panes", () => {
+test("shows the general, capture, storage and model panes", () => {
   renderDialog();
+
+  expect(screen.getByRole("button", { name: "通用" })).toBeInTheDocument();
 
   expect(screen.getByRole("button", { name: "捕获" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "存储" })).toBeInTheDocument();
@@ -77,6 +82,72 @@ test("shows the capture, storage and model panes", () => {
   for (const hidden of ["隐私", "关于"]) {
     expect(screen.queryByRole("button", { name: hidden })).not.toBeInTheDocument();
   }
+});
+
+function openStartupSettings() {
+  renderDialog();
+  fireEvent.click(screen.getByRole("button", { name: "通用" }));
+}
+
+test("selects the saved startup mode and explains when it takes effect", async () => {
+  const get = commands.getSettings.getMockImplementation()!;
+  commands.getSettings.mockImplementationOnce(async () => ({
+    ...(await get()),
+    startupMode: "show_window",
+  }));
+  openStartupSettings();
+
+  expect(await screen.findByRole("radio", { name: "启动时显示主窗口" })).toBeChecked();
+  expect(screen.getByRole("radio", { name: "静默启动" })).not.toBeChecked();
+  expect(screen.getByText(/下次启动生效/)).toBeInTheDocument();
+});
+
+test("saves only the startup mode and disables both options until it is confirmed", async () => {
+  const update = commands.updateSettings.getMockImplementation()!;
+  let finishSave = () => {};
+  commands.updateSettings.mockImplementationOnce(async (patch) => {
+    await new Promise<void>((resolve) => { finishSave = resolve; });
+    return update(patch);
+  });
+  openStartupSettings();
+
+  const show = await screen.findByRole("radio", { name: "启动时显示主窗口" });
+  const silent = screen.getByRole("radio", { name: "静默启动" });
+  expect(silent).toBeChecked();
+  fireEvent.click(show);
+
+  expect(commands.updateSettings).toHaveBeenCalledExactlyOnceWith({ startupMode: "show_window" });
+  expect(show).toBeDisabled();
+  expect(silent).toBeDisabled();
+  expect(silent).toBeChecked();
+  finishSave();
+  await waitFor(() => expect(show).toBeChecked());
+  expect(show).toBeEnabled();
+});
+
+test("keeps the saved startup mode and reports a write error when saving fails", async () => {
+  commands.updateSettings.mockRejectedValueOnce({ code: "IO", message: "磁盘不可写" });
+  openStartupSettings();
+
+  const show = await screen.findByRole("radio", { name: "启动时显示主窗口" });
+  fireEvent.click(show);
+
+  expect(await screen.findByText(/修改启动方式失败：磁盘不可写/)).toBeInTheDocument();
+  expect(screen.getByRole("radio", { name: "静默启动" })).toBeChecked();
+  expect(show).not.toBeChecked();
+  expect(show).toBeEnabled();
+});
+
+test("offers a retry instead of a fake default when startup settings cannot be read", async () => {
+  commands.getSettings.mockRejectedValueOnce({ code: "IO", message: "读取失败" });
+  openStartupSettings();
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("无法读取启动方式");
+  expect(screen.queryByRole("radio")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "重试" }));
+
+  expect(await screen.findByRole("radio", { name: "静默启动" })).toBeChecked();
+  expect(commands.getSettings).toHaveBeenCalledTimes(2);
 });
 
 test("reflects the real hotkey and ball configuration read from settings", async () => {

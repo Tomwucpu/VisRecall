@@ -43,6 +43,7 @@ pub use search_flow::SearchFlow;
 pub use storage_flow::{check_quota, prune_expired};
 pub use thumbnail::{generate_thumbnail, load_thumb_bytes};
 pub use visrecall_domain::AppError;
+pub use visrecall_library::config::StartupMode;
 pub use visrecall_library::paths::AppPaths;
 pub use visrecall_library::{
     AppConfig, Library, ModelConfig, ModelEntry, ProviderEntry, MODEL_PROTOCOLS,

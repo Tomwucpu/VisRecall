@@ -415,6 +415,7 @@ export default function App() {
         <div className="migration-banner" role="status">
           <span>
             库已迁移到 {statusQuery.data?.libraryPath}，重启后生效；重启前捕获已暂停。
+            若设置为静默启动，重启后可从托盘打开主窗口。
           </span>
           <button
             type="button"

@@ -46,6 +46,7 @@ const commands = vi.hoisted(() => ({
     getItem,
     getSettings: vi.fn(async () => ({
       libraryPath: "D:\\VisRecall\\library",
+      startupMode: "silent",
       captureHotkey: "Ctrl+Shift+S",
       ballEnabled: true,
       ballSize: 56,
@@ -238,6 +239,7 @@ test("shows a persistent banner when a library migration awaits restart", async 
     return node as HTMLElement;
   });
   expect(banner).toHaveTextContent("库已迁移到 E:/VisRecall/library，重启后生效");
+  expect(banner).toHaveTextContent("若设置为静默启动，重启后可从托盘打开主窗口。");
 
   fireEvent.click(screen.getByRole("button", { name: "立即重启" }));
   await waitFor(() => {

@@ -11,6 +11,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use tauri::Manager;
+use visrecall_app_core::StartupMode;
 
 /// 进程启动时刻；用于记录「冷启动到托盘可用」耗时。
 static PROCESS_START: OnceLock<Instant> = OnceLock::new();
@@ -63,11 +64,14 @@ fn main() {
                 visibility,
             );
             let library_ok = core.library_ok();
+            let startup_mode = core.config().startup_mode;
             app.manage(core);
 
-            // 托盘是冷启动唯一入口；不创建主窗口（架构 §3.3）。
-            // 库打不开时托盘进入异常态（红色图标 + 「库不可用」提示），但不阻止驻留。
+            // 两种启动方式都先创建托盘；库打不开时仍保留异常托盘和手动入口。
             tray::create(app, library_ok)?;
+            if let Some(start) = PROCESS_START.get() {
+                tracing::info!(?startup_mode, "cold start to tray: {}ms", start.elapsed().as_millis());
+            }
             window_lifecycle::install(app);
 
             // 覆盖层线程/D3D 设备在启动时预创建；失败只记录，不影响托盘驻留。
@@ -86,9 +90,9 @@ fn main() {
                 tracing::warn!(error = %err, "indexing pipeline unavailable; search degrades to FTS");
             }
 
-            if let Some(start) = PROCESS_START.get() {
-                // 冷启动耗时口径：进程启动 → 托盘创建完成（主窗口仍未创建）。
-                tracing::info!("cold start to tray: {}ms", start.elapsed().as_millis());
+            // 只在冷启动消费这份偏好；托盘和单实例唤醒始终可以打开窗口。
+            if startup_mode == StartupMode::ShowWindow {
+                window_lifecycle::show_main_window(app.handle());
             }
             Ok(())
         })

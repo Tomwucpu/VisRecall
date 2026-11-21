@@ -15,6 +15,7 @@ const commands = vi.hoisted(() => ({
   openLibraryFolder: vi.fn(async () => null),
   getSettings: vi.fn(async () => ({
     libraryPath: "D:\\VisRecall\\library",
+    startupMode: "silent",
     captureHotkey: "Ctrl+Shift+S",
     ballEnabled: true,
     ballSize: 56,

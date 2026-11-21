@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use visrecall_library::config::{
-    AppConfig, BallConfig, CaptureConfig, BALL_MAX_SIZE, BALL_MIN_SIZE,
+    AppConfig, BallConfig, CaptureConfig, StartupMode, BALL_MAX_SIZE, BALL_MIN_SIZE,
 };
 use visrecall_library::paths::{ensure_library_root, AppPaths, LibraryMeta};
 
@@ -121,9 +121,57 @@ fn config_roundtrips_custom_values() {
 }
 
 #[test]
+fn startup_modes_roundtrip_with_stable_json_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+
+    for (startup_mode, json_value) in [
+        (StartupMode::Silent, "silent"),
+        (StartupMode::ShowWindow, "show_window"),
+    ] {
+        let cfg = AppConfig {
+            startup_mode,
+            ..AppConfig::default()
+        };
+        cfg.save_atomic(&path).unwrap();
+        let stored: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(stored["startup_mode"], json_value);
+        assert_eq!(AppConfig::load_or_default(&path), cfg);
+    }
+}
+
+#[test]
+fn invalid_startup_mode_preserves_other_config_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let custom_library = dir.path().join("自定义素材库");
+    for invalid in [
+        serde_json::json!("unknown"),
+        serde_json::json!(false),
+        serde_json::Value::Null,
+    ] {
+        let json = serde_json::json!({
+            "startup_mode": invalid,
+            "library_path": custom_library,
+            "hotkeys": {"capture": "Ctrl+Alt+V"},
+        });
+        let bytes = serde_json::to_vec(&json).unwrap();
+        fs::write(&path, &bytes).unwrap();
+
+        let cfg = AppConfig::load_or_default(&path);
+        assert_eq!(cfg.startup_mode, StartupMode::Silent);
+        assert_eq!(cfg.library_path, custom_library);
+        assert_eq!(cfg.hotkeys.capture, "Ctrl+Alt+V");
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert!(backup_names(dir.path(), "config.json.bad-").is_empty());
+    }
+}
+
+#[test]
 fn default_config_matches_design() {
     let cfg = AppConfig::default();
     assert!(cfg.library_path.ends_with(Path::new("VisRecall")));
+    assert_eq!(cfg.startup_mode, StartupMode::Silent);
     assert_eq!(cfg.hotkeys.capture, "Ctrl+Shift+S");
     assert!(cfg.ball.enabled);
     assert_eq!(cfg.ball.size, 56);
@@ -167,6 +215,7 @@ fn partial_config_fills_defaults() {
     let cfg = AppConfig::load_or_default(&path);
     assert_eq!(cfg.hotkeys.capture, "Ctrl+Alt+V");
     assert_eq!(cfg.ball.size, 64);
+    assert_eq!(cfg.startup_mode, StartupMode::Silent);
     assert!(cfg.ball.enabled);
     assert!(cfg.capture.realtime_fallback);
     assert_eq!(cfg.library_path, AppConfig::default().library_path);
