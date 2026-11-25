@@ -21,3 +21,6 @@ src-tauri/gen/
 # logs
 *.log
 logs/
+
+# 文档：由 docs/ 下的独立本地仓库管理，不上传到 GitHub
+docs/
