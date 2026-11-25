@@ -4,23 +4,20 @@
 
 <h1 align="center">VisRecall</h1>
 
-<hr />
-
 <p align="center">
   <b>更轻、更顺手的本地素材库。截图、图片与文本，一句话找回。</b>
 </p>
-
 <p align="center">
   <img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-3b82f6" />
   <img alt="Rust" src="https://img.shields.io/badge/rust-stable%20%C2%B7%202021-b7410e" />
   <img alt="Tauri" src="https://img.shields.io/badge/tauri-2-24c8db" />
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-Windows%2010%20%7C%2011%20x64-6b7280" />
-  <img alt="Release" src="https://img.shields.io/github/v/release/Tomwucpu/VisRecall?include_prereleases&label=release&color=22c55e" />
 </p>
+
 
 <p align="center">
   <a href="https://github.com/Tomwucpu/VisRecall/releases/latest">
-    <img src="docs/assets/download-button.svg" width="288" alt="下载 VisRecall" />
+    <img src=".github/assets/download-button.svg" width="288" alt="下载 VisRecall" />
   </a>
 </p>
 
@@ -116,7 +113,7 @@ src-tauri/    桌面壳：启动顺序、托盘、窗口生命周期、IPC 命�
 crates/       Rust workspace（见下表）
 models/       随包模型、词表与 ONNX Runtime（含 manifest.json 校验清单）
 scripts/      模型校验、OCR 精度、发布打包脚本
-docs/         架构设计、阶段规划、发布手册与评测材料
+docs/         设计文档、发布手册与评测材料（内部资料，不随公开仓库发布）
 ```
 
 | crate | 职责 |
@@ -132,8 +129,6 @@ docs/         架构设计、阶段规划、发布手册与评测材料
 | `eval` | 检索评测 CLI |
 
 依赖方向保持单向：`src-tauri → app-core → { shell, pipeline } → { capture, library, search, ai } → domain`。`search` 不依赖 `ai`，`pipeline` 不依赖 `app-core`。
-
-更完整的架构说明见 [`docs/VisRecall-技术架构设计.md`](docs/VisRecall-技术架构设计.md)。
 
 ## 反馈与第三方声明
 
