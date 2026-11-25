@@ -4,10 +4,17 @@ VisRecall 是 Windows 上的本地素材库，用于收集截图、图片和文�
 
 ## 安装
 
-1. 在 [GitHub Releases](https://github.com/Tomwucpu/VisRecall/releases) 选择要安装的版本。下载安装包 `VisRecall_<版本>_x64-setup.exe` 和对应的 `SHA256SUMS.txt`。在 PowerShell 对安装包运行 `Get-FileHash -Algorithm SHA256 -LiteralPath .\VisRecall_0.1.0_x64-setup.exe`，比对该版本的校验值。
-2. 为本地 OCR 和语义检索准备 [Microsoft Visual C++ v14 Redistributable（x64）](https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist)。需要在离线机器上安装时，可以先下载微软的运行库安装程序。VisRecall 安装包内置 WebView2 Evergreen 独立安装程序和本地模型。
-3. 运行安装包，先选「安装位置」，存放程序和随包模型。首次安装再选择「素材库位置」，默认是 `%USERPROFILE%\Documents\VisRecall`。也可选择可写的新目录或空目录，例如 `D:\VisRecall 数据\素材库`。两处目录需要分开。
-4. 从开始菜单启动 VisRecall。应用默认在系统托盘启动，点击托盘图标打开主窗口。在「设置 → 存储」可以核对素材库路径，之后也可在该处迁移素材库。
+1. 在 [GitHub Releases](https://github.com/Tomwucpu/VisRecall/releases) 选择要安装的版本，按目标机器能否联网选择安装包。两者都随包携带本地模型和 ONNX Runtime，安装后都能断网使用本地 OCR 与语义检索：
+
+   | 安装包 | 体积 | 选择场景 |
+   | --- | --- | --- |
+   | `VisRecall_<版本>_x64-setup.exe` | 约 42 MB | 机器可以联网。系统缺少 WebView2 时，安装程序会自动下载并安装运行时；Windows 11 和 Windows 10（1803 及以后）通常已自带。 |
+   | `VisRecall_<版本>_x64-setup-offline.exe` | 约 330 MB | 机器不能联网，或安装程序被策略限制联网。安装包内置 WebView2 Evergreen 独立安装程序，无需下载。 |
+
+2. 下载同版本页面上的 `SHA256SUMS.txt`，在 PowerShell 核对所选安装包，例如 `Get-FileHash -Algorithm SHA256 -LiteralPath .\VisRecall_0.1.0_x64-setup.exe`，结果应与校验文件中对应行一致。
+3. 为本地 OCR 和语义检索准备 [Microsoft Visual C++ v14 Redistributable（x64）](https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist)。离线机器可先下载该运行库安装程序。两种安装包都会安装 WebView2 运行时，差别只在于 WebView2 是否随包提供。
+4. 运行安装包，先选「安装位置」，存放程序和随包模型。首次安装再选择「素材库位置」，默认是 `%USERPROFILE%\Documents\VisRecall`。也可选择可写的新目录或空目录，例如 `D:\VisRecall 数据\素材库`。两处目录需要分开。
+5. 从开始菜单启动 VisRecall。应用默认在系统托盘启动，点击托盘图标打开主窗口。在「设置 → 存储」可以核对素材库路径，之后也可在该处迁移素材库。
 
 首发候选包面向 Windows 11 x64。实际验收通过的 Windows 版本以对应 Release 的说明为准。未签名候选包可能触发 Windows SmartScreen 警告或被 Smart App Control 阻止，签名状态也以该 Release 的说明为准。
 

@@ -39,7 +39,7 @@
         "languages": ["SimpChinese"],
         "template": "installer/installer.nsi"
       },
-      "webviewInstallMode": { "type": "offlineInstaller" }
+      "webviewInstallMode": { "type": "downloadBootstrapper" }
     }
   }
 }
