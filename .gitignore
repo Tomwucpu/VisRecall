@@ -15,6 +15,9 @@ src-tauri/gen/
 .idea/
 *.iml
 
+# agent 本地状态（计划草稿、会话缓存等，逐人不同）
+.codebuddy/
+
 # logs
 *.log
 logs/
