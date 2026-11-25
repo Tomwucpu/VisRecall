@@ -25,7 +25,7 @@ use visrecall_shell::ball::{
     spawn_ball_thread, BallConfig, BallFeedback, BallFeedbackHandle, BallHandle, BallSettings,
     BALL_MAX_SIZE, BALL_MIN_SIZE,
 };
-use visrecall_shell::hotkey::{spawn_hotkey_thread, HotkeyHandle, HotkeySpec};
+use visrecall_shell::hotkey::{spawn_hotkey_thread_with_gate, HotkeyHandle, HotkeySpec};
 use visrecall_shell::overlay::{spawn_overlay_thread, OverlayHandle};
 use visrecall_shell::{OverlayEvent, ShellEvent};
 
@@ -99,6 +99,7 @@ pub struct SettingsPatchInput {
     pub startup_mode: Option<StartupMode>,
     pub ball_enabled: Option<bool>,
     pub ball_size: Option<u32>,
+    pub capture_enabled: Option<bool>,
     pub capture_hotkey: Option<String>,
     pub ball_edge_hide: Option<bool>,
     pub hide_in_fullscreen: Option<bool>,
@@ -149,6 +150,10 @@ pub struct AppCore {
     sink: Arc<dyn EventSink>,
     /// 全局热键线程句柄；`start_hotkey` 之后才有值，drop 时自动注销。
     hotkey: Mutex<Option<HotkeyHandle>>,
+    /// 串行化开关、换键、启动和停止；原生线程不会持有此锁。
+    capture_lifecycle: Mutex<()>,
+    /// 与已保存配置同步，供输入线程和捕获循环读取。
+    capture_enabled: Arc<AtomicBool>,
     /// 捕获运行时；`start_runtime` 之后才有值，drop 时通知线程退出。
     runtime: Mutex<Option<CaptureRuntime>>,
     /// 主窗口（以及将来其他自有窗口）的隐藏/恢复；注入自 `src-tauri`。
@@ -182,6 +187,7 @@ pub struct AppCore {
 struct CaptureRuntime {
     /// 热键/悬浮球线程投递捕获请求的发送端。
     shell_tx: Sender<ShellEvent>,
+    cancel_capture: Sender<Sender<()>>,
     /// 只为持有覆盖层线程：命令通道断开后覆盖层线程自行退出。
     _overlay: OverlayHandle,
 }
@@ -204,6 +210,7 @@ impl AppCore {
     ) -> AppCore {
         let config = AppConfig::load_or_default(&paths.config_file);
         let ball_enabled = config.ball.enabled;
+        let capture_enabled = config.capture.enabled;
         let library_path = config.library_path.clone();
         tracing::info!(
             config = %paths.config_file.display(),
@@ -277,6 +284,8 @@ impl AppCore {
             config: Arc::new(Mutex::new(config)),
             sink,
             hotkey: Mutex::new(None),
+            capture_lifecycle: Mutex::new(()),
+            capture_enabled: Arc::new(AtomicBool::new(capture_enabled)),
             runtime: Mutex::new(None),
             main_visibility: visibility,
             ball: Arc::new(Mutex::new(None)),
@@ -341,8 +350,12 @@ impl AppCore {
     ///
     /// 恢复顺序必须是 `start_runtime()` → `start_hotkey()`（后者依赖前者建好的通道）。
     pub fn stop_runtime(&self) {
+        let _lifecycle = self.lock_capture_lifecycle();
         self.lock_runtime().take();
-        self.lock_hotkey().take();
+        let hotkey = self.lock_hotkey().take();
+        if let Some(hotkey) = hotkey {
+            hotkey.stop_and_wait();
+        }
         self.lock_ball().take();
     }
 
@@ -406,6 +419,7 @@ impl AppCore {
     /// 悬浮球线程即使配置为禁用也启动（窗口保持隐藏）：托盘随时可以打开球，
     /// 也避免每次切换都重建 COM/GDI+ 线程。
     pub fn start_runtime(&self) -> Result<(), AppError> {
+        let _lifecycle = self.lock_capture_lifecycle();
         if self.lock_runtime().is_some() {
             tracing::debug!("capture runtime already started");
             return Ok(());
@@ -431,6 +445,7 @@ impl AppCore {
                 hide_in_fullscreen: config.ball.hide_in_fullscreen,
             },
             shell_tx.clone(),
+            Arc::clone(&self.capture_enabled),
         );
         let ball_feedback = ball.feedback_handle();
         *self.lock_ball() = Some(ball);
@@ -460,7 +475,8 @@ impl AppCore {
             Arc::clone(&self.sink),
         )
         // 纵深防御：主检查在捕获循环的事件分发处，这里再挡一次（防新入口绕过循环）。
-        .with_gate(self.gate_handle());
+        .with_gate(self.gate_handle())
+        .with_capture_enabled(Arc::clone(&self.capture_enabled));
         // 拖放导入：`Drop` 事件到达捕获循环后派发到独立工作线程（`spawn_import`），
         // 导入的落盘/转码/联网不会占住捕获事件循环。来源应用用独立探针实例。
         let import = Arc::new(ImportFlow::new(
@@ -469,12 +485,16 @@ impl AppCore {
             Arc::clone(&self.sink),
         ));
 
+        let (cancel_capture, cancel_rx) = crossbeam_channel::unbounded();
         spawn_capture_loop(
             coordinator,
             import,
             self.gate_handle(),
-            shell_rx,
-            overlay_rx,
+            CaptureLoopEvents {
+                shell: shell_rx,
+                overlay: overlay_rx,
+                cancel: cancel_rx,
+            },
             Arc::clone(&self.config),
             self.paths.config_file.clone(),
             Some(ball_feedback),
@@ -482,6 +502,7 @@ impl AppCore {
 
         *self.lock_runtime() = Some(CaptureRuntime {
             shell_tx,
+            cancel_capture,
             _overlay: overlay,
         });
         tracing::info!("capture runtime started");
@@ -537,7 +558,7 @@ impl AppCore {
         }
     }
 
-    /// 启动全局捕获热键（解析配置 → 注册 → 起事件消费线程）。
+    /// 截图开启时启动全局捕获热键（解析配置 → 注册 → 起事件消费线程）。
     ///
     /// 必须在托盘创建之后调用：注册失败要把「快捷键冲突」立刻显示在托盘提示上。
     /// 失败不阻止应用启动，只上报 [`AppEvent::HotkeyConflict`]；重复调用是空操作。
@@ -546,6 +567,10 @@ impl AppCore {
     /// （库不可用等降级场景）退回临时通道，收到请求后只发
     /// `capture_failed { CAPTURE_UNAVAILABLE }`，不触发真实抓帧，也避免事件丢失。
     pub fn start_hotkey(&self) -> Result<(), AppError> {
+        let _lifecycle = self.lock_capture_lifecycle();
+        if !self.capture_enabled.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         if self.lock_hotkey().is_some() {
             tracing::debug!("capture hotkey already started");
             return Ok(());
@@ -587,7 +612,8 @@ impl AppCore {
         let uses_runtime = runtime_tx.is_some();
         let tx = runtime_tx.unwrap_or(fallback_tx);
 
-        let handle = spawn_hotkey_thread(spec, tx)?;
+        let handle =
+            spawn_hotkey_thread_with_gate(spec, tx, Some(Arc::clone(&self.capture_enabled)))?;
         if !uses_runtime {
             self.spawn_shell_event_consumer(spec, fallback_rx);
         }
@@ -598,12 +624,16 @@ impl AppCore {
     /// `capture_failed { CAPTURE_UNAVAILABLE }` 发出去，让托盘/前端能看到捕获不可用。
     fn spawn_shell_event_consumer(&self, spec: HotkeySpec, rx: Receiver<ShellEvent>) {
         let sink = Arc::clone(&self.sink);
+        let capture_enabled = Arc::clone(&self.capture_enabled);
         let spawned = thread::Builder::new()
             .name("visrecall-shell-events".into())
             .spawn(move || {
                 for event in rx.iter() {
                     match event {
                         ShellEvent::CaptureRequest(trigger) => {
+                            if !capture_enabled.load(Ordering::SeqCst) {
+                                continue;
+                            }
                             tracing::warn!(
                                 hotkey = %spec,
                                 ?trigger,
@@ -1106,13 +1136,9 @@ impl AppCore {
 
     /// 应用设置补丁（design §6.11 的顺序即正确性）。
     ///
-    /// 1. 先校验悬浮球尺寸和快捷键，不落盘、不改内存；
-    /// 2. 若换键：**先起新线程**（注册失败 → `INVALID_INPUT`，旧句柄仍有效）；
-    /// 3. 持配置锁合并补丁、落盘、更新内存（失败则不更新内存，并释放待切换的热键）；
-    /// 4. 换键成功才停旧线程并存入新句柄，同时发 `HotkeyRestored` 清托盘冲突提示；
-    /// 5. 悬浮球设置立即生效，启动方式只保存供下次冷启动使用。
+    /// 开启截图或换键时先试注册，再提交配置。关闭时先停止接受请求，再注销热键并
+    /// 取消选区。悬浮球设置立即生效，启动方式在下次冷启动时使用。
     pub fn update_settings(&self, patch: SettingsPatchInput) -> Result<AppConfig, AppError> {
-        // 1. 校验
         let new_spec = match patch.capture_hotkey.as_deref() {
             Some(text) => Some(HotkeySpec::parse(text)?),
             None => None,
@@ -1125,17 +1151,32 @@ impl AppCore {
             }
         }
 
-        // 2. 换键：先起新线程。已有线程时两个不同组合键可以同时注册，
-        //    因此这一步不会与旧线程冲突；反序会在注册失败瞬间丢掉唯一可用的快捷键。
-        let current_spec = self.lock_hotkey().as_ref().map(|handle| handle.spec());
-        let mut pending_hotkey = None;
-        if let (Some(spec), Some(current)) = (new_spec.as_ref(), current_spec.as_ref()) {
-            if spec != current {
-                pending_hotkey = Some(self.spawn_capture_hotkey(*spec)?);
-            }
+        let _lifecycle = self.lock_capture_lifecycle();
+        if (patch.capture_enabled.is_some() || new_spec.is_some())
+            && self.gate() == CaptureGate::Relocating
+        {
+            return Err(AppError::Busy("库正在迁移，请稍后修改截图设置".into()));
         }
 
-        // 3. 合并、落盘和更新内存保持在同一次加锁内，避免并发写入覆盖其它设置。
+        // 新组合键可以与旧组合键同时注册；注册失败时旧句柄和配置仍然有效。
+        let current = self.config();
+        let enable = patch.capture_enabled.unwrap_or(current.capture.enabled);
+        let current_spec = self.lock_hotkey().as_ref().map(HotkeyHandle::spec);
+        let pending_hotkey = if enable && (!current.capture.enabled || new_spec.is_some()) {
+            let spec = match new_spec {
+                Some(spec) => spec,
+                None => HotkeySpec::parse(&current.hotkeys.capture)?,
+            };
+            if current_spec == Some(spec) {
+                None
+            } else {
+                Some(self.spawn_capture_hotkey(spec)?)
+            }
+        } else {
+            None
+        };
+
+        // 合并、落盘和更新内存保持在同一次加锁内，避免并发写入覆盖其它设置。
         let (previous, next) = {
             let mut guard = self.lock_config();
             let mut next = guard.clone();
@@ -1154,27 +1195,43 @@ impl AppCore {
             if let Some(hide) = patch.hide_in_fullscreen {
                 next.ball.hide_in_fullscreen = hide;
             }
-            if new_spec.is_some() {
-                // 用规范化后的写法落盘，避免 "ctrl+shift+s" 与 "Ctrl+Shift+S" 交替出现。
-                next.hotkeys.capture = new_spec
-                    .as_ref()
-                    .map(HotkeySpec::format)
-                    .unwrap_or_else(|| guard.hotkeys.capture.clone());
+            if let Some(enabled) = patch.capture_enabled {
+                next.capture.enabled = enabled;
+            }
+            if let Some(spec) = new_spec {
+                next.hotkeys.capture = spec.format();
             }
 
-            next.save_atomic(&self.paths.config_file)?;
+            if let Err(err) = next.save_atomic(&self.paths.config_file) {
+                drop(guard);
+                if let Some(handle) = pending_hotkey {
+                    handle.stop_and_wait();
+                }
+                return Err(err);
+            }
             let previous = std::mem::replace(&mut *guard, next.clone());
+            self.capture_enabled
+                .store(next.capture.enabled, Ordering::SeqCst);
             (previous, next)
         };
 
-        // 4. 换键：停旧线程、存新句柄。配置锁已释放，避免与捕获循环的落盘形成反向持锁。
-        if let Some(handle) = pending_hotkey {
+        // 配置锁已释放，后台等待注销或取消时允许捕获循环完成自己的工作。
+        if previous.capture.enabled && !next.capture.enabled {
+            let old = self.lock_hotkey().take();
+            if let Some(old) = old {
+                old.stop_and_wait();
+            }
+            self.cancel_pending_capture();
+            self.sink.emit(AppEvent::HotkeyRestored);
+        } else if let Some(handle) = pending_hotkey {
             let old = self.lock_hotkey().replace(handle);
-            drop(old);
+            if let Some(old) = old {
+                old.stop_and_wait();
+            }
             self.sink.emit(AppEvent::HotkeyRestored);
         }
 
-        // 5. 悬浮球：可见性、尺寸与显示开关都立即生效
+        // 悬浮球的可见性、尺寸与显示开关都立即生效。
         if next.ball.enabled != previous.ball.enabled {
             self.apply_ball_visibility(next.ball.enabled);
         }
@@ -1195,6 +1252,19 @@ impl AppCore {
         tracing::info!(config = %self.paths.config_file.display(), "settings saved");
         // 返回最新配置快照，供命令层回填前端缓存。
         Ok(self.config())
+    }
+
+    fn cancel_pending_capture(&self) {
+        let cancel = self
+            .lock_runtime()
+            .as_ref()
+            .map(|runtime| runtime.cancel_capture.clone());
+        if let Some(cancel) = cancel {
+            let (done, confirmed) = crossbeam_channel::bounded(1);
+            if cancel.send(done).is_err() || confirmed.recv().is_err() {
+                tracing::warn!("capture loop stopped before acknowledging cancellation");
+            }
+        }
     }
 
     /// 测试/诊断：当前热键线程的组合键。
@@ -1438,6 +1508,12 @@ impl AppCore {
             .unwrap_or_else(|poison| poison.into_inner())
     }
 
+    fn lock_capture_lifecycle(&self) -> MutexGuard<'_, ()> {
+        self.capture_lifecycle
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
     fn lock_hotkey(&self) -> MutexGuard<'_, Option<HotkeyHandle>> {
         self.hotkey
             .lock()
@@ -1630,6 +1706,9 @@ pub fn handle_shell_event(
 ) {
     match event {
         ShellEvent::CaptureRequest(trigger) => {
+            if !coordinator.capture_enabled() {
+                return;
+            }
             if let Some(err) = gate_rejection(gate) {
                 tracing::warn!(?trigger, error = %err, "capture request rejected by the gate");
                 // 用 `Busy` 上报 → `capture_failed { code: "BUSY" }`。
@@ -1702,12 +1781,17 @@ pub fn handle_shell_event(
 /// （否则主窗口可能永久隐藏），然后继续等后续事件；通道断开的正常退出不受影响。
 // 捕获循环的输入由启动流程逐项拼装；再抽一层结构体只会增加间接层。
 #[allow(clippy::too_many_arguments)]
+struct CaptureLoopEvents {
+    shell: Receiver<ShellEvent>,
+    overlay: Receiver<OverlayEvent>,
+    cancel: Receiver<Sender<()>>,
+}
+
 fn spawn_capture_loop(
     coordinator: CaptureCoordinator,
     import: Arc<ImportFlow>,
     gate: Arc<AtomicU8>,
-    shell: Receiver<ShellEvent>,
-    overlay: Receiver<OverlayEvent>,
+    events: CaptureLoopEvents,
     config: Arc<Mutex<AppConfig>>,
     config_file: PathBuf,
     feedback: Option<BallFeedbackHandle>,
@@ -1718,7 +1802,7 @@ fn spawn_capture_loop(
             loop {
                 let step = guard_session(&coordinator, || {
                     select! {
-                        recv(shell) -> message => match message {
+                        recv(events.shell) -> message => match message {
                             Ok(event) => {
                                 handle_shell_event(
                                     &coordinator,
@@ -1733,7 +1817,33 @@ fn spawn_capture_loop(
                             }
                             Err(_) => CaptureStep::Exit,
                         },
-                        recv(overlay) -> message => match message {
+                        recv(events.cancel) -> message => match message {
+                            Ok(done) => {
+                                if let Err(err) = coordinator.cancel_pending_capture(&events.overlay) {
+                                    tracing::warn!(error = %err, "overlay cancellation failed");
+                                }
+                                // 两个原生入口已停止投递截图。清空切换前排队的请求，
+                                // 在关闭状态下分发，保留同一通道里的移动和导入事件。
+                                for event in events.shell.try_iter() {
+                                    handle_shell_event(
+                                        &coordinator,
+                                        Arc::clone(&import),
+                                        &gate,
+                                        &config,
+                                        &config_file,
+                                        feedback.as_ref(),
+                                        event,
+                                    );
+                                }
+                                let _ = done.send(());
+                                CaptureStep::Continue
+                            }
+                            Err(_) => {
+                                coordinator.release_windows();
+                                CaptureStep::Exit
+                            }
+                        },
+                        recv(events.overlay) -> message => match message {
                             Ok(event) => {
                                 if let Err(err) = coordinator.on_overlay_event(event) {
                                     tracing::warn!(error = %err, "overlay event handling failed");
@@ -2170,6 +2280,7 @@ mod tests {
         let paths = paths_in(dir.path());
         let mut config = seed_config(&paths);
         config.hotkeys.capture = "S".into();
+        config.capture.enabled = true;
         config.save_atomic(&paths.config_file).unwrap();
 
         let sink = Arc::new(RecordingSink::default());
@@ -2194,6 +2305,7 @@ mod tests {
         let mut config = seed_config(&paths);
         // 避开默认的 Ctrl+Shift+S，测试可能与真实运行的应用共存。
         config.hotkeys.capture = "Ctrl+Alt+Shift+F22".into();
+        config.capture.enabled = true;
         config.save_atomic(&paths.config_file).unwrap();
 
         let sink = Arc::new(RecordingSink::default());
@@ -2236,12 +2348,16 @@ mod tests {
             Arc::clone(&sink) as Arc<dyn EventSink>,
         ));
 
+        let (_cancel_tx, cancel_rx) = crossbeam_channel::unbounded();
         spawn_capture_loop(
             coordinator,
             import,
             Arc::new(AtomicU8::new(CaptureGate::Idle.as_u8())),
-            shell_rx,
-            overlay_rx,
+            CaptureLoopEvents {
+                shell: shell_rx,
+                overlay: overlay_rx,
+                cancel: cancel_rx,
+            },
             Arc::new(Mutex::new(AppConfig::default())),
             dir.path().join("config.json"),
             None,
@@ -2315,6 +2431,10 @@ mod tests {
     struct NoopOverlay;
 
     impl crate::capture_flow::OverlayPresenter for NoopOverlay {
+        fn cancel_and_wait(&self) -> Result<(), AppError> {
+            Ok(())
+        }
+
         fn show(
             &self,
             _frames: Vec<visrecall_domain::capture::RawFrame>,
@@ -2328,7 +2448,7 @@ mod tests {
     /// I3：拖放导入在独立工作线程执行——派发立即返回，入库（含 `item_created`）
     /// 由工作线程完成，捕获循环不会被 5s 的 URL 抓取或批量转码占住。
     #[test]
-    fn spawn_import_dispatches_to_a_worker_thread() {
+    fn drop_dispatches_to_an_import_worker_when_capture_is_disabled() {
         use std::time::{Duration, Instant};
 
         let dir = tempfile::tempdir().unwrap();
@@ -2340,16 +2460,30 @@ mod tests {
             Arc::clone(&sink) as Arc<dyn EventSink>,
         ));
 
+        let coordinator = CaptureCoordinator::with_overlay(
+            Arc::clone(&library),
+            Arc::new(NoopGrabber),
+            Arc::new(FakeProbe),
+            Arc::new(NoopOverlay),
+            Arc::new(NoopWindowVisibility),
+            sink.clone(),
+        )
+        .with_capture_enabled(Arc::new(AtomicBool::new(false)));
+        let config = Mutex::new(AppConfig::default());
+        let gate = AtomicU8::new(CaptureGate::Idle.as_u8());
         let started = Instant::now();
-        spawn_import(
-            Arc::clone(&import),
-            DropContent::Text {
+        handle_shell_event(
+            &coordinator,
+            import,
+            &gate,
+            &config,
+            &dir.path().join("config.json"),
+            None,
+            ShellEvent::Drop(DropContent::Text {
                 plain: "后台线程导入".into(),
                 html: None,
-            },
-            None,
-        )
-        .expect("spawn import worker");
+            }),
+        );
         assert!(
             started.elapsed() < Duration::from_secs(1),
             "dispatch must not wait for the import to finish"
@@ -2377,6 +2511,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (core, sink) = open(dir.path());
         let spec = HotkeySpec::parse("Ctrl+Shift+S").expect("parse hotkey");
+        core.capture_enabled.store(true, Ordering::SeqCst);
 
         let (tx, rx) = crossbeam_channel::unbounded();
         core.spawn_shell_event_consumer(spec, rx);

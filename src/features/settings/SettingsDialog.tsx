@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useId, useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type MigrationProgress, type SettingsDto, type SettingsPatch } from "../../lib/api";
 import { formatBytes } from "../../lib/format";
 import { queryKeys } from "../../lib/queryClient";
@@ -120,6 +120,8 @@ function comboOf(event: React.KeyboardEvent): string | null {
 export function SettingsDialog({ onClose }: Props) {
   const [pane, setPane] = useState<PaneId>("capture");
   const [savingStartupMode, setSavingStartupMode] = useState(false);
+  const [savingCapture, setSavingCapture] = useState(false);
+  const captureHintId = useId();
   const [opening, setOpening] = useState(false);
   const [capturing, setCapturing] = useState(false);
   const [hotkeyError, setHotkeyError] = useState<string | null>(null);
@@ -168,6 +170,7 @@ export function SettingsDialog({ onClose }: Props) {
   }, []);
 
   const loading = settings.isPending;
+  const captureEnabled = settings.data?.captureEnabled ?? false;
   const hotkey = settings.data?.captureHotkey ?? "";
   const ballSize = settings.data?.ballSize ?? null;
   const displayedBallSize = ballSizeDraft ?? ballSize ?? 56;
@@ -182,11 +185,20 @@ export function SettingsDialog({ onClose }: Props) {
     void queryClient.invalidateQueries({ queryKey: queryKeys.usage });
   };
 
+  // 串行提交设置补丁，避免旧响应里的完整配置覆盖刚保存的开关。
+  const { mutateAsync: saveSettings } = useMutation({
+    scope: { id: "settings" },
+    mutationFn: (patch: SettingsPatch) => api.updateSettings(patch),
+    onSuccess: async (next) => {
+      await queryClient.cancelQueries({ queryKey: queryKeys.settings });
+      queryClient.setQueryData(queryKeys.settings, next);
+    },
+  });
+
   /** 统一的设置写入口：失败时提示并保持旧显示值（不做乐观更新）。 */
   const patchSettings = async (patch: SettingsPatch, what: string): Promise<boolean> => {
     try {
-      const next = await api.updateSettings(patch);
-      queryClient.setQueryData(queryKeys.settings, next);
+      await saveSettings(patch);
       return true;
     } catch (error) {
       pushToast(`${what}失败：${errorMessage(error)}`, "error");
@@ -202,6 +214,18 @@ export function SettingsDialog({ onClose }: Props) {
       await patchSettings({ startupMode }, "修改启动方式");
     } finally {
       setSavingStartupMode(false);
+    }
+  };
+
+  const changeCaptureEnabled = async () => {
+    setSavingCapture(true);
+    try {
+      await patchSettings(
+        { captureEnabled: !captureEnabled },
+        captureEnabled ? "关闭截图" : "启用截图",
+      );
+    } finally {
+      setSavingCapture(false);
     }
   };
 
@@ -243,8 +267,7 @@ export function SettingsDialog({ onClose }: Props) {
   const submitHotkey = async (combo: string) => {
     setHotkeyError(null);
     try {
-      const next = await api.updateSettings({ captureHotkey: combo });
-      queryClient.setQueryData(queryKeys.settings, next);
+      await saveSettings({ captureHotkey: combo });
       setCapturing(false);
       pushToast("快捷键已更新");
     } catch (error) {
@@ -430,15 +453,44 @@ export function SettingsDialog({ onClose }: Props) {
               <ImportSourcesPane />
             ) : pane === "capture" ? (
               <div className="pane">
-                <p className="pane-desc">
-                  捕获只有一个动作：框选，或松手。所有分类与打标都由系统完成。
-                </p>
+                <div className="row">
+                  <div>
+                    <div className="row-t">启用截图</div>
+                    <div className="row-d" id={captureHintId}>
+                      开启后可通过快捷键或单击悬浮球截图。
+                    </div>
+                  </div>
+                  <div className="row-r">
+                    <button
+                      type="button"
+                      className={`switch${captureEnabled ? " on" : ""}`}
+                      role="switch"
+                      aria-checked={captureEnabled}
+                      aria-label="启用截图"
+                      aria-describedby={captureHintId}
+                      disabled={settings.data === undefined || savingCapture}
+                      onClick={() => void changeCaptureEnabled()}
+                    >
+                      <i />
+                    </button>
+                  </div>
+                </div>
+                {settings.isError && settings.data === undefined && (
+                  <div className="row">
+                    <div className="row-d" role="alert">无法读取截图设置</div>
+                    <button type="button" className="mini-btn" onClick={() => void settings.refetch()}>
+                      重试
+                    </button>
+                  </div>
+                )}
 
                 <div className="row">
                   <div>
                     <div className="row-t">区域截屏快捷键</div>
                     <div className="row-d">
-                      与点击悬浮球完全等价。改完立即生效，被占用时会保留原来的键。
+                      {captureEnabled
+                        ? "改完立即生效，组合键被占用时会保留原来的键。"
+                        : "可先保存组合键，启用截图时会检查是否被占用。"}
                     </div>
                   </div>
                   <div className="row-r">

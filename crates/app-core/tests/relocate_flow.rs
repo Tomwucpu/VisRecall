@@ -82,6 +82,7 @@ fn fixture(hotkey: &str) -> Fixture {
         ..AppConfig::default()
     };
     config.hotkeys.capture = hotkey.to_string();
+    config.capture.enabled = true;
     config.save_atomic(&config_file).expect("write config");
 
     Fixture {
@@ -170,6 +171,10 @@ impl WindowProbe for StubProbe {
 struct StubOverlay;
 
 impl OverlayPresenter for StubOverlay {
+    fn cancel_and_wait(&self) -> Result<(), AppError> {
+        Ok(())
+    }
+
     fn show(
         &self,
         _frames: Vec<RawFrame>,

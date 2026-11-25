@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 
+use crossbeam_channel::Receiver;
 use image::codecs::png::PngEncoder;
 use image::{ExtendedColorType, ImageEncoder};
 use sha2::{Digest, Sha256};
@@ -75,6 +76,8 @@ pub trait OverlayPresenter: Send + Sync {
         displays: Vec<DisplayInfo>,
         foreground: ForegroundInfo,
     ) -> Result<(), AppError>;
+
+    fn cancel_and_wait(&self) -> Result<(), AppError>;
 }
 
 impl OverlayPresenter for OverlayHandle {
@@ -85,6 +88,10 @@ impl OverlayPresenter for OverlayHandle {
         foreground: ForegroundInfo,
     ) -> Result<(), AppError> {
         OverlayHandle::show(self, frames, displays, foreground)
+    }
+
+    fn cancel_and_wait(&self) -> Result<(), AppError> {
+        OverlayHandle::cancel_and_wait(self)
     }
 }
 
@@ -172,6 +179,8 @@ pub struct CaptureCoordinator {
     /// 这里是**纵深防御**：主检查在捕获循环的事件分发处（覆盖 `CaptureRequest` 与
     /// `Drop` 两条写入口），但将来新增入口若绕过循环，这道检查仍会挡住。
     gate: Option<Arc<AtomicU8>>,
+    /// 截图入口与覆盖层提交共享同一份运行状态。
+    capture_enabled: Option<Arc<AtomicBool>>,
     /// 显示器枚举；测试注入固定的显示器集合，生产实现是 [`enumerate_displays`]。
     displays: DisplayProbe,
     /// 是否有会话正在进行（`start` 占位 → 覆盖层结束 / `start` 失败时清除）。
@@ -214,6 +223,7 @@ impl CaptureCoordinator {
             free_space: Arc::new(files::free_space_bytes),
             usage: Arc::new(|library| library.usage().ok().map(|usage| usage.used_bytes)),
             gate: None,
+            capture_enabled: None,
             displays: Arc::new(enumerate_displays),
             session_active: AtomicBool::new(false),
         }
@@ -230,6 +240,29 @@ impl CaptureCoordinator {
     pub fn with_gate(mut self, gate: Arc<AtomicU8>) -> Self {
         self.gate = Some(gate);
         self
+    }
+
+    pub(crate) fn with_capture_enabled(mut self, enabled: Arc<AtomicBool>) -> Self {
+        self.capture_enabled = Some(enabled);
+        self
+    }
+
+    pub(crate) fn capture_enabled(&self) -> bool {
+        self.capture_enabled
+            .as_ref()
+            .is_none_or(|enabled| enabled.load(Ordering::SeqCst))
+    }
+
+    /// 关闭截图时先等原生覆盖层隐藏，再丢弃它发出的旧会话结果。
+    /// 此方法只由捕获循环调用，取消期间没有第二个事件消费者。
+    pub(crate) fn cancel_pending_capture(
+        &self,
+        overlay_events: &Receiver<OverlayEvent>,
+    ) -> Result<(), AppError> {
+        let result = self.overlay.cancel_and_wait();
+        for _ in overlay_events.try_iter() {}
+        self.end_session();
+        result
     }
 
     /// 替换用量探测（测试专用）。
@@ -255,6 +288,9 @@ impl CaptureCoordinator {
     /// 失败时恢复自有窗口、清除会话标志并发 `capture_failed`；成功时窗口保持隐藏，
     /// 等 [`CaptureCoordinator::on_overlay_event`] 的结束路径再恢复。
     pub fn start(&self, trigger: CaptureTrigger) -> Result<(), AppError> {
+        if !self.capture_enabled() {
+            return Ok(());
+        }
         if self
             .session_active
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -318,6 +354,10 @@ impl CaptureCoordinator {
             }
         };
 
+        if !self.capture_enabled() {
+            self.clear_session();
+            return Ok(());
+        }
         self.visibility.hide_own_windows();
         if let Err(err) = visrecall_capture::dwm_flush() {
             // DWM 不可用时继续抓帧：可能抓到隐藏前的旧画面，但不阻断捕获。
@@ -337,6 +377,10 @@ impl CaptureCoordinator {
             }
         };
 
+        if !self.capture_enabled() {
+            self.end_session();
+            return Ok(());
+        }
         let frames = match self.grab_with_retry(&displays) {
             Ok(frames) if !frames.is_empty() => frames,
             Ok(_) => {
@@ -349,6 +393,11 @@ impl CaptureCoordinator {
                 return Err(err);
             }
         };
+
+        if !self.capture_enabled() {
+            self.end_session();
+            return Ok(());
+        }
 
         // 全黑帧通常是 DRM 保护窗口或显示器休眠：只丢弃这一屏（P1-R03、design §5）。
         // 只有**全部**显示器都全黑时才整次失败，避免一块副屏休眠就毁掉整次捕获。
@@ -401,6 +450,10 @@ impl CaptureCoordinator {
             } => {
                 if !self.session_is_active() {
                     warn!("committed overlay event without active capture session; ignoring");
+                    return Ok(());
+                }
+                if !self.capture_enabled() {
+                    self.end_session();
                     return Ok(());
                 }
                 info!(
@@ -953,6 +1006,10 @@ mod tests {
     }
 
     impl OverlayPresenter for FakeOverlay {
+        fn cancel_and_wait(&self) -> Result<(), AppError> {
+            Ok(())
+        }
+
         fn show(
             &self,
             frames: Vec<RawFrame>,
@@ -1059,6 +1116,61 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn disabling_capture_blocks_both_triggers_and_discards_the_unfinished_selection() {
+        let mut fixture = fixture(
+            FakeGrabber::new(false, false),
+            FakeOverlay::new(false),
+            MIN_FREE_BYTES,
+        );
+        let enabled = Arc::new(AtomicBool::new(false));
+        fixture.coordinator = fixture.coordinator.with_capture_enabled(enabled.clone());
+
+        fixture
+            .coordinator
+            .start(CaptureTrigger::BallClick)
+            .unwrap();
+        fixture.coordinator.start(CaptureTrigger::Hotkey).unwrap();
+        assert_eq!(fixture.visibility.hides(), 0);
+        assert_eq!(fixture.grabber.calls(), 0);
+        assert_eq!(fixture.overlay.shows(), 0);
+        assert!(fixture.sink.events().is_empty());
+
+        enabled.store(true, Ordering::SeqCst);
+        fixture.coordinator.start(CaptureTrigger::Hotkey).unwrap();
+        assert_eq!(fixture.overlay.shows(), 1);
+        enabled.store(false, Ordering::SeqCst);
+
+        // 模拟确认到达前，覆盖层已将旧选区的结果放入队列。
+        let (tx, rx) = crossbeam_channel::unbounded();
+        tx.send(OverlayEvent::Committed {
+            image: CapturedImage {
+                width: 1,
+                height: 1,
+                bgra: vec![0, 0, 255, 255],
+            },
+            global_rect: PhysicalRect::new(10, 20, 1, 1),
+            foreground: FakeProbe.foreground().unwrap(),
+        })
+        .unwrap();
+        fixture.coordinator.cancel_pending_capture(&rx).unwrap();
+        assert!(rx.is_empty());
+        assert_eq!(fixture.visibility.shows(), 1);
+        assert_eq!(fixture.coordinator.library.count_items().unwrap(), 0);
+
+        enabled.store(true, Ordering::SeqCst);
+        fixture
+            .coordinator
+            .start(CaptureTrigger::BallClick)
+            .unwrap();
+        assert_eq!(fixture.overlay.shows(), 2);
+        fixture
+            .coordinator
+            .on_overlay_event(OverlayEvent::Cancelled)
+            .unwrap();
+        assert_eq!(fixture.visibility.shows(), 2);
     }
 
     /// 容量软配额：注入「已用 ≥ 容量」时同样拒绝，且不进入抓帧（P2-R07）。

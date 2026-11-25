@@ -9,6 +9,7 @@ const commands = vi.hoisted(() => ({
   getSettings: vi.fn(async () => ({
     libraryPath: "D:\\VisRecall\\library",
     startupMode: "silent" as SettingsDto["startupMode"],
+    captureEnabled: false,
     captureHotkey: "Ctrl+Shift+S",
     ballEnabled: true,
     ballSize: 56,
@@ -22,6 +23,7 @@ const commands = vi.hoisted(() => ({
   updateSettings: vi.fn(async (patch: Record<string, unknown>) => ({
     libraryPath: "D:\\VisRecall\\library",
     startupMode: (patch.startupMode as SettingsDto["startupMode"] | undefined) ?? "silent",
+    captureEnabled: (patch.captureEnabled as boolean | undefined) ?? false,
     captureHotkey: (patch.captureHotkey as string | undefined) ?? "Ctrl+Shift+S",
     ballEnabled: true,
     ballSize: (patch.ballSize as number | undefined) ?? 56,
@@ -116,10 +118,12 @@ test("saves only the startup mode and disables both options until it is confirme
   expect(silent).toBeChecked();
   fireEvent.click(show);
 
-  expect(commands.updateSettings).toHaveBeenCalledExactlyOnceWith({ startupMode: "show_window" });
   expect(show).toBeDisabled();
   expect(silent).toBeDisabled();
   expect(silent).toBeChecked();
+  await waitFor(() => {
+    expect(commands.updateSettings).toHaveBeenCalledExactlyOnceWith({ startupMode: "show_window" });
+  });
   finishSave();
   await waitFor(() => expect(show).toBeChecked());
   expect(show).toBeEnabled();
@@ -171,6 +175,52 @@ test("reflects the real hotkey and ball configuration read from settings", async
     "aria-checked",
     "true",
   );
+});
+
+test("uses the saved capture setting and updates it once while saving", async () => {
+  const get = commands.getSettings.getMockImplementation()!;
+  const update = commands.updateSettings.getMockImplementation()!;
+  commands.getSettings.mockImplementationOnce(async () => ({
+    ...await get(),
+    captureEnabled: true,
+  }));
+  let completeSave!: () => void;
+  const pending = new Promise<void>((resolve) => { completeSave = resolve; });
+  commands.updateSettings.mockImplementationOnce(async (patch) => {
+    await pending;
+    return update(patch);
+  });
+  renderDialog();
+
+  const control = screen.getByRole("switch", { name: "启用截图" });
+  await waitFor(() => expect(control).toBeChecked());
+  fireEvent.click(control);
+  expect(control).toBeDisabled();
+  expect(control).toBeChecked();
+  fireEvent.click(control);
+
+  completeSave();
+  await waitFor(() => expect(control).not.toBeChecked());
+  expect(control).toBeEnabled();
+  expect(commands.updateSettings).toHaveBeenCalledExactlyOnceWith({ captureEnabled: false });
+  expect(screen.getByRole("switch", { name: "悬浮球显示" })).toBeChecked();
+});
+
+test("shows the registration error and keeps capture disabled when enabling fails", async () => {
+  commands.updateSettings.mockRejectedValueOnce({
+    code: "INVALID_INPUT",
+    message: "快捷键已被占用",
+  });
+  renderDialog();
+
+  const control = screen.getByRole("switch", { name: "启用截图" });
+  await waitFor(() => expect(control).toBeEnabled());
+  expect(control).not.toBeChecked();
+  fireEvent.click(control);
+
+  expect(await screen.findByText("启用截图失败：快捷键已被占用")).toBeInTheDocument();
+  expect(control).not.toBeChecked();
+  expect(commands.updateSettings).toHaveBeenCalledExactlyOnceWith({ captureEnabled: true });
 });
 
 test("changes the ball size through update_settings", async () => {

@@ -415,7 +415,11 @@ impl Drop for BallHandle {
 /// 即使 `config` 表示「球被禁用」也会创建线程（窗口初始隐藏）：托盘随时可以开启球，
 /// 调用方随后用 [`BallHandle::set_visible`] 应用期望的可见性。线程创建失败只记日志，
 /// 返回的句柄所有操作都是空操作，不影响热键捕获取代路径。
-pub fn spawn_ball_thread(config: BallConfig, events: Sender<ShellEvent>) -> BallHandle {
+pub fn spawn_ball_thread(
+    config: BallConfig,
+    events: Sender<ShellEvent>,
+    capture_enabled: Arc<AtomicBool>,
+) -> BallHandle {
     let hwnd = Arc::new(AtomicIsize::new(0));
     let visible = Arc::new(AtomicBool::new(false));
     let (ready_tx, ready_rx) = bounded::<Result<(), AppError>>(1);
@@ -425,7 +429,16 @@ pub fn spawn_ball_thread(config: BallConfig, events: Sender<ShellEvent>) -> Ball
 
     let spawned = thread::Builder::new()
         .name("visrecall-ball".into())
-        .spawn(move || ball_thread_main(config, events, ready_tx, thread_hwnd, thread_visible));
+        .spawn(move || {
+            ball_thread_main(
+                config,
+                events,
+                ready_tx,
+                thread_hwnd,
+                thread_visible,
+                capture_enabled,
+            )
+        });
 
     match spawned {
         Ok(_) => match ready_rx.recv_timeout(BALL_READY_TIMEOUT) {
@@ -595,6 +608,7 @@ fn ball_thread_main(
     ready: Sender<Result<(), AppError>>,
     hwnd_slot: Arc<AtomicIsize>,
     visible: Arc<AtomicBool>,
+    capture_enabled: Arc<AtomicBool>,
 ) {
     // Task 16 的 OLE 拖放复用该线程的 STA apartment。
     let _com = ComGuard::init();
@@ -633,6 +647,7 @@ fn ball_thread_main(
         &ready,
         Arc::clone(&hwnd_slot),
         &visible,
+        capture_enabled,
     ) {
         // `run_ball_window` 在回报成功之前失败时不会发送 ready；这里补上错误。
         let _ = ready.send(Err(err));
@@ -652,6 +667,7 @@ fn run_ball_window(
     ready: &Sender<Result<(), AppError>>,
     hwnd_slot: Arc<AtomicIsize>,
     visible: &Arc<AtomicBool>,
+    capture_enabled: Arc<AtomicBool>,
 ) -> Result<(), AppError> {
     let displays = match enumerate_displays() {
         Ok(displays) => displays,
@@ -698,6 +714,7 @@ fn run_ball_window(
         size,
         position,
         events,
+        capture_enabled,
         visible: Arc::clone(visible),
         drag: DragState::inactive(),
         hwnd_slot: Arc::clone(&hwnd_slot),
@@ -1255,6 +1272,8 @@ struct BallWindowState {
     /// 当前视觉左上角（全局物理像素）。
     position: PhysicalPoint,
     events: Sender<ShellEvent>,
+    /// 截图关闭时仍保留移动和拖放，只停止发送单击截图请求。
+    capture_enabled: Arc<AtomicBool>,
     visible: Arc<AtomicBool>,
     /// 拖动状态机（纯逻辑，见 [`DragState`]）。
     drag: DragState,
@@ -1679,10 +1698,14 @@ fn release_ball(hwnd: HWND) {
         if let Some(target) = target {
             start_transition(hwnd, target, SCALE_MS, Curve::Spring);
         }
-        send_event(
-            &events,
-            ShellEvent::CaptureRequest(CaptureTrigger::BallClick),
-        );
+        let capture_enabled =
+            with_state(hwnd, |state| state.capture_enabled.load(Ordering::SeqCst)).unwrap_or(false);
+        if capture_enabled {
+            send_event(
+                &events,
+                ShellEvent::CaptureRequest(CaptureTrigger::BallClick),
+            );
+        }
         return;
     }
 

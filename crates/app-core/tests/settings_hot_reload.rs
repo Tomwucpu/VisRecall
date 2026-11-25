@@ -73,11 +73,9 @@ impl OccupiedHotkey {
 impl Drop for OccupiedHotkey {
     fn drop(&mut self) {
         if let Some(handle) = self.handle.take() {
-            handle.stop();
+            handle.stop_and_wait();
         }
         self.stop.store(true, Ordering::SeqCst);
-        // 让系统完成注销，避免下一个用例撞上「刚被占用」。
-        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -136,6 +134,7 @@ fn ball_size_accepts_the_supported_range() {
 fn hotkey_change_applies_immediately_and_emits_restored() {
     let dir = tempfile::tempdir().unwrap();
     let (core, sink) = open(dir.path());
+    set_capture_enabled(&core, true).expect("enable capture");
     // 先按当前配置起一个热键线程，模拟正常运行态。
     core.start_hotkey().expect("initial hotkey");
     let original = core.hotkey_spec_for_test().expect("hotkey thread");
@@ -168,6 +167,7 @@ fn hotkey_change_applies_immediately_and_emits_restored() {
 fn occupied_hotkey_is_rejected_and_the_old_one_survives() {
     let dir = tempfile::tempdir().unwrap();
     let (core, _sink) = open_with_hotkey(dir.path(), "Ctrl+Alt+Shift+F5");
+    set_capture_enabled(&core, true).expect("enable capture");
     core.start_hotkey().expect("initial hotkey");
     let original = core.hotkey_spec_for_test().expect("hotkey thread");
 
@@ -271,12 +271,74 @@ fn ball_settings_changes_are_persisted() {
     assert!(!reloaded.ball.hide_in_fullscreen);
 }
 
-/// 热键线程未启动时改键只写配置：下次 `start_hotkey` 才真正注册。
+fn set_capture_enabled(core: &AppCore, enabled: bool) -> Result<AppConfig, AppError> {
+    core.update_settings(SettingsPatchInput {
+        capture_enabled: Some(enabled),
+        ..SettingsPatchInput::default()
+    })
+}
+
+#[test]
+fn disabled_capture_leaves_the_hotkey_free_and_can_be_enabled_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let combo = "Ctrl+Alt+Shift+F15";
+    let (core, _) = open_with_hotkey(dir.path(), combo);
+
+    core.start_hotkey().unwrap();
+    assert!(core.hotkey_spec_for_test().is_none());
+    let occupied = OccupiedHotkey::occupy(combo);
+    assert!(set_capture_enabled(&core, true).is_err());
+    assert!(!core.config().capture.enabled);
+    assert!(core.hotkey_spec_for_test().is_none());
+    drop(occupied);
+
+    assert!(set_capture_enabled(&core, true).unwrap().capture.enabled);
+    assert!(core.hotkey_spec_for_test().is_some());
+    assert!(
+        AppConfig::load_or_default(&core.paths().config_file)
+            .capture
+            .enabled
+    );
+
+    // 立刻关闭再开启，旧线程必须已经释放相同的热键。
+    assert!(!set_capture_enabled(&core, false).unwrap().capture.enabled);
+    assert!(core.hotkey_spec_for_test().is_none());
+    let spec = HotkeySpec::parse(combo).unwrap();
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    spawn_hotkey_thread(spec, tx).unwrap().stop_and_wait();
+    assert!(set_capture_enabled(&core, true).unwrap().capture.enabled);
+    assert!(!set_capture_enabled(&core, false).unwrap().capture.enabled);
+    assert!(
+        !AppConfig::load_or_default(&core.paths().config_file)
+            .capture
+            .enabled
+    );
+}
+
+#[test]
+fn failed_capture_enable_releases_the_tentative_hotkey() {
+    let dir = tempfile::tempdir().unwrap();
+    let combo = "Ctrl+Alt+Shift+F16";
+    let (core, _) = open_with_hotkey(dir.path(), combo);
+    let config = &core.paths().config_file;
+    std::fs::remove_file(config).unwrap();
+    std::fs::create_dir(config).unwrap();
+
+    assert!(set_capture_enabled(&core, true).is_err());
+    assert!(!core.config().capture.enabled);
+    assert!(core.hotkey_spec_for_test().is_none());
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let spec = HotkeySpec::parse(combo).unwrap();
+    spawn_hotkey_thread(spec, tx).unwrap().stop_and_wait();
+}
+
+/// 截图关闭时改键只写配置：开启时才真正注册。
 #[test]
 fn hotkey_change_without_running_thread_only_updates_config() {
     let dir = tempfile::tempdir().unwrap();
     let (core, _sink) = open(dir.path());
     assert!(core.hotkey_spec_for_test().is_none());
+    let _occupied = OccupiedHotkey::occupy("Ctrl+Shift+F7");
 
     let start = Instant::now();
     let updated = core

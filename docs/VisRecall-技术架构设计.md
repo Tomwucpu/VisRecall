@@ -256,6 +256,8 @@ Cargo workspace + 前端目录：
 
 ### 4.1 触发与冻结帧
 
+「设置 → 捕获 → 启用截图」控制全局截图快捷键和悬浮球单击。首次安装和旧配置缺少开关时默认关闭，保存后立即生效。关闭时注销截图热键、取消未提交的框选，并继续支持悬浮球移动与拖放导入。
+
 **触发路径：**
 
 1. 快捷键线程收到 `WM_HOTKEY`，或悬浮球收到单击，投递 `CaptureRequest { trigger }`。
@@ -333,7 +335,7 @@ Cargo workspace + 前端目录：
 - 交互判定：按下后移动超过 4px 视为拖动，否则为点击；长按 400ms 触发快捷菜单。
 - 全屏检测：`SHQueryUserNotificationState`（`QUNS_BUSY` / `QUNS_RUNNING_D3D_FULL_SCREEN` / `QUNS_PRESENTATION_MODE`）+ 1s 定时器；退出全屏恢复。
 - 首次运行引导气泡只显示一次；设置项：大小、贴边收起、全屏隐藏、整体关闭。
-- 所有捕获能力在悬浮球关闭后仍可由快捷键完成。
+- 截图已启用时，隐藏悬浮球仍可使用截图快捷键。
 
 ### 4.6 拖放判定（OLE）
 
@@ -651,6 +653,7 @@ CREATE VIRTUAL TABLE item_vectors USING vec0(
 
 - `config.json`：库路径、快捷键、悬浮球设置、保留策略、Provider 配置（不含 Key）、嵌入模型 ID、窗口状态、语言。
 - 启动方式使用应用级 `startup_mode`：`silent`（默认）或 `show_window`。它不随素材库位置改变；缺少字段或该字段损坏时只回落此字段，不重置其它有效设置。
+- 屏幕截图偏好保存为应用级 `capture.enabled`，默认 `false`，不随素材库路径改变。关闭期间编辑组合键会保存设置，开启时尝试注册。
 - 原子写入（临时文件 + rename）；整体读取失败沿用默认值与现有日志/备份逻辑。
 - API Key：Windows 凭据管理器；日志与崩溃信息中脱敏；导出/迁移包不包含 Key。
 - 库路径不可用（如移动硬盘拔出）：静默启动不强制显示窗口，托盘提示库不可用；打开主窗口后展示现有的错误状态。
@@ -1284,6 +1287,10 @@ VisRecall/
 {
   "library_path": "C:\\Users\\Tomwu\\Documents\\VisRecall",
   "startup_mode": "silent",
+  "capture": {
+    "enabled": false,
+    "realtime_fallback": true
+  },
   "hotkeys": {
     "capture": "Ctrl+Shift+S",
     "open_main": "Ctrl+Shift+Space"

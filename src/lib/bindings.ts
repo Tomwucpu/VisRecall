@@ -668,6 +668,8 @@ export type SettingsDto_Deserialize = {
 	libraryPath: string,
 	/**  下次冷启动使用的窗口显示偏好。 */
 	startupMode: StartupModeDto,
+	/**  屏幕截图总开关，控制快捷键与悬浮球单击。 */
+	captureEnabled: boolean,
 	captureHotkey: string,
 	ballEnabled: boolean,
 	ballSize: number,
@@ -689,6 +691,8 @@ export type SettingsDto_Serialize = {
 	libraryPath: string,
 	/**  下次冷启动使用的窗口显示偏好。 */
 	startupMode: StartupModeDto,
+	/**  屏幕截图总开关，控制快捷键与悬浮球单击。 */
+	captureEnabled: boolean,
 	captureHotkey: string,
 	ballEnabled: boolean,
 	ballSize: number,
@@ -713,6 +717,8 @@ export type SettingsPatch_Deserialize = {
 	startupMode?: StartupModeDto | null,
 	ballEnabled?: boolean | null,
 	ballSize?: number | null,
+	/**  缺省时保留截图开关。 */
+	captureEnabled?: boolean | null,
 	captureHotkey?: string | null,
 	/**  贴边收起；`None` 表示不改。 */
 	ballEdgeHide?: boolean | null,
@@ -725,6 +731,8 @@ export type SettingsPatch_Serialize = {
 	startupMode: StartupModeDto | null,
 	ballEnabled: boolean | null,
 	ballSize: number | null,
+	/**  缺省时保留截图开关。 */
+	captureEnabled: boolean | null,
 	captureHotkey: string | null,
 	/**  贴边收起；`None` 表示不改。 */
 	ballEdgeHide: boolean | null,

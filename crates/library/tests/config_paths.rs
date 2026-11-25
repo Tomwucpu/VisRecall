@@ -108,6 +108,7 @@ fn config_roundtrips_custom_values() {
             ..BallConfig::default()
         },
         capture: CaptureConfig {
+            enabled: true,
             realtime_fallback: false,
         },
         ..AppConfig::default()
@@ -118,6 +119,22 @@ fn config_roundtrips_custom_values() {
     let loaded = AppConfig::load_or_default(&path);
     assert_eq!(loaded, cfg);
     assert_eq!(loaded.ball.positions["display-1"], (0.25, 0.75));
+}
+
+#[test]
+fn legacy_capture_config_keeps_its_preferences_and_defaults_to_disabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    fs::write(
+        &path,
+        r#"{"capture":{"realtime_fallback":false},"hotkeys":{"capture":"Ctrl+Alt+V"}}"#,
+    )
+    .unwrap();
+
+    let config = AppConfig::load_or_default(&path);
+    assert!(!config.capture.enabled);
+    assert!(!config.capture.realtime_fallback);
+    assert_eq!(config.hotkeys.capture, "Ctrl+Alt+V");
 }
 
 #[test]
@@ -176,6 +193,7 @@ fn default_config_matches_design() {
     assert!(cfg.ball.enabled);
     assert_eq!(cfg.ball.size, 56);
     assert!(cfg.ball.positions.is_empty());
+    assert!(!cfg.capture.enabled);
     assert!(cfg.capture.realtime_fallback);
     assert!(!cfg.privacy.clipboard_capture);
     assert!(!cfg.privacy.telemetry);
@@ -217,6 +235,7 @@ fn partial_config_fills_defaults() {
     assert_eq!(cfg.ball.size, 64);
     assert_eq!(cfg.startup_mode, StartupMode::Silent);
     assert!(cfg.ball.enabled);
+    assert!(!cfg.capture.enabled);
     assert!(cfg.capture.realtime_fallback);
     assert_eq!(cfg.library_path, AppConfig::default().library_path);
 }
@@ -241,6 +260,7 @@ fn legacy_primary_backup_models_are_migrated() {
     assert_eq!(cfg.models.active_id.as_deref(), Some("primary"));
     // 迁移只改 models，其它字段仍按默认值补齐
     assert_eq!(cfg.hotkeys.capture, "Ctrl+Shift+S");
+    assert!(!cfg.capture.enabled);
     assert!(cfg.capture.realtime_fallback);
 }
 

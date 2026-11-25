@@ -6,6 +6,7 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 
 use crossbeam_channel::{bounded, Sender};
@@ -237,6 +238,7 @@ pub struct HotkeyHandle {
     thread_id: u32,
     spec: HotkeySpec,
     stopped: AtomicBool,
+    thread: Option<thread::JoinHandle<()>>,
 }
 
 impl HotkeyHandle {
@@ -256,6 +258,16 @@ impl HotkeyHandle {
                 error = %err,
                 "failed to post WM_QUIT to hotkey thread"
             ),
+        }
+    }
+
+    /// 在后台等待线程注销热键，确保同一组合键可以立即重新注册。
+    pub fn stop_and_wait(mut self) {
+        self.stop();
+        if let Some(thread) = self.thread.take() {
+            if thread.join().is_err() {
+                tracing::warn!(hotkey = %self.spec, "hotkey thread panicked during shutdown");
+            }
         }
     }
 
@@ -279,12 +291,21 @@ pub fn spawn_hotkey_thread(
     spec: HotkeySpec,
     tx: Sender<ShellEvent>,
 ) -> Result<HotkeyHandle, AppError> {
+    spawn_hotkey_thread_with_gate(spec, tx, None)
+}
+
+/// 注册热键时共用截图状态，关闭期间收到的按键不进入事件队列。
+pub fn spawn_hotkey_thread_with_gate(
+    spec: HotkeySpec,
+    tx: Sender<ShellEvent>,
+    capture_enabled: Option<Arc<AtomicBool>>,
+) -> Result<HotkeyHandle, AppError> {
     let (modifiers, vk) = spec.register_tuple();
     let (ready_tx, ready_rx) = bounded::<Result<u32, AppError>>(1);
 
-    thread::Builder::new()
+    let thread = thread::Builder::new()
         .name("visrecall-hotkey".into())
-        .spawn(move || hotkey_thread_main(spec, modifiers, vk, tx, ready_tx))
+        .spawn(move || hotkey_thread_main(spec, modifiers, vk, tx, ready_tx, capture_enabled))
         .map_err(|err| AppError::Internal(format!("spawn hotkey thread: {err}")))?;
 
     match ready_rx.recv() {
@@ -292,6 +313,7 @@ pub fn spawn_hotkey_thread(
             thread_id,
             spec,
             stopped: AtomicBool::new(false),
+            thread: Some(thread),
         }),
         Ok(Err(err)) => Err(err),
         // 线程在回报注册结果前就消失了，只能是内部错误。
@@ -307,6 +329,7 @@ fn hotkey_thread_main(
     vk: u32,
     tx: Sender<ShellEvent>,
     ready: Sender<Result<u32, AppError>>,
+    capture_enabled: Option<Arc<AtomicBool>>,
 ) {
     // SAFETY: 只注册线程级热键，`hwnd = None`。
     if let Err(err) = unsafe { RegisterHotKey(None, HOTKEY_ID, HOT_KEY_MODIFIERS(modifiers), vk) } {
@@ -339,7 +362,11 @@ fn hotkey_thread_main(
             _ => {}
         }
 
-        if msg.message == WM_HOTKEY {
+        if msg.message == WM_HOTKEY
+            && capture_enabled
+                .as_ref()
+                .is_none_or(|enabled| enabled.load(Ordering::SeqCst))
+        {
             // 按键本身由 app-core 的「capture requested」统一记录，这里只留排障细节。
             tracing::debug!(hotkey = %spec, "hotkey pressed");
             if tx

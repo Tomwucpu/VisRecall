@@ -19,6 +19,7 @@ function settings(cloudTextAi: boolean, cloudImageAi = false): SettingsDto {
   return {
     libraryPath: "D:\\VisRecall\\library",
     startupMode: "silent",
+    captureEnabled: false,
     captureHotkey: "Ctrl+Shift+S",
     ballEnabled: true,
     ballSize: 56,

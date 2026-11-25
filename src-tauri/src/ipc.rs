@@ -353,6 +353,8 @@ pub struct SettingsDto {
     pub library_path: String,
     /// 下次冷启动使用的窗口显示偏好。
     pub startup_mode: StartupModeDto,
+    /// 屏幕截图总开关，控制快捷键与悬浮球单击。
+    pub capture_enabled: bool,
     pub capture_hotkey: String,
     pub ball_enabled: bool,
     pub ball_size: u32,
@@ -377,6 +379,8 @@ pub struct SettingsPatch {
     pub startup_mode: Option<StartupModeDto>,
     pub ball_enabled: Option<bool>,
     pub ball_size: Option<u32>,
+    /// 缺省时保留截图开关。
+    pub capture_enabled: Option<bool>,
     pub capture_hotkey: Option<String>,
     /// 贴边收起；`None` 表示不改。
     pub ball_edge_hide: Option<bool>,
@@ -402,6 +406,7 @@ impl SettingsDto {
         SettingsDto {
             library_path: config.library_path.display().to_string(),
             startup_mode: config.startup_mode.into(),
+            capture_enabled: config.capture.enabled,
             capture_hotkey: config.hotkeys.capture.clone(),
             ball_enabled: config.ball.enabled,
             ball_size: config.ball.size,
@@ -1537,6 +1542,7 @@ pub async fn update_settings(
                 startup_mode: patch.startup_mode.map(Into::into),
                 ball_enabled: patch.ball_enabled,
                 ball_size: patch.ball_size,
+                capture_enabled: patch.capture_enabled,
                 capture_hotkey: patch.capture_hotkey,
                 ball_edge_hide: patch.ball_edge_hide,
                 hide_in_fullscreen: patch.hide_in_fullscreen,
@@ -1618,6 +1624,21 @@ mod tests {
         for invalid in [r#"{"startupMode":"unknown"}"#, r#"{"startupMode":false}"#] {
             assert!(serde_json::from_str::<SettingsPatch>(invalid).is_err());
         }
+    }
+
+    #[test]
+    fn capture_enabled_roundtrips_through_settings() {
+        let mut config = visrecall_app_core::AppConfig::default();
+        assert!(!SettingsDto::from_config(&config, None).capture_enabled);
+
+        config.capture.enabled = true;
+        let dto = SettingsDto::from_config(&config, None);
+        assert_eq!(serde_json::to_value(dto).unwrap()["captureEnabled"], true);
+
+        let off: SettingsPatch = serde_json::from_str(r#"{"captureEnabled":false}"#).unwrap();
+        assert_eq!(off.capture_enabled, Some(false));
+        let omitted: SettingsPatch = serde_json::from_str(r#"{"ballSize":80}"#).unwrap();
+        assert_eq!(omitted.capture_enabled, None);
     }
 
     /// 两个云端解析开关都来自库内策略：默认关闭，写入后随 SettingsDto 一起回前端。

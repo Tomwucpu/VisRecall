@@ -221,6 +221,8 @@ pub enum OverlayCommand {
     },
     /// 隐藏覆盖层并恢复焦点。
     Cancel,
+    /// 隐藏覆盖层后通过独立通道确认，避免和用户取消事件混淆。
+    CancelAndConfirm(Sender<()>),
 }
 
 /// 覆盖层线程 → app-core 的事件。
@@ -267,6 +269,15 @@ impl OverlayHandle {
     /// （重复 `Cancelled` 幂等），因此 `cancel()` 之后等待事件的调用方不会永久挂起。
     pub fn cancel(&self) -> Result<(), AppError> {
         self.send(OverlayCommand::Cancel)
+    }
+
+    /// 等待覆盖层线程清理当前会话。捕获循环随后丢弃已排队的旧会话事件。
+    pub fn cancel_and_wait(&self) -> Result<(), AppError> {
+        let (done, confirmed) = bounded(1);
+        self.send(OverlayCommand::CancelAndConfirm(done))?;
+        confirmed
+            .recv()
+            .map_err(|_| AppError::Internal("overlay thread stopped before cancelling".into()))
     }
 
     fn send(&self, command: OverlayCommand) -> Result<(), AppError> {
@@ -499,7 +510,14 @@ impl OverlayThread {
                     self.send_event(OverlayEvent::Cancelled);
                 }
             }
-            OverlayCommand::Cancel => self.cancel(),
+            OverlayCommand::Cancel => {
+                self.cancel();
+                self.send_event(OverlayEvent::Cancelled);
+            }
+            OverlayCommand::CancelAndConfirm(done) => {
+                self.cancel();
+                let _ = done.send(());
+            }
         }
     }
 
@@ -652,10 +670,6 @@ impl OverlayThread {
     }
 
     /// 取消：隐藏窗口、释放冻结纹理并把焦点还给捕获前的前台窗口。
-    ///
-    /// 无论是否处于激活态都发一次 [`OverlayEvent::Cancelled`]：`OverlayHandle::cancel()`
-    /// 之后等待事件的调用方不会因为「本来就没显示」而永久挂起。重复的 `Cancelled`
-    /// 必须幂等（Task 14 的编排按此语义实现）。
     fn cancel(&mut self) {
         if self.active {
             self.selection.cancel();
@@ -663,10 +677,7 @@ impl OverlayThread {
             self.notice = None;
             self.hide_all();
             info!("frozen overlay cancelled");
-        } else {
-            debug!("cancel received with no active overlay; acknowledging with Cancelled");
         }
-        self.send_event(OverlayEvent::Cancelled);
     }
 
     /// 用户取消（`Esc`/右键）：结束会话并回报一次 [`OverlayEvent::Cancelled`]。

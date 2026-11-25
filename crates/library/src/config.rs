@@ -235,6 +235,8 @@ pub struct BallConfig {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CaptureConfig {
+    /// 用户主动开启后才接受屏幕截图请求。
+    pub enabled: bool,
     pub realtime_fallback: bool,
 }
 
@@ -285,6 +287,7 @@ impl Default for BallConfig {
 impl Default for CaptureConfig {
     fn default() -> Self {
         CaptureConfig {
+            enabled: false,
             realtime_fallback: true,
         }
     }
