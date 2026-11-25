@@ -31,3 +31,7 @@ VisRecall 是 Windows 上的本地素材库，用于收集截图、图片和文�
 在 [GitHub Issues](https://github.com/Tomwucpu/VisRecall/issues) 反馈问题时，请提供 VisRecall 版本、Windows 版本、安装包 SHA-256、复现步骤和错误信息。请先移除截图、库文件、凭据和日志中的个人信息。
 
 [第三方声明](THIRD_PARTY_NOTICES.txt)记录随包模型和 ONNX Runtime 的来源及许可。安装器模板的许可随安装包提供。
+
+## 许可证
+
+VisRecall 以 [Apache License 2.0](LICENSE) 发布，版权归 Tomwu 所有。可以自由使用、修改、分发和商用，需保留版权与许可声明、在修改过的文件中标注改动，并在分发时附带上文列出的第三方声明。该许可同时提供明确的专利授权。

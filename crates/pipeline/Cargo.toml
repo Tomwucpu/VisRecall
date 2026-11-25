@@ -2,6 +2,7 @@
 name = "visrecall-pipeline"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 visrecall-domain = { path = "../domain" }

@@ -22,7 +22,10 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "license": "Apache-2.0",
+    "licenseFile": "../LICENSE",
     "resources": {
+      "../LICENSE": "LICENSE.txt",
       "../models/manifest.json": "models/manifest.json",
       "../models/bge-small-zh-v1.5-int8.onnx": "models/bge-small-zh-v1.5-int8.onnx",
       "../models/ch_PP-OCRv4_det_infer.onnx": "models/ch_PP-OCRv4_det_infer.onnx",
