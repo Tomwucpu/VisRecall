@@ -13,13 +13,33 @@
     "security": { "csp": null }
   },
   "bundle": {
-    "active": false,
+    "active": true,
+    "targets": ["nsis"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "resources": {
+      "../models/manifest.json": "models/manifest.json",
+      "../models/bge-small-zh-v1.5-int8.onnx": "models/bge-small-zh-v1.5-int8.onnx",
+      "../models/ch_PP-OCRv4_det_infer.onnx": "models/ch_PP-OCRv4_det_infer.onnx",
+      "../models/ch_PP-OCRv4_rec_infer.onnx": "models/ch_PP-OCRv4_rec_infer.onnx",
+      "../models/onnxruntime.dll": "models/onnxruntime.dll",
+      "../models/ppocr_keys_v1.txt": "models/ppocr_keys_v1.txt",
+      "../models/tokenizer.json": "models/tokenizer.json",
+      "../THIRD_PARTY_NOTICES.txt": "THIRD_PARTY_NOTICES.txt",
+      "installer/LICENSE-MIT-Tauri.txt": "LICENSE-MIT-Tauri-Installer.txt"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese"],
+        "template": "installer/installer.nsi"
+      },
+      "webviewInstallMode": { "type": "offlineInstaller" }
+    }
   }
 }
