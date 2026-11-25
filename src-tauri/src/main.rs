@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod import_ipc;
+mod installer_selection;
 mod ipc;
 mod protocol;
 mod tray;
@@ -11,6 +12,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use tauri::Manager;
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use visrecall_app_core::StartupMode;
 
 /// 进程启动时刻；用于记录「冷启动到托盘可用」耗时。
@@ -53,13 +55,43 @@ fn main() {
         .register_uri_scheme_protocol(protocol::SCHEME, protocol::handler)
         .invoke_handler(specta_builder.invoke_handler())
         .setup(|app| {
+            let paths = resolve_paths();
+            let executable = std::env::current_exe();
+            let install_dir = executable
+                .as_ref()
+                .ok()
+                .and_then(|path| path.parent())
+                .unwrap_or_else(|| std::path::Path::new(""));
+            match visrecall_app_core::AppCore::prepare_installer_library(
+                &paths,
+                install_dir,
+                installer_selection::read_pending,
+            ) {
+                Ok(true) => {
+                    if let Err(err) = installer_selection::clear_pending() {
+                        tracing::warn!(%err, "failed to clear installer library selection");
+                    }
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    // 保留待处理路径。退出前提示用户，避免后台设置保存覆盖安装选择。
+                    tracing::error!(%err, "failed to apply installer library selection");
+                    let handle = app.handle().clone();
+                    app.dialog()
+                        .message(format!("{err}\n\n请解决上述问题，然后重新启动 VisRecall。"))
+                        .title("无法初始化素材库")
+                        .kind(MessageDialogKind::Error)
+                        .show(move |_| handle.exit(1));
+                    return Ok(());
+                }
+            }
             let sink: Arc<dyn visrecall_app_core::EventSink> =
                 Arc::new(ipc::TauriEventSink::new(app.handle().clone()));
             let visibility: Arc<dyn visrecall_app_core::WindowVisibility> = Arc::new(
                 window_lifecycle::MainWindowVisibility::new(app.handle().clone()),
             );
             let core = visrecall_app_core::AppCore::open_with_visibility(
-                resolve_paths(),
+                paths,
                 sink,
                 visibility,
             );

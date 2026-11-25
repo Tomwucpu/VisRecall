@@ -9,6 +9,7 @@ pub mod directory_import;
 pub mod events;
 pub mod import_flow;
 pub mod import_service;
+mod installer_library;
 pub mod pipeline_host;
 pub mod search_flow;
 pub mod storage_flow;

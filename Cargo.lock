@@ -5732,6 +5732,7 @@ dependencies = [
  "visrecall-domain",
  "visrecall-library",
  "windows",
+ "winreg",
 ]
 
 [[package]]
@@ -5784,6 +5785,7 @@ dependencies = [
  "visrecall-search",
  "visrecall-shell",
  "webp",
+ "windows",
 ]
 
 [[package]]

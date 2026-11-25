@@ -193,6 +193,15 @@ struct CaptureRuntime {
 }
 
 impl AppCore {
+    /// 将安装时选择持久化到应用配置；返回是否可以清除注册表里的待处理值。
+    pub fn prepare_installer_library(
+        paths: &AppPaths,
+        install_dir: &Path,
+        pending_path: impl FnOnce() -> Result<Option<PathBuf>, AppError>,
+    ) -> Result<bool, AppError> {
+        crate::installer_library::prepare(paths, install_dir, pending_path)
+    }
+
     /// 加载配置 → 打开库 → 恢复遗留任务；不涉及真实窗口（测试/无 UI 路径）。
     ///
     /// - 配置缺失/损坏由 [`AppConfig::load_or_default`] 兜底为默认值。

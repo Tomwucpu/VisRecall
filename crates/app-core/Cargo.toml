@@ -27,9 +27,10 @@ time = { version = "0.3", features = ["local-offset"] }
 # 链接标题抓取：阻塞客户端 + rustls（关闭默认 aws-lc 后端，改用 ring，避免 C 工具链依赖）。
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tempfile = "3"
+windows = { version = "0.62.2", features = ["Win32_Storage_FileSystem", "Win32_System_WindowsProgramming"] }
 
 [dev-dependencies]
-tempfile = "3"
 # 与 `visrecall-library` 同一版本（不引入新 crate）：集成测试要另开一个持快照的
 # 只读连接，把 `wal_checkpoint(TRUNCATE)` 逼成 `busy != 0`。
 rusqlite = { version = "0.41.1", features = ["bundled"] }
