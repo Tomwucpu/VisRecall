@@ -79,7 +79,7 @@ pub fn environment() -> Result<&'static Environment, AppError> {
 ///
 /// 默认线程池按核数扩张时，ORT 会为每个线程保留 arena，实测 5 张截图后工作集从 52MB
 /// 涨到 271MB——远超托盘 150MB 硬上限。2 线程 + 关闭 memory pattern 后内存可控，
-/// 延迟仍在门禁内（见 `verification.md` §1）。
+/// 延迟仍在门禁内（见 `docs/architecture.md` §5.1）。
 pub fn session_builder() -> Result<SessionBuilder, AppError> {
     let env = environment()?;
     let builder = ort::session::Session::builder(env)

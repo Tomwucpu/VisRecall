@@ -11,7 +11,7 @@
 #   CER        = levenshtein_chars / len(ground_truth)
 #   accuracy   = 1 - CER  (clamped to [0,1])
 # The aggregate number is micro-averaged (total edits / total reference chars),
-# which is the口径 required by verification.md §1 (100-200 张字符准确率).
+# which is the micro-averaged character accuracy metric (target >= 97% on 100-200 screenshots).
 #
 # Exit code 0 = aggregate accuracy >= threshold, 1 otherwise (or on missing inputs).
 

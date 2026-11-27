@@ -1,4 +1,4 @@
-# VisRecall model manifest checker (design D3-04, tasks Phase 03 Task 1 Step 2).
+# VisRecall model manifest checker (verifies or regenerates models/manifest.json).
 #
 # Usage:
 #   scripts/models-check.ps1                # verify models/ against models/manifest.json

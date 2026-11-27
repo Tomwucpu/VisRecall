@@ -5,7 +5,7 @@
 //! ```
 //!
 //! 退出码：0 = 跑完（无论门禁是否通过）；1 = 参数/环境错误。
-//! 门禁结论写在报告里，并需要手工回填 `verification.md` §2 的 P3-R14 行。
+//! 门禁结论直接写入输出的 Markdown 报告与标准输出。
 
 use std::path::PathBuf;
 use std::process::ExitCode;
